@@ -1,0 +1,105 @@
+# CI for the RezStudio fork. Zed's own workflows are gated to zed-industries
+# runners and stay inert here.
+name: RezStudio CI
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Build an optimized bundle and DMG instead of a debug bundle"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are useless across CI runs and exhaust runner disks.
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  linux:
+    name: Lint and test (Linux)
+    if: github.repository == 'robicruzo/RezStudio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Install system dependencies
+        run: script/linux
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: ./script/clippy
+
+      - name: Test
+        run: >-
+          cargo test --locked
+          -p paths -p release_channel -p cli -p client -p settings -p settings_ui
+          -p title_bar -p file_finder -p git_ui -p workspace -p remote_server
+          -p zed
+
+  macos:
+    name: Build RezStudio.app (macOS arm64)
+    if: github.repository == 'robicruzo/RezStudio'
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      # Debuginfo doubles the target directory, which does not fit on the runner disk.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-${{ inputs.release && 'release' || 'debug' }}
+
+      - name: Type-check the visual test runner
+        run: cargo check --locked -p zed --features visual-tests --bin zed_visual_test_runner
+
+      - name: Bundle (debug)
+        if: ${{ !inputs.release }}
+        run: script/bundle-rezstudio -d
+
+      - name: Bundle (release)
+        if: ${{ inputs.release }}
+        run: script/bundle-rezstudio -m
+
+      - name: Archive bundle
+        run: |
+          app_path=$(find target/aarch64-apple-darwin -maxdepth 4 -name "RezStudio*.app" -type d | head -n 1)
+          ditto -c -k --keepParent "$app_path" RezStudio-macos-aarch64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RezStudio-macos-aarch64
+          path: |
+            RezStudio-macos-aarch64.zip
+            target/aarch64-apple-darwin/release/RezStudio-*.dmg
+          if-no-files-found: error
+          retention-days: 14
