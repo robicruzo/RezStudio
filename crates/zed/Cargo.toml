@@ -6,7 +6,7 @@ version = "1.27.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zed"
+default-run = "rezstudio"
 
 [lints]
 workspace = true
@@ -48,7 +48,7 @@ visual-tests = [
 ]
 
 [[bin]]
-name = "zed"
+name = "rezstudio"
 path = "src/main.rs"
 
 [[bin]]
@@ -138,7 +138,6 @@ migrator.workspace = true
 mimalloc = { version = "0.1", optional = true }
 miniprofiler_ui.workspace = true
 node_runtime.workspace = true
-notifications.workspace = true
 onboarding.workspace = true
 outline.workspace = true
 outline_panel.workspace = true
@@ -197,7 +196,6 @@ watch.workspace = true
 which_key.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
-zed_credentials_provider.workspace = true
 zed_env_vars.workspace = true
 zlog.workspace = true
 zlog_settings.workspace = true
@@ -250,39 +248,39 @@ repl = { workspace = true, features = ["test-support"] }
 
 [package.metadata.bundle-dev]
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
-identifier = "dev.zed.Zed-Dev"
-name = "Zed Dev"
+identifier = "io.github.robicruzo.RezStudio-Dev"
+name = "RezStudio Dev"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["rezstudio"]
 
 [package.metadata.bundle-nightly]
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
-identifier = "dev.zed.Zed-Nightly"
-name = "Zed Nightly"
+identifier = "io.github.robicruzo.RezStudio-Nightly"
+name = "RezStudio Nightly"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["rezstudio"]
 
 [package.metadata.bundle-preview]
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
-identifier = "dev.zed.Zed-Preview"
-name = "Zed Preview"
+identifier = "io.github.robicruzo.RezStudio-Preview"
+name = "RezStudio Preview"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["rezstudio"]
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-identifier = "dev.zed.Zed"
-name = "Zed"
+identifier = "io.github.robicruzo.RezStudio"
+name = "RezStudio"
 category = "Developer Tool"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["rezstudio"]
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

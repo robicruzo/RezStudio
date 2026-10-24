@@ -1,50 +1,29 @@
 > [!IMPORTANT]
 > Remove this line to confirm you've reviewed this PR before submitting.
-# Zed
+# RezStudio
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+RezStudio is a data-science IDE for macOS built on [Zed](https://github.com/zed-industries/zed): RStudio's workflow and panes (console, environment, plots, packages, help) with Zed's speed and editor.
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+R is the first-class language (including R Markdown and Quarto), followed by Python and Typst. RezStudio is a fork of Zed with the AI, collaboration, and zed.dev account features removed; see [`rezstudio/DESIGN.md`](./rezstudio/DESIGN.md) for the architecture and roadmap.
 
----
+> RezStudio is an independent project and is not affiliated with or endorsed by Zed Industries.
 
-### Installation
+### Building
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+RezStudio ships for macOS only. Follow Zed's [macOS build guide](./docs/src/development/macos.md) to install the toolchain, then:
 
-Other platforms are not yet available:
+```sh
+cargo run -p zed --bin rezstudio      # run a debug build
+script/bundle-rezstudio -d -o         # build and open a debug RezStudio.app
+script/bundle-rezstudio -m            # release RezStudio.app plus a .dmg
+```
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+The code also compiles on Linux so it can be checked and tested in CI, but Linux builds are not supported.
 
-### Developing Zed
-
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
-
-### Contributing
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
-
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+RezStudio keeps its settings in `~/.config/rezstudio` and its data in `~/Library/Application Support/RezStudio`, so it can run side by side with Zed.
 
 ### Licensing
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+RezStudio, like Zed, is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked. Zed is developed by Zed Industries, Inc.
 
-License information for third party dependencies must be correctly provided for CI to pass.
-
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
-
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
-
-## Sponsorship
-
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
-
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+License information for third party dependencies must be correctly provided. We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to comply with open source licenses; `script/generate-licenses` produces the bundled notices, configured by `script/licenses/zed-licenses.toml`.

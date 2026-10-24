@@ -295,9 +295,6 @@ enum ExtensionFilter {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 enum Feature {
-    AgentClaude,
-    AgentCodex,
-    AgentGemini,
     ExtensionBasedpyright,
     ExtensionRuff,
     ExtensionTailwind,
@@ -319,12 +316,6 @@ fn keywords_by_feature() -> &'static BTreeMap<Feature, Vec<&'static str>> {
     static KEYWORDS_BY_FEATURE: OnceLock<BTreeMap<Feature, Vec<&'static str>>> = OnceLock::new();
     KEYWORDS_BY_FEATURE.get_or_init(|| {
         BTreeMap::from_iter([
-            (
-                Feature::AgentClaude,
-                vec!["claude", "claude code", "claude agent"],
-            ),
-            (Feature::AgentCodex, vec!["codex", "codex cli"]),
-            (Feature::AgentGemini, vec!["gemini", "gemini cli"]),
             (
                 Feature::ExtensionBasedpyright,
                 vec!["basedpyright", "pyright"],
@@ -1192,44 +1183,26 @@ impl ExtensionsPage {
 
     fn render_feature_upsells(&self, cx: &Context<Self>) -> impl IntoElement {
         v_flex().children(self.upsells.iter().map(|feature| match feature {
-            Feature::AgentClaude => self.render_feature_upsell_banner(
-                "Claude Agent support is built-in to Zed!",
-                "https://zed.dev/docs/ai/external-agents#claude-agent",
-                false,
-                cx,
-            ),
-            Feature::AgentCodex => self.render_feature_upsell_banner(
-                "Codex CLI support is built-in to Zed!",
-                "https://zed.dev/docs/ai/external-agents#codex-cli",
-                false,
-                cx,
-            ),
-            Feature::AgentGemini => self.render_feature_upsell_banner(
-                "Gemini CLI support is built-in to Zed!",
-                "https://zed.dev/docs/ai/external-agents#gemini-cli",
-                false,
-                cx,
-            ),
             Feature::ExtensionBasedpyright => self.render_feature_upsell_banner(
-                "Basedpyright (Python language server) support is built-in to Zed!",
+                "Basedpyright (Python language server) support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/python#basedpyright",
                 false,
                 cx,
             ),
             Feature::ExtensionRuff => self.render_feature_upsell_banner(
-                "Ruff (linter for Python) support is built-in to Zed!",
+                "Ruff (linter for Python) support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/python#code-formatting--linting",
                 false,
                 cx,
             ),
             Feature::ExtensionTailwind => self.render_feature_upsell_banner(
-                "Tailwind CSS support is built-in to Zed!",
+                "Tailwind CSS support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/tailwindcss",
                 false,
                 cx,
             ),
             Feature::ExtensionTy => self.render_feature_upsell_banner(
-                "Ty (Python language server) support is built-in to Zed!",
+                "Ty (Python language server) support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/python",
                 false,
                 cx,
@@ -1241,49 +1214,49 @@ impl ExtensionsPage {
                 cx,
             ),
             Feature::LanguageBash => self.render_feature_upsell_banner(
-                "Shell support is built-in to Zed!",
+                "Shell support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/bash",
                 false,
                 cx,
             ),
             Feature::LanguageC => self.render_feature_upsell_banner(
-                "C support is built-in to Zed!",
+                "C support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/c",
                 false,
                 cx,
             ),
             Feature::LanguageCpp => self.render_feature_upsell_banner(
-                "C++ support is built-in to Zed!",
+                "C++ support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/cpp",
                 false,
                 cx,
             ),
             Feature::LanguageGo => self.render_feature_upsell_banner(
-                "Go support is built-in to Zed!",
+                "Go support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/go",
                 false,
                 cx,
             ),
             Feature::LanguagePython => self.render_feature_upsell_banner(
-                "Python support is built-in to Zed!",
+                "Python support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/python",
                 false,
                 cx,
             ),
             Feature::LanguageReact => self.render_feature_upsell_banner(
-                "React support is built-in to Zed!",
+                "React support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/typescript",
                 false,
                 cx,
             ),
             Feature::LanguageRust => self.render_feature_upsell_banner(
-                "Rust support is built-in to Zed!",
+                "Rust support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/rust",
                 false,
                 cx,
             ),
             Feature::LanguageTypescript => self.render_feature_upsell_banner(
-                "Typescript support is built-in to Zed!",
+                "Typescript support is built-in to RezStudio!",
                 "https://zed.dev/docs/languages/typescript",
                 false,
                 cx,
@@ -1295,7 +1268,7 @@ impl ExtensionsPage {
                 cx,
             ),
             Feature::Vim => self.render_feature_upsell_banner(
-                "Vim support is built-in to Zed!",
+                "Vim support is built-in to RezStudio!",
                 "https://zed.dev/docs/vim",
                 true,
                 cx,

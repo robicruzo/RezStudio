@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+
+# Builds RezStudio.app for macOS.
+#
+# Unlike script/bundle-mac (Zed's release pipeline), this does not notarize,
+# upload debug symbols, or embed provisioning profiles. The bundle is ad-hoc
+# signed so it runs on Apple Silicon; set MACOS_SIGNING_IDENTITY to sign with a
+# Developer ID certificate from your keychain instead.
+
+set -euo pipefail
+
+build_flag="--release"
+target_dir="release"
+make_dmg=false
+install_app=false
+open_app=false
+
+help_info() {
+  echo "
+Usage: ${0##*/} [options] [target-triple]
+Build RezStudio.app for macOS.
+
+Options:
+  -d    Build in debug mode (faster to compile, slower to run).
+  -m    Also create a .dmg next to the bundle (release builds only).
+  -i    Install the bundle into /Applications.
+  -o    Open the bundle when done.
+  -h    Display this help and exit.
+"
+}
+
+while getopts 'dmioh' flag; do
+    case "${flag}" in
+        d)
+            build_flag=""
+            target_dir="debug"
+            ;;
+        m) make_dmg=true ;;
+        i) install_app=true ;;
+        o) open_app=true ;;
+        h)
+            help_info
+            exit 0
+            ;;
+        *)
+            help_info
+            exit 1
+            ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+if [[ "$(uname)" != "Darwin" ]]; then
+    echo "RezStudio bundles can only be built on macOS."
+    exit 1
+fi
+
+channel=$(<crates/zed/RELEASE_CHANNEL)
+export ZED_RELEASE_CHANNEL="${channel}"
+export ZED_BUNDLE=true
+export CARGO_BUNDLE_SKIP_BUILD=true
+# Some macOS versions ship without libstdc++ headers.
+export CXXFLAGS="-stdlib=libc++"
+
+host_triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+target_triple="${1:-$host_triple}"
+case "$target_triple" in
+    aarch64-apple-darwin) arch_suffix="aarch64" ;;
+    x86_64-apple-darwin) arch_suffix="x86_64" ;;
+    *)
+        echo "Unsupported target $target_triple"
+        exit 1
+        ;;
+esac
+rustup target add "$target_triple"
+
+cargo_bundle_version=$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")
+if [[ "$cargo_bundle_version" != "cargo-bundle v0.6.1-zed" ]]; then
+    cargo install cargo-bundle --git https://github.com/zed-industries/cargo-bundle.git --branch zed-deploy
+fi
+
+if [[ "$target_dir" == "release" ]]; then
+    script/generate-licenses
+fi
+
+echo "Compiling RezStudio (${channel}, ${target_triple})"
+cargo --config .cargo/bundle-config.toml build ${build_flag} \
+    --package zed --bin rezstudio --package cli --target "$target_triple"
+
+echo "Creating application bundle"
+pushd crates/zed > /dev/null
+cp Cargo.toml Cargo.toml.backup
+trap 'mv crates/zed/Cargo.toml.backup crates/zed/Cargo.toml 2>/dev/null || true' EXIT
+sed -i.sedbackup "s/package.metadata.bundle-${channel}/package.metadata.bundle/" Cargo.toml
+rm -f Cargo.toml.sedbackup
+app_path=$(cargo bundle ${build_flag} --target "$target_triple" --select-workspace-root | xargs)
+mv Cargo.toml.backup Cargo.toml
+trap - EXIT
+popd > /dev/null
+
+# DocumentTypes.plist references CFBundleTypeIconFile "Document".
+cp crates/zed/resources/Document.icns "${app_path}/Contents/Resources/Document.icns"
+
+binary_dir="target/${target_triple}/${target_dir}"
+cp "${binary_dir}/rezstudio" "${app_path}/Contents/MacOS/rezstudio"
+cp "${binary_dir}/cli" "${app_path}/Contents/MacOS/cli"
+
+# Associated domains need a provisioning profile tied to a paid developer team.
+entitlements="${app_path}/Contents/Resources/rezstudio.entitlements"
+sed '/com.apple.developer.associated-domains/,+1d' crates/zed/resources/zed.entitlements > "$entitlements"
+signing_identity="${MACOS_SIGNING_IDENTITY:--}"
+codesign --force --sign "$signing_identity" "${app_path}/Contents/MacOS/cli"
+codesign --force --options runtime --entitlements "$entitlements" --sign "$signing_identity" "${app_path}/Contents/MacOS/rezstudio"
+codesign --force --options runtime --entitlements "$entitlements" --sign "$signing_identity" "$app_path"
+echo "Built ${app_path}"
+
+if [[ "$make_dmg" == true ]]; then
+    if [[ "$target_dir" != "release" ]]; then
+        echo "Skipping DMG for a debug build"
+    else
+        dmg_source="${binary_dir}/dmg"
+        dmg_path="${binary_dir}/RezStudio-${arch_suffix}.dmg"
+        rm -rf "$dmg_source"
+        mkdir -p "$dmg_source"
+        cp -R "$app_path" "$dmg_source/"
+        ln -s /Applications "$dmg_source/Applications"
+        hdiutil create -volname RezStudio -srcfolder "$dmg_source" -ov -format UDZO "$dmg_path"
+        rm -rf "$dmg_source"
+        echo "Built ${dmg_path}"
+    fi
+fi
+
+if [[ "$install_app" == true ]]; then
+    bundle_name=$(basename "$app_path")
+    rm -rf "/Applications/${bundle_name}"
+    cp -R "$app_path" "/Applications/${bundle_name}"
+    app_path="/Applications/${bundle_name}"
+    echo "Installed ${app_path}"
+fi
+
+if [[ "$open_app" == true ]]; then
+    open "$app_path"
+fi

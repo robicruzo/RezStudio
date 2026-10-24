@@ -39,6 +39,29 @@ merges stay tractable.
   identifier, app name, icons, default settings, onboarding.
 - **License**: Zed's editor crates are GPL-3.0-or-later, so RezStudio is GPL-3.0-or-later.
 
+### What M0 actually did
+
+- Deleted ~70 crates (agents, LLM providers, Copilot, edit prediction providers, collab, calls,
+  channels, livekit, audio, feedback). `Cargo.lock` lost 336 packages, including WebRTC.
+- Kept two AI-adjacent pieces on purpose, because removing them would mean permanent conflicts in
+  Zed's busiest crates: `edit_prediction_types` (a provider-less interface `editor` depends on;
+  nothing implements it) and the agent settings schema in `settings_content` (read by `project`).
+  `disable_ai` defaults to `true`, which hides any leftover affordance gated on it.
+- `client` is inert rather than deleted: no sign-in UI, no LLM tokens, and `TelemetrySettings`
+  forces metrics and diagnostics off. `ReleaseChannel::poll_for_updates` returns `false`, since
+  Zed's update server would offer to replace RezStudio with Zed.
+- Identity: app name `RezStudio`, binary `rezstudio`, bundle id `io.github.robicruzo.RezStudio`
+  (`-Dev`, `-Preview`, `-Nightly` per channel), URL scheme `rezstudio://`, CLI `rezstudio`.
+  Config lives in `~/.config/rezstudio`, data in `~/Library/Application Support/RezStudio`, the
+  single-instance port range and SSH server directory differ from Zed's, so both apps coexist.
+- Project-local settings still live in `.zed/`, so projects shared with Zed users keep working.
+- The internal version stays at Zed's (`1.27.0`) because the extension registry uses it to pick
+  compatible extensions.
+- `script/bundle-rezstudio` builds an ad-hoc-signed `RezStudio.app` (optionally a DMG);
+  `.github/workflows/rezstudio.yml` runs fmt, clippy and tests on Linux and builds the app on a
+  macOS arm64 runner.
+- Placeholder icon and logo; final artwork is still open.
+
 ## Architecture
 
 ```
