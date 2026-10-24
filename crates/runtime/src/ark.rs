@@ -55,6 +55,9 @@ pub struct ArkLaunch<'a> {
     pub r_home: &'a Path,
     pub working_directory: &'a Path,
     pub env: HashMap<String, String>,
+    /// Where Ark writes its own log. Without one Ark logs to stderr, which
+    /// it captures into the console along with R's output.
+    pub log_file: Option<PathBuf>,
 }
 
 /// A running Ark process. Dropping it kills the process.
@@ -120,7 +123,11 @@ pub async fn launch_ark(launch: ArkLaunch<'_>) -> Result<(ArkProcess, ArkConnect
     command
         .arg("--connection_file")
         .arg(&connection_path)
-        .args(["--session-mode", "console"])
+        .args(["--session-mode", "console"]);
+    if let Some(log_file) = &launch.log_file {
+        command.arg("--log").arg(log_file);
+    }
+    command
         .current_dir(launch.working_directory)
         .env_clear()
         .envs(launch.env)
@@ -207,6 +214,34 @@ fn supervised_command(program: &Path, connection_path: &Path) -> std::process::C
     command
 }
 
+const KEPT_ARK_LOGS: usize = 5;
+
+/// Returns a new log file path for an Ark session in `logs_dir`, removing all
+/// but the most recent earlier ones.
+pub fn next_log_file(logs_dir: &Path) -> Result<PathBuf> {
+    std::fs::create_dir_all(logs_dir)
+        .with_context(|| format!("creating {}", logs_dir.display()))?;
+    let mut existing: Vec<PathBuf> = std::fs::read_dir(logs_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("ark-") && name.ends_with(".log"))
+        })
+        .collect();
+    // Names start with a sortable timestamp, so the oldest sort first.
+    existing.sort();
+    let excess = (existing.len() + 1).saturating_sub(KEPT_ARK_LOGS);
+    for old in existing.iter().take(excess) {
+        std::fs::remove_file(old).log_err();
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    Ok(logs_dir.join(format!("ark-{timestamp}-{}.log", std::process::id())))
+}
+
 fn forward_output_to_log(process: &mut util::process::Child) {
     let stdout = process.stdout.take();
     let stderr = process.stderr.take();
@@ -263,6 +298,39 @@ mod supervisor_tests {
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn test_next_log_file_keeps_recent_logs() {
+        let temp = tempfile::tempdir().unwrap();
+        for timestamp in 1..=7 {
+            std::fs::write(temp.path().join(format!("ark-{timestamp:04}-1.log")), "").unwrap();
+        }
+        std::fs::write(temp.path().join("unrelated.txt"), "").unwrap();
+
+        let next = next_log_file(temp.path()).unwrap();
+        assert!(
+            next.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("ark-")
+        );
+        let mut remaining: Vec<String> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        remaining.sort();
+        assert_eq!(
+            remaining,
+            [
+                "ark-0004-1.log",
+                "ark-0005-1.log",
+                "ark-0006-1.log",
+                "ark-0007-1.log",
+                "unrelated.txt"
+            ]
+        );
     }
 
     #[test]
@@ -616,6 +684,7 @@ mod integration_tests {
                 r_home: &r_home(),
                 working_directory: working_directory.path(),
                 env,
+                log_file: Some(working_directory.path().join("ark.log")),
             })
             .await
             .unwrap();

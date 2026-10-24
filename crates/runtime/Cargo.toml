@@ -26,6 +26,7 @@ language.workspace = true
 languages.workspace = true
 log.workspace = true
 lsp.workspace = true
+paths.workspace = true
 project.workspace = true
 runtimelib.workspace = true
 serde.workspace = true

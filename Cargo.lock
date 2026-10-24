@@ -11866,6 +11866,7 @@ dependencies = [
  "languages",
  "log",
  "lsp",
+ "paths",
  "pretty_assertions",
  "project",
  "runtimelib",

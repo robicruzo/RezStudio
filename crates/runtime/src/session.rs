@@ -230,11 +230,16 @@ impl RSession {
                     r.version.as_deref().unwrap_or("(unknown version)"),
                     r.r_home.display()
                 );
+                let log_file = ark::next_log_file(&paths::logs_dir().join("ark")).log_err();
+                if let Some(log_file) = &log_file {
+                    log::info!("Ark logs to {}", log_file.display());
+                }
                 ark::launch_ark(ArkLaunch {
                     ark: &ark,
                     r_home: &r.r_home,
                     working_directory: &working_directory,
                     env,
+                    log_file,
                 })
                 .await
             }
