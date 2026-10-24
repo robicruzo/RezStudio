@@ -507,6 +507,93 @@ mod integration_tests {
         }
     }
 
+    /// Talks to Ark's language server the way a plain LSP client does and
+    /// returns the completion labels offered at `line`/`character` in `text`.
+    fn lsp_completion_labels(port: u16, text: &str, line: u32, character: u32) -> Vec<String> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpStream;
+
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let mut writer = stream.try_clone().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut send = |message: serde_json::Value| {
+            let body = message.to_string();
+            write!(writer, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            writer.flush().unwrap();
+        };
+        let receive = |reader: &mut BufReader<TcpStream>| -> serde_json::Value {
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                let header = header.trim();
+                if header.is_empty() {
+                    break;
+                }
+                if let Some(value) = header.strip_prefix("Content-Length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            serde_json::from_slice(&body).unwrap()
+        };
+        let uri = "file:///tmp/rezstudio-lsp-test.R";
+
+        send(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "processId": null, "rootUri": null, "capabilities": {} }
+        }));
+        let mut pending_id = 1;
+        let completion = loop {
+            let message = receive(&mut reader);
+            // Answer requests from the server so it never waits on us.
+            if let (Some(id), Some(method)) = (message.get("id"), message.get("method")) {
+                let result = if method == "workspace/configuration" {
+                    let count = message["params"]["items"].as_array().map_or(0, Vec::len);
+                    serde_json::Value::Array(vec![serde_json::Value::Null; count])
+                } else {
+                    serde_json::Value::Null
+                };
+                send(serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+                continue;
+            }
+            if message.get("id") != Some(&serde_json::json!(pending_id)) {
+                continue;
+            }
+            if pending_id == 1 {
+                send(
+                    serde_json::json!({ "jsonrpc": "2.0", "method": "initialized", "params": {} }),
+                );
+                send(serde_json::json!({
+                    "jsonrpc": "2.0", "method": "textDocument/didOpen",
+                    "params": { "textDocument": { "uri": uri, "languageId": "r", "version": 1, "text": text } }
+                }));
+                pending_id = 2;
+                send(serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+                    "params": { "textDocument": { "uri": uri }, "position": { "line": line, "character": character } }
+                }));
+            } else {
+                break message["result"].clone();
+            }
+        };
+        let items = completion
+            .get("items")
+            .cloned()
+            .unwrap_or(completion)
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        items
+            .iter()
+            .filter_map(|item| item["label"].as_str().map(str::to_string))
+            .collect()
+    }
+
     #[test]
     #[ignore = "needs R and Ark"]
     fn test_real_ark_session() {
@@ -572,7 +659,14 @@ mod integration_tests {
             let LspCommMessage::ServerStarted { port } = data_object(&messages.last().unwrap().1)
                 .and_then(|data| serde_json::from_value(data).ok())
                 .unwrap();
-            assert!(port > 0);
+            let completions =
+                std::thread::spawn(move || lsp_completion_labels(port, "x <- 1\nme", 1, 2))
+                    .join()
+                    .unwrap();
+            assert!(
+                completions.iter().any(|label| label == "mean"),
+                "{completions:?}"
+            );
 
             let (_, messages) = kernel.execute("x <- 1 + 1\ncat(x, '\\n')").await;
             assert_eq!(execute_reply_status(&messages), ReplyStatus::Ok);

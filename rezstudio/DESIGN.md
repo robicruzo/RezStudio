@@ -164,16 +164,19 @@ Steps:
    Linux, `PATH`, `R_HOME`) are Zed toolchains for the R language (`languages/src/r.rs`), so the
    status bar's toolchain picker chooses R per project and remembers it; the default is the `R`
    on `PATH`. Ark is found through `REZSTUDIO_ARK`, the app bundle, `PATH`, then (debug builds
-   only) Positron's copy. One `RSession` per window starts when its first local folder opens and
-   stops gracefully when the window closes. Ark runs under a small shell supervisor that stops it
+   only) Positron's copy. One `RSession` per window starts when its first local folder opens, once
+   that folder is trusted (R runs the project's `.Rprofile`, so it waits for Zed's Restricted
+   Mode like language servers do), and stops gracefully when the window closes. Ark runs under a small shell supervisor that stops it
    if RezStudio dies, since Ark doesn't watch its parent. An execution is finished only once both
    its `execute_reply` (shell) and iopub `idle` have arrived, because output can trail the reply.
    Ark's `rpc_request`s on stdin are always answered: questions and dialogs use native prompts,
    the workspace folder is the project root, and unsupported ones return a JSON-RPC error. Links
    (including help) open in the system browser until M6; `positron.plot` comms are dropped until
    M3. Comm types are ported from Ark 0.1.252's MIT-licensed generated Rust.
-3. **LSP bridge.** A hidden `rezstudio --lsp-bridge <port>` mode pipes stdio to Ark's LSP TCP port;
-   an R `LspAdapter` launches it once the session reports its port.
+3. **LSP bridge.** *(Done.)* The hidden `rezstudio --lsp-bridge <port>` mode copies stdio to Ark's
+   LSP TCP port, like Zed's `--askpass` netcat mode. The `ark` language server adapter (registered
+   by `runtime` for R) waits for the window's session to report its port, then launches the
+   bridge; when R restarts on a new port, `ark` is restarted for the project's open buffers.
 4. **`console`.** A bottom-dock panel. Scrollback is a virtualised list of echoed input, ANSI
    stream text, errors with tracebacks and rich outputs (`repl::outputs`, made public). Input is
    an auto-height R editor: Enter sends when Ark's `is_complete_request` says the code is

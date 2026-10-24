@@ -30,6 +30,9 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(3);
 pub enum SessionState {
     /// No usable R or Ark; the message says what is missing.
     Unavailable(String),
+    /// The project folder isn't trusted yet. R runs the project's `.Rprofile`
+    /// on startup, so it waits for trust like language servers do.
+    Restricted,
     Starting,
     Idle,
     /// At least one execution is in flight.
@@ -112,6 +115,7 @@ pub struct RSession {
     /// Socket readers and writers; dropping them disconnects from Ark.
     _io_tasks: Vec<Task<()>>,
     _quit_subscription: Subscription,
+    _trust_subscription: Option<Subscription>,
 }
 
 impl EventEmitter<SessionEvent> for RSession {}
@@ -156,11 +160,16 @@ impl RSession {
             _exit_task: None,
             _io_tasks: Vec::new(),
             _quit_subscription: cx.on_app_quit(Self::shut_down_on_quit),
+            _trust_subscription: None,
         }
     }
 
     pub fn state(&self) -> &SessionState {
         &self.state
+    }
+
+    pub fn project_root(&self) -> &PathBuf {
+        &self.project_root
     }
 
     pub fn r_installation(&self) -> Option<&RToolchainData> {
@@ -183,11 +192,22 @@ impl RSession {
         self.pending_input_request.is_some()
     }
 
+    /// Holds off starting R until the project is trusted; `subscription`
+    /// watches for that and calls [`Self::start`].
+    pub fn wait_for_trust(&mut self, subscription: Subscription, cx: &mut Context<Self>) {
+        if self.r.is_none() {
+            return;
+        }
+        self._trust_subscription = Some(subscription);
+        self.set_state(SessionState::Restricted, cx);
+    }
+
     /// Launches Ark. Does nothing when no R installation is available.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(r) = self.r.clone() else {
             return;
         };
+        self._trust_subscription = None;
         self.generation += 1;
         let generation = self.generation;
         let bundled_ark = self.bundled_ark.clone();

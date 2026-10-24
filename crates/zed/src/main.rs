@@ -214,6 +214,15 @@ fn main() {
         return;
     }
 
+    // `rezstudio --lsp-bridge <port>` connects stdio to Ark's language server
+    if let Some(port) = args.lsp_bridge {
+        if let Err(error) = runtime::run_lsp_bridge(port) {
+            eprintln!("{error:#}");
+            process::exit(1);
+        }
+        return;
+    }
+
     // `zed --crash-handler` Makes zed operate in minidump crash handler mode
     if let Some(socket) = &args.crash_handler {
         crashes::crash_server(socket.as_path(), paths::logs_dir().clone());
@@ -673,7 +682,7 @@ fn main() {
         snippet_provider::init(cx);
 
         repl::init(app_state.fs.clone(), cx);
-        runtime::init(cx);
+        runtime::init(app_state.languages.clone(), cx);
         recent_projects::init(cx);
         dev_container::init(cx);
 
@@ -1608,6 +1617,11 @@ struct Args {
     #[cfg(not(target_os = "windows"))]
     #[arg(hide = true)]
     askpass: Option<String>,
+
+    /// Used by Ark's language server adapter: copies stdio to and from the
+    /// language server R listens on at this port.
+    #[arg(long, hide = true)]
+    lsp_bridge: Option<u16>,
 
     #[arg(long, hide = true)]
     dump_all_actions: bool,

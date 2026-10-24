@@ -17,6 +17,7 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 collections.workspace = true
 futures.workspace = true
 gpui.workspace = true
@@ -24,6 +25,7 @@ jupyter-protocol.workspace = true
 language.workspace = true
 languages.workspace = true
 log.workspace = true
+lsp.workspace = true
 project.workspace = true
 runtimelib.workspace = true
 serde.workspace = true

@@ -3,30 +3,39 @@
 
 mod ark;
 mod comms;
+mod lsp;
 mod session;
 
 pub use comms::{ARK_VERSION, PromptStateParams};
+pub use lsp::{ARK_LANGUAGE_SERVER_NAME, LSP_BRIDGE_FLAG, run_lsp_bridge};
 pub use session::{RSession, SessionEvent, SessionState};
 
-use collections::HashMap;
-use gpui::{App, AppContext as _, Entity, EntityId, Global, Window};
-use language::LanguageName;
+use ::lsp::LanguageServerSelector;
+use collections::{HashMap, HashSet};
+use gpui::{App, AppContext as _, Entity, EntityId, Global, WeakEntity, Window};
+use language::{LanguageName, LanguageRegistry};
 use languages::r::{R_LANGUAGE_NAME, RToolchainData};
+use project::trusted_worktrees::{PathTrust, TrustedWorktrees, TrustedWorktreesEvent};
 use project::{Project, ProjectPath, WorktreeId};
 use std::sync::Arc;
+use util::ResultExt as _;
 use util::rel_path::RelPath;
 use workspace::Workspace;
 
 /// The R session of each open workspace, keyed by the workspace's entity id.
 #[derive(Default)]
-struct RSessions(HashMap<EntityId, Entity<RSession>>);
+pub(crate) struct RSessions(pub(crate) HashMap<EntityId, Entity<RSession>>);
 
 impl Global for RSessions {}
 
 /// Must run after `repl::init`, which connects the ZeroMQ sockets Ark uses to
 /// GPUI's executor.
-pub fn init(cx: &mut App) {
+pub fn init(languages: Arc<LanguageRegistry>, cx: &mut App) {
     cx.set_global(RSessions::default());
+    languages.register_lsp_adapter(
+        LanguageName::new_static(R_LANGUAGE_NAME),
+        Arc::new(lsp::ArkLspAdapter),
+    );
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;
@@ -128,10 +137,82 @@ fn start_session(
                     return;
                 }
                 let session = cx.new(|cx| RSession::new(r, project_root, env, bundled_ark, cx));
-                session.update(cx, |session, cx| session.start(window, cx));
+                restart_language_server_on_new_port(&session, project.downgrade(), cx);
+                start_when_trusted(&session, &project, worktree_id, window, cx);
                 cx.global_mut::<RSessions>().0.insert(workspace_id, session);
             })
             .ok();
         })
         .detach();
+}
+
+/// A restarted R listens on a new port, and the bridge to the old one has
+/// exited, so restart Ark's language server for the project's open buffers.
+fn restart_language_server_on_new_port(
+    session: &Entity<RSession>,
+    project: WeakEntity<Project>,
+    cx: &mut App,
+) {
+    let mut first_port = true;
+    cx.subscribe(session, move |_, event, cx| {
+        let SessionEvent::LanguageServerStarted { .. } = event else {
+            return;
+        };
+        if std::mem::replace(&mut first_port, false) {
+            return;
+        }
+        project
+            .update(cx, |project, cx| {
+                let buffers = project.opened_buffers(cx);
+                project.restart_language_servers_for_buffers(
+                    buffers,
+                    HashSet::from_iter([LanguageServerSelector::Name(ARK_LANGUAGE_SERVER_NAME)]),
+                    cx,
+                );
+            })
+            .log_err();
+    })
+    .detach();
+}
+
+/// Starts R now if the worktree is trusted, otherwise once it becomes trusted.
+fn start_when_trusted(
+    session: &Entity<RSession>,
+    project: &Entity<Project>,
+    worktree_id: WorktreeId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) else {
+        session.update(cx, |session, cx| session.start(window, cx));
+        return;
+    };
+    let worktree_store = project.read(cx).worktree_store();
+    let trusted = trusted_worktrees.update(cx, |trusted_worktrees, cx| {
+        trusted_worktrees.can_trust(&worktree_store, worktree_id, cx)
+    });
+    if trusted {
+        session.update(cx, |session, cx| session.start(window, cx));
+        return;
+    }
+
+    let window_handle = window.window_handle();
+    let weak_session = session.downgrade();
+    let subscription = cx.subscribe(&trusted_worktrees, move |_, event, cx| {
+        let TrustedWorktreesEvent::Trusted(_, trusted_paths) = event else {
+            return;
+        };
+        if !trusted_paths.contains(&PathTrust::Worktree(worktree_id)) {
+            return;
+        }
+        let Some(session) = weak_session.upgrade() else {
+            return;
+        };
+        window_handle
+            .update(cx, |_, window, cx| {
+                session.update(cx, |session, cx| session.start(window, cx));
+            })
+            .log_err();
+    });
+    session.update(cx, |session, cx| session.wait_for_trust(subscription, cx));
 }

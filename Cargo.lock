@@ -11832,6 +11832,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-dispatcher",
+ "async-trait",
  "collections",
  "futures 0.3.34",
  "gpui",
@@ -11839,6 +11840,7 @@ dependencies = [
  "language",
  "languages",
  "log",
+ "lsp",
  "pretty_assertions",
  "project",
  "runtimelib",
