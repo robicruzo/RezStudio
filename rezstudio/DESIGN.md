@@ -1,0 +1,135 @@
+# RezStudio — Design
+
+RezStudio is a data-science IDE built on Zed: RStudio's workflow and panes, Zed's speed and editor.
+Relationship to Zed is analogous to Positron's relationship to VS Code, but without Positron's
+extension-host architecture — every pane is native GPUI, written in Rust.
+
+## Decisions (agreed)
+
+| Topic | Decision |
+|---|---|
+| Platform | macOS only for shipped builds. Code keeps compiling on Linux so development/CI can run there; macOS-only features are behind `cfg(target_os = "macos")`. |
+| Languages | **R** (first class, incl. R Markdown and Quarto), **Python** (first class, second to R), **Typst**, and Quarto/Markdown documents. |
+| R backend | **Ark** (posit-dev/ark, MIT): Jupyter kernel + LSP + DAP, plus Jupyter *comms* for variables, plots, data paging, help and UI events. |
+| Python backend | `ipykernel` plus our own small add-on package that speaks the same comm protocol as Ark. (Positron's Python kernel is Elastic-licensed, so it is not reused.) |
+| HTML content | Embedded **WKWebView** for the Viewer (htmlwidgets, Shiny, Quarto preview) and R help pages. Linux dev builds fall back to the system browser. |
+| Typst | Tinymist LSP for editing; Typst compiler embedded as a library for a **native live preview** pane. |
+| Fork style | Middle ground: delete AI, collab/calls and zed.dev cloud features; keep extensions and everything else close to upstream so we can keep merging Zed. |
+| AI | Removed entirely. |
+| MVP | Console + run-from-editor, Environment + data viewer, Plots, Packages (+ search), Rmd/Quarto inline chunks. |
+
+## Fork surgery
+
+Coupling was measured with `Cargo.toml` dependents. Crates nothing core depends on are deleted;
+crates threaded through `editor`/`project`/`workspace` are reduced to no-op stubs so upstream
+merges stay tractable.
+
+- **Delete** (leaf or near-leaf): `agent*`, `acp_*`, `ai_onboarding`, `language_model*`,
+  `language_models*`, every LLM provider crate (`anthropic`, `open_ai`, `google_ai`, `bedrock`,
+  `ollama`, `lmstudio`, `mistral`, `deepseek`, `x_ai*`, `open_router`, `opencode`, `llama_cpp`,
+  `codestral`, `openai_subscribed`), `copilot*`, `edit_prediction*`, `zeta_prompt`, `web_search*`,
+  `prompt_store`, `collab`, `collab_ui`, `call`, `channel`, `livekit_*`, `cloud_llm_client`,
+  `language_models_cloud`, `feedback`, eval/benchmark crates for removed features.
+  `language_model` alone has 24 dependents (e.g. git commit-message generation), so each call site
+  is removed, not stubbed.
+- **Stub** (deeply wired): `client` (39 dependents) keeps its API surface but no sign-in, no
+  zed.dev RPC. `telemetry` (34 dependents) becomes a no-op. The extension registry stays reachable
+  (it is a public HTTP API), so extensions keep working.
+- **Repoint / disable**: `auto_update` (off until we have our own update feed), branding, bundle
+  identifier, app name, icons, default settings, onboarding.
+- **License**: Zed's editor crates are GPL-3.0-or-later, so RezStudio is GPL-3.0-or-later.
+
+## Architecture
+
+```
+┌──────────────────────────────────── RezStudio (GPUI) ───────────────────────────────────┐
+│ Source editor        │ Console               │ Environment · History                    │
+│ .R .py .Rmd .qmd .typ│ (per runtime)         │ Plots · Packages · Help · Viewer · Files │
+├──────────────────────┴───────────┬───────────┴──────────────────────────────────────────┤
+│ runtime: discovers interpreters, launches/supervises kernels, owns one session per      │
+│ language per project, routes execute requests, and multiplexes comms to panes           │
+├──────────────────────────────────┴──────────────────────────────────────────────────────┤
+│ Jupyter protocol (runtimelib / jupyter-protocol, already in tree, comm messages supported)│
+├─────────────────────────────────────────────────────────────────────────────────────────┤
+│ Ark (R)            │ ipykernel + rezstudio add-on (Python) │ tinymist + embedded typst  │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Panes never talk to a kernel directly. They subscribe to a `RuntimeSession` entity and its
+typed comm channels. Because Python implements the same comms as Ark, every pane works for both
+languages without language-specific code paths beyond formatting.
+
+### New crates
+
+| Crate | Responsibility |
+|---|---|
+| `runtime` | Interpreter discovery (R: rig, Homebrew, CRAN `R.framework`, `renv`; Python: uv, venv, conda, pyenv — reusing Zed's `toolchain` crate), kernel launch and supervision, busy/idle state, interrupt/restart, a typed client for each comm (variables, plot, data explorer, help, UI), and the active-session-per-language registry. Builds on the libraries Zed's existing `repl` crate uses and reuses `repl::outputs` renderers. |
+| `console` | The console pane: an editor-backed input (completions, multi-line, syntax highlighting) over a virtualised scrollback of rich outputs (text, errors with tracebacks, images, tables, HTML). Handles history search, Esc to interrupt, prompt/continuation state, and `readline()`/`input()` requests. One tab per running session. |
+| `variables_panel` | Environment pane: live object tree (name, type, size, value preview), lazy expansion for lists, environments, S4/R6 and Python objects; filters; clear/remove; click a data frame to open the data viewer. |
+| `data_explorer` | `View()` / data-frame grid. Pages rows from the kernel on demand (never ships the whole frame), sorts and filters on the kernel side, shows column profiles (type, NA count, histogram). Reuses rendering from `tabular_data_preview`; the same grid also opens CSV/Parquet files directly. |
+| `plots_panel` | Plot history with thumbnails; the kernel re-renders at the pane's exact pixel size and scale on resize; zoom window; export PNG/SVG/PDF; copy to clipboard. |
+| `packages_panel` | Installed and loaded packages with versions, attach/detach, install/update/remove (runs in the console so output is visible), `renv` awareness. **Search** covers CRAN, Bioconductor and R-universe through a locally cached index refreshed in the background, so fuzzy search is instant and works offline. Python: the same pane over pip/uv metadata. |
+| `help_panel` | `?topic` and help search; back/forward history; F1 on a symbol. Renders Ark's help server pages in the web view. |
+| `web_view` | macOS: WKWebView hosted as a child view of the GPUI window, positioned to a pane's bounds. Used by the Viewer (htmlwidgets, Shiny, Quarto preview) and Help. Linux: opens the system browser. |
+| `notebook_chunks` | Rmd/Qmd chunk detection and execution: run chunk, run all above, chunk gutter controls, and inline output blocks rendered under each chunk (same output renderers as the console). Output is kept with the session, not written into the source. |
+| `typst_preview` | Embeds the `typst` compiler: incremental recompiles on edit, renders only visible pages natively, and jumps both ways between source and preview. Version-pinned to match the bundled tinymist. |
+
+### Changes to existing crates (kept small for mergeability)
+
+- `languages`: built-in R, Quarto/R Markdown (markdown with code-chunk injections) and Typst
+  grammars, so first-class languages don't depend on an external extension. Python is already
+  built in.
+- `workspace` / `zed`: default four-quadrant layout (source top-left, console bottom-left,
+  environment/history top-right, files/plots/packages/help/viewer bottom-right), using Zed's docks.
+- `assets/keymaps`: RStudio-style default keymap (Cmd+Enter, Cmd+Shift+Enter, Cmd+Shift+S,
+  Cmd+Shift+M for the pipe, Opt+- for `<-`, Cmd+Opt+I for a new chunk, Ctrl+1/2 to focus the
+  source or console). Zed's keymap remains available as an alternative.
+- `repl`: existing inline-REPL entry points are hidden/replaced by `console` + `notebook_chunks`;
+  only its output renderers are reused.
+
+### Projects
+
+`.Rproj` files open as projects (their settings map onto ours). Per-project interpreter choice
+lives in `.zed/settings.json`. `renv` and Python virtual environments are detected automatically.
+Working directory is the project root, as in RStudio.
+
+### Compatibility
+
+Ark implements much of `rstudioapi` (for example `getActiveDocumentContext`, `insertText`,
+`navigateToFile`) by sending UI comm requests to the frontend. RezStudio answers those requests so
+packages and addins that call `rstudioapi` keep working.
+
+## Milestones
+
+| # | Goal | Done when |
+|---|---|---|
+| M0 | Fork surgery and rebrand | AI/collab/cloud crates gone, `client`/`telemetry` stubbed, app renamed, builds green on Linux CI and macOS CI. |
+| M1 | `runtime` + `console` for R | Ark bundled; R discovered; Cmd+Enter / Cmd+Shift+S run code; interrupt and restart work; rich output in the console. |
+| M2 | Environment + data viewer | Live variables; `View(df)` opens the paged grid on a 10M-row frame without lag. |
+| M3 | Plots | Plot history, resize re-render, export. |
+| M4 | Packages + search | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
+| M5 | Rmd/Quarto inline chunks | Chunk execution with inline output. |
+| M6 | Help + Viewer | WKWebView embedded; help, htmlwidgets, Shiny. |
+| M7 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
+| M8 | Typst native preview | Live preview with source ↔ preview jumping. |
+| M9 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
+
+## Risks
+
+- **Ark's comm protocol is Positron-driven and may change.** Mitigation: bundle a pinned Ark
+  release, port comm types from Ark's own MIT-licensed Rust definitions (not Positron's
+  Elastic-licensed sources), and add contract tests per comm.
+- **WKWebView inside GPUI.** A native child view draws above GPUI's Metal layer, so GPUI popovers
+  and menus cannot overlap it. Mitigation: confine web views to their own panes and hide or
+  snapshot them while overlays are open.
+- **Development happens on Linux; shipped builds are macOS only.** macOS-only code must be thin
+  and covered by macOS CI.
+- **Upstream drift.** Mitigation: keep R features in new crates, make small edits to Zed crates,
+  and merge upstream on a regular cadence.
+
+## Open questions (not blocking M0)
+
+- Final app name, bundle identifier and icon.
+- Distribution: signing/notarization requires an Apple Developer account; the update feed
+  (e.g. Sparkle or a fork of Zed's updater) is undecided.
+- Ark: bundle it in the app (recommended, version-pinned) or download it on first run.
