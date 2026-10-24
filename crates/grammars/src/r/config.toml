@@ -1,0 +1,21 @@
+name = "R"
+code_fence_block_name = "r"
+grammar = "r"
+path_suffixes = ["R", "r", "Rprofile", "Rhistory"]
+modeline_aliases = ["r"]
+first_line_pattern = '^#!.*\bRscript\b'
+line_comments = ["# ", "#' "]
+autoclose_before = ";:.,=}])>"
+# RStudio and the tidyverse style guide both indent R with two spaces.
+tab_size = 2
+# R identifiers commonly contain dots, as in `is.na` or `data.frame`.
+word_characters = ["."]
+completion_query_characters = ["."]
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = false },
+    { start = "(", end = ")", close = true, newline = true },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string", "comment"] },
+    { start = "'", end = "'", close = true, newline = false, not_in = ["string", "comment"] },
+    { start = "`", end = "`", close = true, newline = false, not_in = ["string", "comment"] },
+]
