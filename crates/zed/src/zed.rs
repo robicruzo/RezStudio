@@ -5839,6 +5839,7 @@ mod tests {
                 "project_search",
                 "project_symbols",
                 "projects",
+                "r_console",
                 "recent_projects",
                 "remote_debug",
                 "repl",
