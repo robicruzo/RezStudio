@@ -177,7 +177,7 @@ Steps:
    LSP TCP port, like Zed's `--askpass` netcat mode. The `ark` language server adapter (registered
    by `runtime` for R) waits for the window's session to report its port, then launches the
    bridge; when R restarts on a new port, `ark` is restarted for the project's open buffers.
-4. **`r_console`.** *(Done, except console completions.)* The crate is `r_console` because the
+4. **`r_console`.** *(Done.)* The crate is `r_console` because the
    workspace already depends on the external `console` crate and the debugger uses the
    `console::` action namespace. A bottom-dock panel, open by default next to the terminal like
    RStudio's Console/Terminal tabs. Scrollback is one display-only terminal (Zed's
@@ -189,8 +189,15 @@ Steps:
    browse history at the first/last line; Esc interrupts when busy and otherwise clears; Ctrl+L
    clears; `readline()`/`menu()` prompts take over the input row. Errors and stderr are red,
    echoed input blue. The header shows the R version, working directory, a busy spinner and
-   interrupt/clear/restart buttons. Still to do: completions in the console input (the input
-   isn't a project file, so Ark's LSP needs a virtual document for it).
+   interrupt/clear/restart buttons. Completions in the input come from the project's `ark`
+   language server through Zed's existing connection (Ark serves one client): the input is a
+   document that exists only in the server, opened on first use and updated before each
+   request with ever-increasing versions (Ark panics on a version that goes backwards).
+   Completions are only requested while R is idle, with a 2 s timeout, because Ark computes
+   them on R's thread and a request during a long computation would stall its whole language
+   server. Ark's snippet items (`mean($0)`) insert with the cursor inside the parentheses, and
+   help is fetched with `completionItem/resolve`. Tab opens completions; the console's Enter,
+   arrow and Escape bindings step aside while the completion menu is open.
 5. **Run from editor.** *(Done.)* In `.R`/`.r` editors: Cmd+Enter runs the selection, or the
    whole top-level statement under the cursor (found in the tree-sitter tree, so multi-line calls
    and function definitions run as one; statements sharing a line run together; a statement with

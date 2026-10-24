@@ -737,10 +737,18 @@ mod integration_tests {
             let LspCommMessage::ServerStarted { port } = data_object(&messages.last().unwrap().1)
                 .and_then(|data| serde_json::from_value(data).ok())
                 .unwrap();
+            // The console's document never exists on disk, like this one; Ark
+            // still completes from packages and from variables in the session.
+            let (_, messages) = kernel.execute("my_value <- 42").await;
+            assert_eq!(execute_reply_status(&messages), ReplyStatus::Ok);
             let completions =
-                std::thread::spawn(move || lsp_completion_labels(port, "x <- 1\nme", 1, 2))
+                std::thread::spawn(move || lsp_completion_labels(port, "x <- me + my_v", 0, 14))
                     .join()
                     .unwrap();
+            assert!(
+                completions.iter().any(|label| label == "my_value"),
+                "{completions:?}"
+            );
             assert!(
                 completions.iter().any(|label| label == "mean"),
                 "{completions:?}"

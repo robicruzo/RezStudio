@@ -2,6 +2,7 @@
 //! handles ANSI colors and `\r` progress bars the way RStudio's console does,
 //! and code is typed into an R editor below it.
 
+mod completions;
 use anyhow::{Context as _, Result};
 use editor::actions::{MoveToEnd, Newline};
 use editor::{Editor, EditorElement, EditorStyle};
@@ -396,6 +397,7 @@ pub struct ConsolePanel {
     /// The input typed before browsing history, restored when browsing past the end.
     history_draft: String,
     last_state: Option<SessionState>,
+    console_document: Option<completions::ConsoleDocument>,
     _completeness_check: Option<Task<()>>,
     _session_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -454,6 +456,12 @@ impl ConsolePanel {
             editor
         });
         Self::set_input_language(&input, &project, cx);
+        let provider = completions::ConsoleCompletionProvider {
+            panel: cx.entity().downgrade(),
+        };
+        input.update(cx, |editor, _| {
+            editor.set_completion_provider(Some(std::rc::Rc::new(provider)))
+        });
 
         let focus_handle = cx.focus_handle();
         let mut subscriptions = vec![cx.on_focus(&focus_handle, window, |this, window, cx| {
@@ -486,6 +494,8 @@ impl ConsolePanel {
             history_index: None,
             history_draft: String::new(),
             last_state: None,
+            console_document: completions::ConsoleDocument::new(&workspace_id.as_u64().to_string())
+                .log_err(),
             _completeness_check: None,
             _session_subscription: None,
             _subscriptions: subscriptions,
@@ -529,6 +539,32 @@ impl ConsolePanel {
 
     pub fn session(&self) -> Option<&Entity<RSession>> {
         self.session.as_ref()
+    }
+
+    /// The project's Ark language server, while R is idle. Ark computes
+    /// completions on R's thread, so asking while R runs code would stall its
+    /// language server until the code finishes.
+    pub(crate) fn completion_server(
+        &self,
+        cx: &App,
+    ) -> Option<std::sync::Arc<lsp::LanguageServer>> {
+        let session = self.session.as_ref()?.read(cx);
+        if *session.state() != SessionState::Idle {
+            return None;
+        }
+        let root = session.project_root();
+        let workspace = self.workspace.upgrade()?;
+        let project = workspace.read(cx).project().read(cx);
+        let worktree_id = project
+            .worktrees(cx)
+            .find(|worktree| worktree.read(cx).abs_path().as_ref() == root.as_path())?
+            .read(cx)
+            .id();
+        let lsp_store = project.lsp_store().read(cx);
+        let (server_id, _) = lsp_store.language_server_statuses().find(|(_, status)| {
+            status.name == runtime::ARK_LANGUAGE_SERVER_NAME && status.worktree == Some(worktree_id)
+        })?;
+        lsp_store.language_server_for_id(server_id)
     }
 
     /// Runs `code` in R and shows it in the console as if it had been typed,
@@ -1684,5 +1720,203 @@ mod tests {
                 assert!(names.contains(expected), "{path} doesn't bind {expected}");
             }
         }
+    }
+
+    #[gpui::test]
+    async fn test_console_completions_come_from_the_ark_server(cx: &mut TestAppContext) {
+        use futures::StreamExt as _;
+        use std::sync::{Arc, Mutex};
+
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", serde_json::json!({ "analysis.R": "x <- 1\n" }))
+            .await;
+        let project = Project::test(fs, ["/project".as_ref()], cx).await;
+        let languages = project.read_with(cx, |project, _| project.languages().clone());
+        languages.add(languages::language("r", tree_sitter_r::LANGUAGE.into()));
+
+        // What the server saw of the console document, as (version, text).
+        let synced: Arc<Mutex<Vec<(i32, String)>>> = Arc::default();
+        let mut fake_servers = languages.register_fake_lsp(
+            runtime::R_LANGUAGE_NAME,
+            language::FakeLspAdapter {
+                name: "ark",
+                capabilities: lsp::ServerCapabilities {
+                    completion_provider: Some(lsp::CompletionOptions {
+                        resolve_provider: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                initializer: Some(Box::new({
+                    let synced = synced.clone();
+                    move |server| {
+                        let synced_open = synced.clone();
+                        server.handle_notification::<lsp::notification::DidOpenTextDocument, _>(
+                            move |params, _| {
+                                if params
+                                    .text_document
+                                    .uri
+                                    .to_string()
+                                    .contains("rezstudio-console")
+                                {
+                                    synced_open.lock().unwrap().push((
+                                        params.text_document.version,
+                                        params.text_document.text,
+                                    ));
+                                }
+                            },
+                        );
+                        let synced_change = synced.clone();
+                        server.handle_notification::<lsp::notification::DidChangeTextDocument, _>(
+                            move |params, _| {
+                                if let Some(change) = params.content_changes.into_iter().last() {
+                                    synced_change
+                                        .lock()
+                                        .unwrap()
+                                        .push((params.text_document.version, change.text));
+                                }
+                            },
+                        );
+                        server.set_request_handler::<lsp::request::Completion, _, _>(
+                            |_, _| async move {
+                                Ok(Some(lsp::CompletionResponse::Array(vec![
+                                    lsp::CompletionItem {
+                                        label: "mean".into(),
+                                        insert_text: Some("mean($0)".into()),
+                                        insert_text_format: Some(lsp::InsertTextFormat::SNIPPET),
+                                        ..Default::default()
+                                    },
+                                    lsp::CompletionItem {
+                                        label: "median".into(),
+                                        insert_text: Some("median($0)".into()),
+                                        insert_text_format: Some(lsp::InsertTextFormat::SNIPPET),
+                                        ..Default::default()
+                                    },
+                                ])))
+                            },
+                        );
+                    }
+                })),
+                ..Default::default()
+            },
+        );
+        let (_buffer, _lsp_handle) = project
+            .update(cx, |project, cx| {
+                project.open_local_buffer_with_lsp("/project/analysis.R", cx)
+            })
+            .await
+            .unwrap();
+        let _server = fake_servers.next().await.unwrap();
+        cx.run_until_parked();
+
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| ConsolePanel::new(workspace, window, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<ConsolePanel>(window, cx);
+            panel
+        });
+        let session = cx.new(|cx| {
+            RSession::new(
+                Some(RToolchainData {
+                    r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                    version: Some("4.5.3".to_string()),
+                    source: RInstallationSource::Rig,
+                }),
+                PathBuf::from("/project"),
+                Default::default(),
+                None,
+                cx,
+            )
+        });
+        let (requests_tx, mut requests) = mpsc::channel(100);
+        let (stdin_tx, _stdin) = mpsc::channel(100);
+        session.update(cx, |session, cx| {
+            session.connect_for_test(requests_tx, stdin_tx, cx)
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_session(session.clone(), window, cx)
+        });
+        let kernel_info = requests.try_recv().unwrap();
+        session.update_in(cx, |session, window, cx| {
+            session.receive_for_test(
+                &JupyterMessage::new(kernel_info_reply(), Some(&kernel_info)),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let input = panel.read_with(cx, |panel, _| panel.input.clone());
+        // The completion menu only opens in a focused editor.
+        input.update_in(cx, |editor, window, cx| {
+            editor.focus_handle(cx).focus(window, cx)
+        });
+        input.update_in(cx, |editor, window, cx| {
+            editor.set_text("x <- me", window, cx);
+            editor.move_to_end(&MoveToEnd, window, cx);
+            editor.show_completions(&editor::actions::ShowCompletions, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(input.read_with(cx, |editor, _| editor.has_visible_completions_menu()));
+        assert_eq!(*synced.lock().unwrap(), [(1, "x <- me".to_string())]);
+
+        input
+            .update_in(cx, |editor, window, cx| {
+                editor.confirm_completion(
+                    &editor::actions::ConfirmCompletion::default(),
+                    window,
+                    cx,
+                )
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        let (text, cursor) = input.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            (
+                editor.text(cx),
+                editor.selections.newest::<Point>(&snapshot).head(),
+            )
+        });
+        assert_eq!(text, "x <- mean()");
+        assert_eq!(
+            cursor,
+            Point::new(0, 10),
+            "the cursor goes inside the parentheses"
+        );
+
+        // The next request updates the same document with a newer version.
+        input.update_in(cx, |editor, window, cx| {
+            editor.set_text("y <- med", window, cx);
+            editor.move_to_end(&MoveToEnd, window, cx);
+            editor.show_completions(&editor::actions::ShowCompletions, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            synced.lock().unwrap().last(),
+            Some(&(2, "y <- med".to_string()))
+        );
+
+        // While R is busy, the console doesn't ask: Ark would wait for R.
+        panel.update(cx, |panel, cx| panel.execute("Sys.sleep(5)", cx).unwrap());
+        let before = synced.lock().unwrap().len();
+        input.update_in(cx, |editor, window, cx| {
+            editor.cancel(&editor::actions::Cancel, window, cx);
+            editor.show_completions(&editor::actions::ShowCompletions, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(synced.lock().unwrap().len(), before);
     }
 }

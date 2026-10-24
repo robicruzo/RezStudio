@@ -18,11 +18,14 @@ editor.workspace = true
 gpui.workspace = true
 jupyter-protocol.workspace = true
 language.workspace = true
+lsp.workspace = true
+paths.workspace = true
 project.workspace = true
 runtime.workspace = true
 settings.workspace = true
 terminal.workspace = true
 terminal_view.workspace = true
+text.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
@@ -34,6 +37,7 @@ editor = { workspace = true, features = ["test-support"] }
 futures.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
+lsp = { workspace = true, features = ["test-support"] }
 languages = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 runtime = { workspace = true, features = ["test-support"] }
