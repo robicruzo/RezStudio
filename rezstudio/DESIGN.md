@@ -258,10 +258,13 @@ Findings that shape the plan:
 
 Steps:
 
-1. **Runtime comm RPCs.** `RSession::comm_request(comm_id, method, params)` returning the result
+1. **Runtime comm RPCs.** *(Done.)* `RSession::comm_request(comm_id, method, params)` returning the result
    (or Ark's error), matched by parent header, with a timeout. Open `positron.variables` on
    connect; surface variables events and Ark-opened data explorer comms as session events. Port
    the variables and data explorer types from Ark 0.1.252's MIT-licensed generated Rust.
+   Methods without parameters must omit `params` entirely; Ark rejects `"params": {}`. Against
+   real Ark and a 10M-row data frame, `get_state` plus `get_schema` take about 160 ms and a
+   100-row page from the middle about 6 ms.
 2. **`variables_panel`.** A right-dock Environment pane: a flattened tree in a `uniform_list`
    with Name, Type, Size and Value columns, expanding lists, environments, S4/R6 objects and
    data frames lazily with `inspect`; live updates from `update` events; a filter box; a button

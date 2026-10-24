@@ -2,7 +2,7 @@
 //! for Positron, and exposes the session to the panes that use it.
 
 mod ark;
-mod comms;
+pub mod comms;
 mod lsp;
 mod session;
 

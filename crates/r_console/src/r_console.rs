@@ -620,7 +620,11 @@ impl ConsolePanel {
             SessionEvent::OpenEditor { path, line, column } => {
                 self.open_editor(path.clone(), *line, *column, window, cx)
             }
-            SessionEvent::LanguageServerStarted { .. } => {}
+            SessionEvent::LanguageServerStarted { .. }
+            | SessionEvent::Variables(_)
+            | SessionEvent::DataExplorerOpened { .. }
+            | SessionEvent::DataExplorerEvent { .. }
+            | SessionEvent::DataExplorerClosed { .. } => {}
         }
     }
 
@@ -1279,7 +1283,7 @@ mod tests {
 
             // Startup: answer kernel_info so R is idle, and drop the comm opens.
             let kernel_info = requests.try_recv().unwrap();
-            for _ in 0..3 {
+            for _ in 0..4 {
                 requests.try_recv().unwrap();
             }
             let harness = Self {

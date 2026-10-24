@@ -485,6 +485,37 @@ mod integration_tests {
             }
         }
 
+        /// Sends a comm RPC and waits for Ark's reply, returning its result.
+        async fn comm_rpc(
+            &mut self,
+            comm_id: &CommId,
+            method: &str,
+            params: serde_json::Value,
+        ) -> serde_json::Value {
+            let mut message = JupyterMessage::new(
+                jupyter_protocol::CommMsg {
+                    comm_id: comm_id.clone(),
+                    data: serde_json::Map::new(),
+                },
+                None,
+            );
+            let data = crate::comms::rpc_request_data(&message.header.msg_id, method, params);
+            if let (JupyterMessageContent::CommMsg(comm), serde_json::Value::Object(data)) =
+                (&mut message.content, data)
+            {
+                comm.data = data;
+            }
+            self.connections.shell.send(message.clone()).await.unwrap();
+            let messages = self
+                .read_until(|_, reply| {
+                    reply.header.msg_type == "comm_msg" && is_child_of(reply, &message)
+                })
+                .await;
+            let reply = data_object(&messages.last().unwrap().1).unwrap();
+            crate::comms::rpc_reply_result(reply)
+                .unwrap_or_else(|error| panic!("{method} failed: {error}"))
+        }
+
         async fn execute(
             &mut self,
             code: &str,
@@ -521,6 +552,10 @@ mod integration_tests {
         message.header.msg_type == msg_type
             && message.parent_header.as_ref().map(|header| &header.msg_id)
                 == Some(&request.header.msg_id)
+    }
+
+    fn is_child_of(message: &JupyterMessage, request: &JupyterMessage) -> bool {
+        message.parent_header.as_ref().map(|header| &header.msg_id) == Some(&request.header.msg_id)
     }
 
     fn is_idle_for(message: &JupyterMessage, request: &JupyterMessage) -> bool {
@@ -842,6 +877,249 @@ mod integration_tests {
             // R still works after the interrupt.
             let (_, messages) = kernel.execute("cat(40 + 2)").await;
             assert!(stdout_text(&messages).contains("42"));
+
+            // The variables comm lists the session's variables, then reports changes.
+            let parse_variables = |message: &JupyterMessage| {
+                data_object(message)
+                    .and_then(|data| parse_method::<crate::comms::VariablesEvent>(data).ok())
+            };
+            let variables_comm = CommId(uuid::Uuid::new_v4().to_string());
+            kernel
+                .send_shell(CommOpen {
+                    comm_id: variables_comm.clone(),
+                    target_name: crate::comms::VARIABLES_COMM_TARGET.to_string(),
+                    data: serde_json::Map::new(),
+                    target_module: None,
+                })
+                .await;
+            let messages = kernel
+                .read_until(|_, message| {
+                    matches!(
+                        parse_variables(message),
+                        Some(crate::comms::VariablesEvent::Refresh(_))
+                    )
+                })
+                .await;
+            let Some(crate::comms::VariablesEvent::Refresh(refresh)) =
+                parse_variables(&messages.last().unwrap().1)
+            else {
+                panic!("expected a refresh");
+            };
+            assert!(
+                refresh
+                    .variables
+                    .iter()
+                    .any(|variable| variable.display_name == "my_value")
+            );
+
+            let request = kernel
+                .send_shell(ExecuteRequest {
+                    code: "nested <- list(a = 1, b = letters)".into(),
+                    ..ExecuteRequest::default()
+                })
+                .await;
+            let messages = kernel.read_until_finished(&request).await;
+            let update = messages
+                .iter()
+                .find_map(|(_, message)| match parse_variables(message) {
+                    Some(crate::comms::VariablesEvent::Update(update)) => Some(update),
+                    _ => None,
+                });
+            let update = match update {
+                Some(update) => update,
+                None => {
+                    let messages = kernel
+                        .read_until(|_, message| {
+                            matches!(
+                                parse_variables(message),
+                                Some(crate::comms::VariablesEvent::Update(_))
+                            )
+                        })
+                        .await;
+                    let Some(crate::comms::VariablesEvent::Update(update)) =
+                        parse_variables(&messages.last().unwrap().1)
+                    else {
+                        panic!("expected an update");
+                    };
+                    update
+                }
+            };
+            let nested = update
+                .assigned
+                .iter()
+                .find(|variable| variable.display_name == "nested")
+                .expect("nested in the update")
+                .clone();
+            assert!(nested.has_children);
+            let children: crate::comms::InspectedVariable = serde_json::from_value(
+                kernel
+                    .comm_rpc(
+                        &variables_comm,
+                        "inspect",
+                        serde_json::json!({ "path": [nested.access_key] }),
+                    )
+                    .await,
+            )
+            .unwrap();
+            let names: Vec<_> = children
+                .children
+                .iter()
+                .map(|child| child.display_name.as_str())
+                .collect();
+            assert_eq!(names, ["a", "b"]);
+
+            // View() of a 10M-row data frame opens a data explorer that serves
+            // pages without the frame leaving R.
+            let (_, messages) = kernel
+                .execute(
+                    "big <- data.frame(id = seq_len(1e7), x = rnorm(1e7), g = sample(c(letters, NA), 1e7, TRUE)); View(big)",
+                )
+                .await;
+            let explorer = messages
+                .iter()
+                .find_map(|(_, message)| match &message.content {
+                    JupyterMessageContent::CommOpen(open)
+                        if open.target_name == crate::comms::DATA_EXPLORER_COMM_TARGET =>
+                    {
+                        Some(open.clone())
+                    }
+                    _ => None,
+                })
+                .expect("View() opens a data explorer");
+            let open_data: crate::comms::DataExplorerOpenData =
+                serde_json::from_value(serde_json::Value::Object(explorer.data.clone())).unwrap();
+            assert_eq!(open_data.title, "big");
+
+            let started = Instant::now();
+            let state: crate::comms::BackendState = serde_json::from_value(
+                kernel
+                    .comm_rpc(&explorer.comm_id, "get_state", serde_json::Value::Null)
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(state.table_shape.num_rows, 10_000_000);
+            assert_eq!(state.table_shape.num_columns, 3);
+            let schema: crate::comms::TableSchema = serde_json::from_value(
+                kernel
+                    .comm_rpc(
+                        &explorer.comm_id,
+                        "get_schema",
+                        serde_json::json!({ "column_indices": [0, 1, 2] }),
+                    )
+                    .await,
+            )
+            .unwrap();
+            let types: Vec<_> = schema
+                .columns
+                .iter()
+                .map(|column| column.type_display)
+                .collect();
+            assert_eq!(
+                types,
+                [
+                    crate::comms::ColumnDisplayType::Integer,
+                    crate::comms::ColumnDisplayType::Floating,
+                    crate::comms::ColumnDisplayType::String
+                ]
+            );
+            let metadata_time = started.elapsed();
+            let page = |first: i64| {
+                serde_json::to_value(crate::comms::GetDataValuesParams {
+                    columns: (0..3)
+                        .map(|column_index| crate::comms::ColumnSelection {
+                            column_index,
+                            spec: crate::comms::ArraySelection::SelectRange(
+                                crate::comms::DataSelectionRange {
+                                    first_index: first,
+                                    last_index: first + 99,
+                                },
+                            ),
+                        })
+                        .collect(),
+                    format_options: crate::comms::FormatOptions::default(),
+                })
+                .unwrap()
+            };
+            let page_started = Instant::now();
+            let data: crate::comms::TableData = serde_json::from_value(
+                kernel
+                    .comm_rpc(&explorer.comm_id, "get_data_values", page(5_000_000))
+                    .await,
+            )
+            .unwrap();
+            let page_time = page_started.elapsed();
+            assert_eq!(data.columns.len(), 3);
+            assert_eq!(data.columns[0].len(), 100);
+            assert_eq!(data.columns[0][0].display().0, "5000001");
+            eprintln!(
+                "data explorer: state and schema in {metadata_time:?}, a 100-row page from the middle in {page_time:?}"
+            );
+            assert!(
+                page_time < Duration::from_secs(1),
+                "a page took {page_time:?}"
+            );
+
+            // Sorting happens in R; the first row afterwards has the largest id.
+            kernel
+                .comm_rpc(
+                    &explorer.comm_id,
+                    "set_sort_columns",
+                    serde_json::json!({ "sort_keys": [{ "column_index": 0, "ascending": false }] }),
+                )
+                .await;
+            let data: crate::comms::TableData = serde_json::from_value(
+                kernel
+                    .comm_rpc(&explorer.comm_id, "get_data_values", page(0))
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(data.columns[0][0].display().0, "10000000");
+
+            // Missing counts arrive later in a `return_column_profiles` event.
+            let parse_explorer = |message: &JupyterMessage| {
+                data_object(message)
+                    .and_then(|data| parse_method::<crate::comms::DataExplorerEvent>(data).ok())
+            };
+            kernel
+                .comm_rpc(
+                    &explorer.comm_id,
+                    "get_column_profiles",
+                    serde_json::to_value(crate::comms::GetColumnProfilesParams {
+                        callback_id: "nulls".to_string(),
+                        profiles: (0..3)
+                            .map(|column_index| crate::comms::ColumnProfileRequest {
+                                column_index,
+                                profiles: vec![crate::comms::ColumnProfileSpec {
+                                    profile_type: crate::comms::ColumnProfileType::NullCount,
+                                    params: None,
+                                }],
+                            })
+                            .collect(),
+                        format_options: crate::comms::FormatOptions::default(),
+                    })
+                    .unwrap(),
+                )
+                .await;
+            let messages = kernel
+                .read_until(|_, message| {
+                    matches!(
+                        parse_explorer(message),
+                        Some(crate::comms::DataExplorerEvent::ReturnColumnProfiles(_))
+                    )
+                })
+                .await;
+            let Some(crate::comms::DataExplorerEvent::ReturnColumnProfiles(profiles)) =
+                parse_explorer(&messages.last().unwrap().1)
+            else {
+                panic!("expected column profiles");
+            };
+            assert_eq!(profiles.callback_id, "nulls");
+            assert_eq!(profiles.profiles[0].null_count, Some(0));
+            assert!(
+                profiles.profiles[2]
+                    .null_count
+                    .is_some_and(|count| count > 0)
+            );
 
             kernel
                 .connections

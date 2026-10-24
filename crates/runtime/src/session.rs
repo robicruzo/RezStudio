@@ -1,8 +1,9 @@
 use crate::ark::{self, ArkLaunch, ArkProcess};
 use crate::comms::{
-    self, LSP_COMM_TARGET, LspCommMessage, PLOT_COMM_TARGET, PromptStateParams, RPC_REPLY_MSG_TYPE,
-    RPC_REQUEST_MSG_TYPE, ServerStartData, UI_COMM_TARGET, UiBackendEvent, UiCommOpenData,
-    UiFrontendEvent, UiFrontendRequest,
+    self, DATA_EXPLORER_COMM_TARGET, DataExplorerEvent, DataExplorerOpenData, LSP_COMM_TARGET,
+    LspCommMessage, PLOT_COMM_TARGET, PromptStateParams, RPC_REPLY_MSG_TYPE, RPC_REQUEST_MSG_TYPE,
+    ServerStartData, UI_COMM_TARGET, UiBackendEvent, UiCommOpenData, UiFrontendEvent,
+    UiFrontendRequest, VARIABLES_COMM_TARGET, VariablesEvent,
 };
 use anyhow::{Context as _, Result};
 use collections::HashMap;
@@ -71,6 +72,21 @@ pub enum SessionEvent {
     LanguageServerStarted {
         port: u16,
     },
+    /// A message on the variables comm, which the Environment pane mirrors.
+    Variables(VariablesEvent),
+    /// Ark opened a data explorer, as for `View(df)`.
+    DataExplorerOpened {
+        comm_id: String,
+        title: String,
+    },
+    DataExplorerEvent {
+        comm_id: String,
+        event: DataExplorerEvent,
+    },
+    /// The explorer's comm is gone, because Ark closed it or R stopped.
+    DataExplorerClosed {
+        comm_id: String,
+    },
 }
 
 /// The channels requests are sent on. Kept separate from the process so tests
@@ -103,6 +119,10 @@ pub struct RSession {
     generation: usize,
     ui_comm_id: Option<String>,
     lsp_comm_id: Option<String>,
+    variables_comm_id: Option<String>,
+    data_explorer_comm_ids: Vec<String>,
+    /// Comm RPCs sent and not yet answered, by request message id.
+    pending_comm_requests: HashMap<String, oneshot::Sender<Result<serde_json::Value>>>,
     lsp_port: Option<u16>,
     prompt: PromptStateParams,
     working_directory: Option<PathBuf>,
@@ -155,6 +175,9 @@ impl RSession {
             working_directory: None,
             pending_executions: Vec::new(),
             pending_replies: HashMap::default(),
+            variables_comm_id: None,
+            data_explorer_comm_ids: Vec::new(),
+            pending_comm_requests: HashMap::default(),
             pending_input_request: None,
             _launch_task: None,
             _exit_task: None,
@@ -186,6 +209,75 @@ impl RSession {
 
     pub fn language_server_port(&self) -> Option<u16> {
         self.lsp_port
+    }
+
+    pub fn variables_comm_id(&self) -> Option<&str> {
+        self.variables_comm_id.as_deref()
+    }
+
+    /// Sends a JSON-RPC request on one of Ark's comms and resolves to its
+    /// result. Ark handles most of these on R's thread, so they wait for R.
+    pub fn comm_request(
+        &mut self,
+        comm_id: &str,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<serde_json::Value>> {
+        let mut message = JupyterMessage::new(
+            CommMsg {
+                comm_id: CommId(comm_id.to_string()),
+                data: serde_json::Map::new(),
+            },
+            None,
+        );
+        let request_id = message.header.msg_id.clone();
+        let data = comms::rpc_request_data(&request_id, method, params);
+        if let (JupyterMessageContent::CommMsg(comm_message), serde_json::Value::Object(data)) =
+            (&mut message.content, data)
+        {
+            comm_message.data = data;
+        }
+        if let Err(error) = self.send_request(message) {
+            return Task::ready(Err(error));
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.pending_comm_requests
+            .insert(request_id.clone(), reply_tx);
+
+        let executor = cx.background_executor().clone();
+        let method = method.to_string();
+        cx.spawn(async move |this, cx| {
+            let reply = futures::select_biased! {
+                reply = reply_rx.fuse() => Some(reply),
+                _ = executor.timer(timeout).fuse() => None,
+            };
+            match reply {
+                Some(Ok(result)) => result,
+                Some(Err(_)) => anyhow::bail!("R stopped before answering `{method}`"),
+                None => {
+                    this.update(cx, |this, _| this.pending_comm_requests.remove(&request_id))
+                        .ok();
+                    anyhow::bail!(
+                        "R didn't answer `{method}` within {} seconds",
+                        timeout.as_secs()
+                    )
+                }
+            }
+        })
+    }
+
+    /// Closes a comm Ark opened, such as a data explorer whose tab closed.
+    pub fn close_comm(&mut self, comm_id: &str) -> Result<()> {
+        self.data_explorer_comm_ids.retain(|id| id != comm_id);
+        self.send_request(JupyterMessage::new(
+            CommClose {
+                comm_id: CommId(comm_id.to_string()),
+                data: serde_json::Map::new(),
+            },
+            None,
+        ))
     }
 
     pub fn is_waiting_for_input(&self) -> bool {
@@ -422,6 +514,19 @@ impl RSession {
             None,
         ))?;
         self.lsp_comm_id = Some(lsp_comm_id);
+
+        // Ark answers by sending a `refresh` with every variable.
+        let variables_comm_id = uuid::Uuid::new_v4().to_string();
+        self.send_request(JupyterMessage::new(
+            CommOpen {
+                comm_id: CommId(variables_comm_id.clone()),
+                target_name: VARIABLES_COMM_TARGET.to_string(),
+                data: serde_json::Map::new(),
+                target_module: None,
+            },
+            None,
+        ))?;
+        self.variables_comm_id = Some(variables_comm_id);
         Ok(())
     }
 
@@ -483,6 +588,20 @@ impl RSession {
                     password: request.password,
                 });
             }
+            JupyterMessageContent::CommOpen(open)
+                if open.target_name == DATA_EXPLORER_COMM_TARGET =>
+            {
+                let title = serde_json::from_value::<DataExplorerOpenData>(
+                    serde_json::Value::Object(open.data.clone()),
+                )
+                .map(|data| data.title)
+                .unwrap_or_else(|_| "Data".to_string());
+                self.data_explorer_comm_ids.push(open.comm_id.0.clone());
+                cx.emit(SessionEvent::DataExplorerOpened {
+                    comm_id: open.comm_id.0.clone(),
+                    title,
+                });
+            }
             JupyterMessageContent::CommOpen(open) => {
                 // Plots are shown once the Plots pane exists; until then they are dropped.
                 if open.target_name != PLOT_COMM_TARGET {
@@ -490,6 +609,13 @@ impl RSession {
                 }
             }
             JupyterMessageContent::CommMsg(comm_message) => {
+                if let Some(parent_id) = &parent_id
+                    && let Some(reply_tx) = self.pending_comm_requests.remove(parent_id)
+                {
+                    let data = serde_json::Value::Object(comm_message.data.clone());
+                    reply_tx.send(comms::rpc_reply_result(data)).ok();
+                    return;
+                }
                 self.handle_comm_message(comm_message, cx);
             }
             JupyterMessageContent::CommClose(CommClose { comm_id, .. }) => {
@@ -500,6 +626,15 @@ impl RSession {
                 if self.lsp_comm_id.as_deref() == Some(comm_id.0.as_str()) {
                     self.lsp_comm_id = None;
                     self.lsp_port = None;
+                }
+                if self.variables_comm_id.as_deref() == Some(comm_id.0.as_str()) {
+                    self.variables_comm_id = None;
+                }
+                if self.data_explorer_comm_ids.contains(&comm_id.0) {
+                    self.data_explorer_comm_ids.retain(|id| *id != comm_id.0);
+                    cx.emit(SessionEvent::DataExplorerClosed {
+                        comm_id: comm_id.0.clone(),
+                    });
                 }
             }
             JupyterMessageContent::UnknownMessage(unknown)
@@ -547,6 +682,23 @@ impl RSession {
                     cx.emit(SessionEvent::LanguageServerStarted { port });
                 }
                 Err(error) => log::warn!("unexpected message on Ark's LSP comm: {error}"),
+            }
+            return;
+        }
+        if self.variables_comm_id.as_deref() == Some(comm_id) {
+            match comms::parse_method::<VariablesEvent>(data) {
+                Ok(event) => cx.emit(SessionEvent::Variables(event)),
+                Err(error) => log::warn!("unexpected message on Ark's variables comm: {error}"),
+            }
+            return;
+        }
+        if self.data_explorer_comm_ids.iter().any(|id| id == comm_id) {
+            match comms::parse_method::<DataExplorerEvent>(data) {
+                Ok(event) => cx.emit(SessionEvent::DataExplorerEvent {
+                    comm_id: comm_id.to_string(),
+                    event,
+                }),
+                Err(error) => log::warn!("unexpected message on a data explorer comm: {error}"),
             }
             return;
         }
@@ -721,20 +873,31 @@ impl RSession {
     fn handle_exit(&mut self, message: String, cx: &mut Context<Self>) {
         log::info!("{message}");
         self.process = None;
+        self.forget_kernel_state(cx);
+        self.set_state(SessionState::Exited(message), cx);
+    }
+
+    /// Drops everything tied to the R process that's going away. Pending
+    /// requests fail, executions finish unsuccessfully and viewers close.
+    fn forget_kernel_state(&mut self, cx: &mut Context<Self>) {
         self.channels = None;
         self._io_tasks.clear();
         self.ui_comm_id = None;
         self.lsp_comm_id = None;
         self.lsp_port = None;
+        self.variables_comm_id = None;
         self.pending_input_request = None;
         self.pending_replies.clear();
+        self.pending_comm_requests.clear();
         for execution in std::mem::take(&mut self.pending_executions) {
             cx.emit(SessionEvent::ExecutionFinished {
                 request_id: execution.request_id,
                 succeeded: false,
             });
         }
-        self.set_state(SessionState::Exited(message), cx);
+        for comm_id in std::mem::take(&mut self.data_explorer_comm_ids) {
+            cx.emit(SessionEvent::DataExplorerClosed { comm_id });
+        }
     }
 
     /// Stops R for good, as when its window closes. The returned task finishes
@@ -754,15 +917,8 @@ impl RSession {
         if self.send_request(shutdown).is_err() {
             self.process = None;
         }
-        self.channels = None;
-        self.ui_comm_id = None;
-        self.lsp_comm_id = None;
-        self.lsp_port = None;
-        self.pending_input_request = None;
-        self.pending_replies.clear();
-        self.pending_executions.clear();
+        self.forget_kernel_state(cx);
         self._exit_task = None;
-        self._io_tasks.clear();
         let Some(mut process) = self.process.take() else {
             return Task::ready(());
         };
@@ -1024,6 +1180,7 @@ mod tests {
             let ui_open = self.next_request();
             let _frontend_ready = self.next_request();
             let lsp_open = self.next_request();
+            let _variables_open = self.next_request();
             self.receive(
                 JupyterMessage::new(kernel_info_reply(), Some(&kernel_info)),
                 cx,
@@ -1125,6 +1282,18 @@ mod tests {
         assert_eq!(
             serde_json::Value::Object(lsp.data.clone()),
             json!({ "ip_address": "127.0.0.1" })
+        );
+
+        let variables_open = harness.next_request();
+        let JupyterMessageContent::CommOpen(variables) = &variables_open.content else {
+            panic!("expected the variables comm to open");
+        };
+        assert_eq!(variables.target_name, VARIABLES_COMM_TARGET);
+        assert_eq!(
+            harness.session.read_with(cx, |session, _| session
+                .variables_comm_id()
+                .map(str::to_string)),
+            Some(variables.comm_id.0.clone())
         );
 
         assert_eq!(
@@ -1389,6 +1558,176 @@ mod tests {
         );
         let status = cx.foreground_executor().block_test(status).unwrap();
         assert_eq!(status, IsCompleteReplyStatus::Incomplete);
+    }
+
+    fn variables_comm(harness: &Harness, cx: &mut VisualTestContext) -> CommId {
+        CommId(harness.session.read_with(cx, |session, _| {
+            session.variables_comm_id().unwrap().to_string()
+        }))
+    }
+
+    #[gpui::test]
+    fn test_comm_requests_resolve_with_their_reply(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut harness = Harness::new(cx);
+        harness.finish_startup(cx);
+        let comm_id = variables_comm(&harness, cx);
+
+        let inspect = harness.session.update(cx, |session, cx| {
+            session.comm_request(
+                &comm_id.0,
+                "inspect",
+                json!({ "path": ["df"] }),
+                Duration::from_secs(5),
+                cx,
+            )
+        });
+        let request = harness.next_request();
+        let JupyterMessageContent::CommMsg(comm_message) = &request.content else {
+            panic!("expected comm_msg");
+        };
+        assert_eq!(comm_message.comm_id, comm_id);
+        assert_eq!(
+            serde_json::Value::Object(comm_message.data.clone()),
+            json!({ "jsonrpc": "2.0", "id": request.header.msg_id, "method": "inspect", "params": { "path": ["df"] } })
+        );
+        // Ark replies on iopub as a comm_msg parented to the request.
+        harness.receive(
+            JupyterMessage::new(
+                CommMsg {
+                    comm_id: comm_id.clone(),
+                    data: json_object(
+                        &json!({ "method": "inspect", "result": { "children": [], "length": 0 } }),
+                    )
+                    .unwrap(),
+                },
+                Some(&request),
+            ),
+            cx,
+        );
+        let result = cx.foreground_executor().block_test(inspect).unwrap();
+        assert_eq!(result, json!({ "children": [], "length": 0 }));
+
+        let failing = harness.session.update(cx, |session, cx| {
+            session.comm_request(
+                &comm_id.0,
+                "view",
+                json!({ "path": ["nope"] }),
+                Duration::from_secs(5),
+                cx,
+            )
+        });
+        let request = harness.next_request();
+        harness.receive(
+            JupyterMessage::new(
+                CommMsg {
+                    comm_id: comm_id.clone(),
+                    data: json_object(&json!({ "error": { "code": -32603, "message": "object 'nope' not found" } }))
+                        .unwrap(),
+                },
+                Some(&request),
+            ),
+            cx,
+        );
+        let error = cx.foreground_executor().block_test(failing).unwrap_err();
+        assert!(error.to_string().contains("not found"), "{error}");
+
+        let unanswered = harness.session.update(cx, |session, cx| {
+            session.comm_request(&comm_id.0, "list", json!({}), Duration::from_secs(5), cx)
+        });
+        harness.next_request();
+        cx.executor().advance_clock(Duration::from_secs(6));
+        let error = cx.foreground_executor().block_test(unanswered).unwrap_err();
+        assert!(
+            error.to_string().contains("didn't answer `list`"),
+            "{error}"
+        );
+    }
+
+    #[gpui::test]
+    fn test_variables_events_are_forwarded(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut harness = Harness::new(cx);
+        harness.finish_startup(cx);
+        let comm_id = variables_comm(&harness, cx);
+        harness.take_events();
+
+        harness.receive(
+            comm_message(
+                &comm_id,
+                json!({ "method": "refresh", "params": { "variables": [], "length": 0, "version": 1 } }),
+            ),
+            cx,
+        );
+        assert!(matches!(
+            &harness.take_events()[..],
+            [SessionEvent::Variables(VariablesEvent::Refresh(refresh))] if refresh.version == 1
+        ));
+    }
+
+    #[gpui::test]
+    fn test_data_explorer_comm_lifecycle(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut harness = Harness::new(cx);
+        harness.finish_startup(cx);
+        harness.take_events();
+
+        let explorer = CommId("explorer-1".to_string());
+        harness.receive(
+            JupyterMessage::new(
+                CommOpen {
+                    comm_id: explorer.clone(),
+                    target_name: DATA_EXPLORER_COMM_TARGET.to_string(),
+                    data: json_object(&json!({ "title": "mtcars", "inline_only": false })).unwrap(),
+                    target_module: None,
+                },
+                None,
+            ),
+            cx,
+        );
+        harness.receive(
+            comm_message(&explorer, json!({ "method": "data_update", "params": {} })),
+            cx,
+        );
+        assert!(matches!(
+            &harness.take_events()[..],
+            [
+                SessionEvent::DataExplorerOpened { comm_id, title },
+                SessionEvent::DataExplorerEvent { event: DataExplorerEvent::DataUpdate, .. },
+            ] if comm_id == "explorer-1" && title == "mtcars"
+        ));
+
+        harness
+            .session
+            .update(cx, |session, _| session.close_comm("explorer-1"))
+            .unwrap();
+        let close = harness.next_request();
+        assert!(matches!(
+            &close.content,
+            JupyterMessageContent::CommClose(close) if close.comm_id == explorer
+        ));
+
+        // An explorer still open when R stops is reported closed.
+        harness.receive(
+            JupyterMessage::new(
+                CommOpen {
+                    comm_id: CommId("explorer-2".to_string()),
+                    target_name: DATA_EXPLORER_COMM_TARGET.to_string(),
+                    data: json_object(&json!({ "title": "iris" })).unwrap(),
+                    target_module: None,
+                },
+                None,
+            ),
+            cx,
+        );
+        harness.take_events();
+        harness.session.update(cx, |session, cx| {
+            session.handle_exit("R exited.".into(), cx)
+        });
+        assert!(harness.take_events().iter().any(|event| matches!(
+            event,
+            SessionEvent::DataExplorerClosed { comm_id } if comm_id == "explorer-2"
+        )));
     }
 
     #[gpui::test]
