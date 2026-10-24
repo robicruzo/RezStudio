@@ -1132,6 +1132,19 @@
     },
   },
   {
+    "context": "RConsole > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "r_console::Submit",
+      "shift-enter": "editor::Newline",
+      "up": "r_console::PreviousHistory",
+      "down": "r_console::NextHistory",
+      "escape": "r_console::Escape",
+      "ctrl-c": "r_console::Interrupt",
+      "ctrl-l": "r_console::ClearConsole",
+    },
+  },
+  {
     "context": "DebugConsole > Editor",
     "use_key_equivalents": true,
     "bindings": {

@@ -683,6 +683,7 @@ fn main() {
 
         repl::init(app_state.fs.clone(), cx);
         runtime::init(app_state.languages.clone(), cx);
+        r_console::init(cx);
         recent_projects::init(cx);
         dev_container::init(cx);
 

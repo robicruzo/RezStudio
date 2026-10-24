@@ -7,14 +7,15 @@ mod lsp;
 mod session;
 
 pub use comms::{ARK_VERSION, PromptStateParams};
+pub use languages::r::R_LANGUAGE_NAME;
 pub use lsp::{ARK_LANGUAGE_SERVER_NAME, LSP_BRIDGE_FLAG, run_lsp_bridge};
 pub use session::{RSession, SessionEvent, SessionState};
 
 use ::lsp::LanguageServerSelector;
 use collections::{HashMap, HashSet};
-use gpui::{App, AppContext as _, Entity, EntityId, Global, WeakEntity, Window};
+use gpui::{App, AppContext as _, Entity, EntityId, EventEmitter, Global, WeakEntity, Window};
 use language::{LanguageName, LanguageRegistry};
-use languages::r::{R_LANGUAGE_NAME, RToolchainData};
+use languages::r::RToolchainData;
 use project::trusted_worktrees::{PathTrust, TrustedWorktrees, TrustedWorktreesEvent};
 use project::{Project, ProjectPath, WorktreeId};
 use std::sync::Arc;
@@ -24,14 +25,43 @@ use workspace::Workspace;
 
 /// The R session of each open workspace, keyed by the workspace's entity id.
 #[derive(Default)]
-pub(crate) struct RSessions(pub(crate) HashMap<EntityId, Entity<RSession>>);
+pub struct SessionRegistry {
+    sessions: HashMap<EntityId, Entity<RSession>>,
+}
 
-impl Global for RSessions {}
+/// Emitted when a workspace's R session is created, which happens after the
+/// workspace (and its panels) exist.
+pub struct SessionAdded {
+    pub workspace_id: EntityId,
+    pub session: Entity<RSession>,
+}
+
+impl EventEmitter<SessionAdded> for SessionRegistry {}
+
+impl SessionRegistry {
+    pub fn global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalSessionRegistry>()
+            .map(|registry| registry.0.clone())
+    }
+
+    pub fn session(&self, workspace_id: EntityId) -> Option<&Entity<RSession>> {
+        self.sessions.get(&workspace_id)
+    }
+
+    pub(crate) fn sessions(&self) -> impl Iterator<Item = &Entity<RSession>> {
+        self.sessions.values()
+    }
+}
+
+struct GlobalSessionRegistry(Entity<SessionRegistry>);
+
+impl Global for GlobalSessionRegistry {}
 
 /// Must run after `repl::init`, which connects the ZeroMQ sockets Ark uses to
 /// GPUI's executor.
 pub fn init(languages: Arc<LanguageRegistry>, cx: &mut App) {
-    cx.set_global(RSessions::default());
+    let registry = cx.new(|_| SessionRegistry::default());
+    cx.set_global(GlobalSessionRegistry(registry));
     languages.register_lsp_adapter(
         LanguageName::new_static(R_LANGUAGE_NAME),
         Arc::new(lsp::ArkLspAdapter),
@@ -42,7 +72,12 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut App) {
         };
         let workspace_id = cx.entity_id();
         cx.on_release(move |_, cx| {
-            if let Some(session) = cx.global_mut::<RSessions>().0.remove(&workspace_id) {
+            let Some(registry) = SessionRegistry::global(cx) else {
+                return;
+            };
+            let session =
+                registry.update(cx, |registry, _| registry.sessions.remove(&workspace_id));
+            if let Some(session) = session {
                 session.update(cx, |session, cx| session.stop(cx)).detach();
             }
         })
@@ -56,7 +91,7 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut App) {
         // Worktrees are added after the workspace is created when opening a folder.
         cx.subscribe_in(&project, window, move |_, project, event, window, cx| {
             if let project::Event::WorktreeAdded(_) = event
-                && !cx.global::<RSessions>().0.contains_key(&workspace_id)
+                && !has_session(workspace_id, cx)
                 && let Some(worktree_id) = first_local_worktree(project, cx)
             {
                 start_session(workspace_id, project.clone(), worktree_id, window, cx);
@@ -69,10 +104,15 @@ pub fn init(languages: Arc<LanguageRegistry>, cx: &mut App) {
 
 /// The R session for `workspace`, once its project has a folder open.
 pub fn session_for_workspace(workspace: &Entity<Workspace>, cx: &App) -> Option<Entity<RSession>> {
-    cx.try_global::<RSessions>()?
-        .0
-        .get(&workspace.entity_id())
+    SessionRegistry::global(cx)?
+        .read(cx)
+        .session(workspace.entity_id())
         .cloned()
+}
+
+fn has_session(workspace_id: EntityId, cx: &App) -> bool {
+    SessionRegistry::global(cx)
+        .is_some_and(|registry| registry.read(cx).sessions.contains_key(&workspace_id))
 }
 
 fn first_local_worktree(project: &Entity<Project>, cx: &App) -> Option<WorktreeId> {
@@ -133,13 +173,22 @@ fn start_session(
             let r = toolchain.as_ref().and_then(RToolchainData::from_toolchain);
             let env = environment.await.unwrap_or_default();
             cx.update(|window, cx| {
-                if cx.global::<RSessions>().0.contains_key(&workspace_id) {
+                let Some(registry) = SessionRegistry::global(cx) else {
+                    return;
+                };
+                if has_session(workspace_id, cx) {
                     return;
                 }
                 let session = cx.new(|cx| RSession::new(r, project_root, env, bundled_ark, cx));
                 restart_language_server_on_new_port(&session, project.downgrade(), cx);
                 start_when_trusted(&session, &project, worktree_id, window, cx);
-                cx.global_mut::<RSessions>().0.insert(workspace_id, session);
+                registry.update(cx, |registry, cx| {
+                    registry.sessions.insert(workspace_id, session.clone());
+                    cx.emit(SessionAdded {
+                        workspace_id,
+                        session,
+                    });
+                });
             })
             .ok();
         })

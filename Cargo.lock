@@ -11055,6 +11055,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
+name = "r_console"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "jupyter-protocol",
+ "language",
+ "languages",
+ "project",
+ "runtime",
+ "serde_json",
+ "settings",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "rand"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -17906,6 +17931,7 @@ dependencies = [
  "project_panel",
  "project_symbols",
  "proto",
+ "r_console",
  "rayon",
  "recent_projects",
  "release_channel",

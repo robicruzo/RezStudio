@@ -177,12 +177,20 @@ Steps:
    LSP TCP port, like Zed's `--askpass` netcat mode. The `ark` language server adapter (registered
    by `runtime` for R) waits for the window's session to report its port, then launches the
    bridge; when R restarts on a new port, `ark` is restarted for the project's open buffers.
-4. **`console`.** A bottom-dock panel. Scrollback is a virtualised list of echoed input, ANSI
-   stream text, errors with tracebacks and rich outputs (`repl::outputs`, made public). Input is
-   an auto-height R editor: Enter sends when Ark's `is_complete_request` says the code is
-   complete, otherwise inserts a continuation line; Up/Down history, Ctrl+R search, Esc/Ctrl+C
-   interrupt, Ctrl+L clear; `readline()`/`menu()` answered inline. A header shows the R version,
-   working directory, busy state and a restart button.
+4. **`r_console`.** *(Done, except console completions.)* The crate is `r_console` because the
+   workspace already depends on the external `console` crate and the debugger uses the
+   `console::` action namespace. A bottom-dock panel, open by default next to the terminal like
+   RStudio's Console/Terminal tabs. Scrollback is one display-only terminal (Zed's
+   `TerminalView`), not `repl::outputs`: R output is a text stream, and a terminal gets ANSI
+   colors, `\r` progress bars, long scrollback, selection and links right, while `repl`'s
+   per-output terminals cap each output at a few dozen lines. Input is an auto-height R editor:
+   Enter asks Ark's `is_complete_request` (skipped while R is busy, since the check would queue
+   behind the running code) and either runs the code or continues it on a new line; Up/Down
+   browse history at the first/last line; Esc interrupts when busy and otherwise clears; Ctrl+L
+   clears; `readline()`/`menu()` prompts take over the input row. Errors and stderr are red,
+   echoed input blue. The header shows the R version, working directory, a busy spinner and
+   interrupt/clear/restart buttons. Still to do: completions in the console input (the input
+   isn't a project file, so Ark's LSP needs a virtual document for it).
 5. **Run from editor.** Cmd+Enter runs the selection or the statement under the cursor (found
    with tree-sitter) and moves to the next statement; Cmd+Shift+Enter sources with echo;
    Cmd+Shift+S sources; Cmd+Shift+F10 restarts; Ctrl+1/Ctrl+2 focus source/console; Opt+- and

@@ -141,6 +141,7 @@ node_runtime.workspace = true
 onboarding.workspace = true
 outline.workspace = true
 outline_panel.workspace = true
+r_console.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 picker.workspace = true

@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use util::ResultExt as _;
 
-use crate::{RSessions, SessionState};
+use crate::{SessionRegistry, SessionState};
 
 pub const ARK_LANGUAGE_SERVER_NAME: LanguageServerName = LanguageServerName::new_static("ark");
 
@@ -103,12 +103,12 @@ enum PortStatus {
 }
 
 fn port_for_project(root: &Path, cx: &gpui::App) -> PortStatus {
-    let Some(sessions) = cx.try_global::<RSessions>() else {
+    let Some(registry) = SessionRegistry::global(cx) else {
         return PortStatus::NoSession;
     };
-    let session = sessions
-        .0
-        .values()
+    let session = registry
+        .read(cx)
+        .sessions()
         .find(|session| session.read(cx).project_root() == root);
     let Some(session) = session else {
         // The session is created asynchronously after the project opens.
