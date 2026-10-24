@@ -127,7 +127,7 @@ packages and addins that call `rstudioapi` keep working.
 | # | Goal | Done when |
 |---|---|---|
 | M0 | Fork surgery and rebrand | AI/collab/cloud crates gone, `client`/`telemetry` stubbed, app renamed, builds green on Linux CI and macOS CI. |
-| M1 | `runtime` + `console` for R | Ark bundled; R discovered; Cmd+Enter / Cmd+Shift+S run code; interrupt and restart work; rich output in the console; Ark LSP completions in the editor and console. |
+| M1 | `runtime` + `console` for R *(done)* | Ark bundled; R discovered; Cmd+Enter / Cmd+Shift+S run code; interrupt and restart work; rich output in the console; Ark LSP completions in the editor and console. |
 | M2 | Environment + data viewer | Live variables; `View(df)` opens the paged grid on a 10M-row frame without lag. |
 | M3 | Plots | Plot history, resize re-render, export. |
 | M4 | Packages + search | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
@@ -137,7 +137,7 @@ packages and addins that call `rstudioapi` keep working.
 | M8 | Typst native preview | Live preview with source ↔ preview jumping. |
 | M9 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
 
-### M1 plan
+### M1 plan (done)
 
 Decisions: Ark's LSP is part of M1; plots are accepted but not shown until M3; the R session
 starts when a project opens; Ark 0.1.252 is bundled in the app.
@@ -226,6 +226,58 @@ Steps:
 
 Main risks: console completions need Ark's LSP to treat the console input as a virtual document;
 Ark's comm protocol may change between releases, which the pin and contract tests contain.
+Both are now handled: completions use an in-server document, and macOS CI runs the real-Ark
+test on every push.
+
+### M2 plan
+
+Decisions: the Environment pane goes in the right dock (files stay left, the console bottom);
+`View(df)` opens the data viewer as an editor tab beside scripts, as in RStudio; column headers
+show the type and the number of missing values (summary statistics and histograms come later);
+clicking a header sorts, done by R (row filters come later).
+
+Findings that shape the plan:
+
+- Both panes talk to Ark over comms with request/reply RPCs: the frontend sends a `comm_msg`
+  whose data carries `"id"` plus `method`/`params`, and Ark answers with a `comm_msg` on iopub
+  whose parent header is the request and whose data is `{"method", "result"}` or `{"error"}`.
+  The runtime only answers Ark's own requests so far, so it needs the frontend side.
+- `positron.variables` is opened by the frontend. Ark then sends a `refresh` event with every
+  variable, and an `update` event (assigned, removed) after each execution. Each variable has
+  an access key, display name/type/value, size, length, `has_children` and `has_viewer`;
+  `inspect(path)` lists children, `view(path)` opens a data explorer, and `delete`, `clear` and
+  `clipboard_format` do what they say.
+- `positron.dataExplorer` is opened by Ark, with `{"title", "inline_only"}`, for `View(df)` or a
+  variables `view`. `get_state` gives the shape, `get_schema` the columns,
+  `get_data_values` formatted values for a range of rows per column, `get_row_labels` the row
+  names, `set_sort_columns` sorts in R, and `get_column_profiles` (answered asynchronously by a
+  `return_column_profiles` event) gives null counts. Ark sends `data_update`/`schema_update`
+  when the data frame changes in R. The whole frame never leaves R.
+- Zed's `ui::Table` renders only visible rows (`uniform_list`) and has resizable columns; it's
+  what `tabular_data_preview` uses, and the viewer can drive it with rows fetched on demand.
+
+Steps:
+
+1. **Runtime comm RPCs.** `RSession::comm_request(comm_id, method, params)` returning the result
+   (or Ark's error), matched by parent header, with a timeout. Open `positron.variables` on
+   connect; surface variables events and Ark-opened data explorer comms as session events. Port
+   the variables and data explorer types from Ark 0.1.252's MIT-licensed generated Rust.
+2. **`variables_panel`.** A right-dock Environment pane: a flattened tree in a `uniform_list`
+   with Name, Type, Size and Value columns, expanding lists, environments, S4/R6 objects and
+   data frames lazily with `inspect`; live updates from `update` events; a filter box; a button
+   to open data frames in the viewer; delete and clear (with confirmation).
+3. **`data_explorer`.** An editor tab per explorer comm. A `ui::Table` asks for the visible rows
+   in blocks (`get_data_values`, cached), so a 10M-row frame only ever loads what's on screen;
+   row names from `get_row_labels`; headers with the column name, type and NA count; click to
+   cycle ascending/descending/original order through `set_sort_columns`; refreshes on
+   `data_update`/`schema_update`; closing the tab closes the comm. Wide frames fetch only the
+   columns in view.
+4. **Tests.** Unit tests driving both panes with scripted comm messages; the real-Ark test gains
+   a variables refresh/update after an assignment and a `View()` of a 10M-row data frame with
+   timed page fetches.
+
+Done when: assignments in the console appear in the Environment pane immediately, children
+expand, and `View()` of a 10M-row data frame opens and scrolls without visible lag.
 
 ## Risks
 
