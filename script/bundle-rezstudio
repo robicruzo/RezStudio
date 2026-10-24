@@ -11,6 +11,8 @@ set -euo pipefail
 
 build_flag="--release"
 target_dir="release"
+# Debug builds read assets from the checkout unless they are embedded.
+zed_features=""
 make_dmg=false
 install_app=false
 open_app=false
@@ -34,6 +36,7 @@ while getopts 'dmioh' flag; do
         d)
             build_flag=""
             target_dir="debug"
+            zed_features="--features util/debug-embed"
             ;;
         m) make_dmg=true ;;
         i) install_app=true ;;
@@ -85,7 +88,7 @@ fi
 
 echo "Compiling RezStudio (${channel}, ${target_triple})"
 # Separate invocations: `--bin` would otherwise restrict the cli package's binaries too.
-cargo --config .cargo/bundle-config.toml build ${build_flag} \
+cargo --config .cargo/bundle-config.toml build ${build_flag} ${zed_features} \
     --package zed --bin rezstudio --target "$target_triple"
 cargo --config .cargo/bundle-config.toml build ${build_flag} \
     --package cli --target "$target_triple"
