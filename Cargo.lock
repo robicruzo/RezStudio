@@ -2790,6 +2790,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "data_explorer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "futures 0.3.34",
+ "gpui",
+ "jupyter-protocol",
+ "languages",
+ "log",
+ "project",
+ "runtime",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "uuid",
+ "workspace",
+]
+
+[[package]]
 name = "db"
 version = "0.1.0"
 dependencies = [
@@ -17891,6 +17914,7 @@ dependencies = [
  "component_preview",
  "crashes",
  "dap_adapters",
+ "data_explorer",
  "db",
  "debug_adapter_extension",
  "debugger_tools",

@@ -272,12 +272,16 @@ Steps:
    are sorted by name, children keep R's order, and expanded variables stay expanded (and are
    re-inspected) when R changes them. Rows are laid out by hand rather than with `ListItem`,
    whose disclosure arrow sits outside unindented rows and whose hover slot shifts columns.
-3. **`data_explorer`.** An editor tab per explorer comm. A `ui::Table` asks for the visible rows
-   in blocks (`get_data_values`, cached), so a 10M-row frame only ever loads what's on screen;
-   row names from `get_row_labels`; headers with the column name, type and NA count; click to
-   cycle ascending/descending/original order through `set_sort_columns`; refreshes on
-   `data_update`/`schema_update`; closing the tab closes the comm. Wide frames fetch only the
-   columns in view.
+3. **`data_explorer`.** *(Done.)* An editor tab per explorer comm. A `ui::Table` asks for the
+   visible rows in 100-row blocks (`get_data_values`, at most 64 blocks cached, farthest dropped
+   first), so a 10M-row frame only ever loads what's on screen; row names from `get_row_labels`;
+   headers with the column name, type and NA count (from `get_column_profiles`, answered by a
+   `return_column_profiles` event); click to cycle ascending/descending/original order through
+   `set_sort_columns`; refreshes on `data_update`/`schema_update`; closing the tab closes the
+   comm, and a tab whose R stops says it's no longer live. Wide frames page through 50 columns
+   at a time, as RStudio does. `View()` again on the same data frame reuses its tab. No rows
+   are fetched while a reload or sort is pending, since they'd come back stale. Numbers use
+   Ark's formatting (as in Positron), so `0.6260` and `1.59` can sit in one column.
 4. **Tests.** Unit tests driving both panes with scripted comm messages; the real-Ark test gains
    a variables refresh/update after an assignment and a `View()` of a 10M-row data frame with
    timed page fetches.

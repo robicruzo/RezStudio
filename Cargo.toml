@@ -25,6 +25,7 @@ members = [
     "crates/crashes",
     "crates/credentials_provider",
     "crates/dap",
+    "crates/data_explorer",
     "crates/dap_adapters",
     "crates/db",
     "crates/debug_adapter_extension",
@@ -253,6 +254,7 @@ context_server = { path = "crates/context_server" }
 crashes = { path = "crates/crashes" }
 credentials_provider = { path = "crates/credentials_provider" }
 dap = { path = "crates/dap" }
+data_explorer = { path = "crates/data_explorer" }
 dap_adapters = { path = "crates/dap_adapters" }
 db = { path = "crates/db" }
 debug_adapter_extension = { path = "crates/debug_adapter_extension" }
