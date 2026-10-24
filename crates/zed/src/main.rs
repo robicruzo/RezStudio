@@ -673,6 +673,7 @@ fn main() {
         snippet_provider::init(cx);
 
         repl::init(app_state.fs.clone(), cx);
+        runtime::init(cx);
         recent_projects::init(cx);
         dev_container::init(cx);
 

@@ -160,14 +160,18 @@ Steps:
 
 1. **R language.** Built-in R support in `languages`/`grammars` from `tree-sitter-r` (MIT):
    highlighting, brackets, indentation, outline, for `.R`, `.r`, `.Rprofile`.
-2. **`runtime`.** Discover R (CRAN `R.framework` versions, rig, Homebrew, `PATH`), with a
-   per-project choice in `.zed/settings.json`. Locate Ark (bundled, then a setting). Launch and
-   supervise one R session per window, reusing `repl::kernels::start_kernel_tasks`. Track
-   busy/idle, prompt and working directory; interrupt, restart, shut down on window close. Open
-   `positron.ui` and answer every frontend request with a safe default so R never blocks; open
-   links (including help) in the system browser until M6. Accept `positron.plot` comms and drop
-   them until M3. Comm types are ported from Ark's MIT-licensed generated Rust, pinned to the
-   bundled release, with contract tests.
+2. **`runtime`.** *(Done.)* R installations (CRAN/rig `R.framework` versions, Homebrew, rig on
+   Linux, `PATH`, `R_HOME`) are Zed toolchains for the R language (`languages/src/r.rs`), so the
+   status bar's toolchain picker chooses R per project and remembers it; the default is the `R`
+   on `PATH`. Ark is found through `REZSTUDIO_ARK`, the app bundle, `PATH`, then (debug builds
+   only) Positron's copy. One `RSession` per window starts when its first local folder opens and
+   stops gracefully when the window closes. Ark runs under a small shell supervisor that stops it
+   if RezStudio dies, since Ark doesn't watch its parent. An execution is finished only once both
+   its `execute_reply` (shell) and iopub `idle` have arrived, because output can trail the reply.
+   Ark's `rpc_request`s on stdin are always answered: questions and dialogs use native prompts,
+   the workspace folder is the project root, and unsupported ones return a JSON-RPC error. Links
+   (including help) open in the system browser until M6; `positron.plot` comms are dropped until
+   M3. Comm types are ported from Ark 0.1.252's MIT-licensed generated Rust.
 3. **LSP bridge.** A hidden `rezstudio --lsp-bridge <port>` mode pipes stdio to Ark's LSP TCP port;
    an R `LspAdapter` launches it once the session reports its port.
 4. **`console`.** A bottom-dock panel. Scrollback is a virtualised list of echoed input, ANSI

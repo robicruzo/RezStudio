@@ -11827,6 +11827,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-dispatcher",
+ "collections",
+ "futures 0.3.34",
+ "gpui",
+ "jupyter-protocol",
+ "language",
+ "languages",
+ "log",
+ "pretty_assertions",
+ "project",
+ "runtimelib",
+ "serde",
+ "serde_json",
+ "smol",
+ "task",
+ "tempfile",
+ "util",
+ "uuid",
+ "workspace",
+]
+
+[[package]]
 name = "runtimelib"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -17886,6 +17912,7 @@ dependencies = [
  "repl",
  "reqwest_client",
  "rope",
+ "runtime",
  "sandbox",
  "search",
  "semver",
