@@ -542,11 +542,10 @@ pub struct TelemetrySettings {
 impl settings::Settings for TelemetrySettings {
     fn from_settings(content: &SettingsContent) -> Self {
         let telemetry = content.telemetry.as_ref().unwrap();
-        // RezStudio has no telemetry backend; the upstream endpoints belong to zed.dev, so
-        // sending is forced off regardless of what a settings file says.
         Self {
+            // Crash reports would be uploaded to zed.dev, so they stay off regardless of settings.
             diagnostics: false,
-            metrics: false,
+            metrics: telemetry.metrics.unwrap(),
             anthropic_retention: telemetry.anthropic_retention.unwrap(),
         }
     }

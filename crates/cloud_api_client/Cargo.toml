@@ -24,12 +24,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 yawc.workspace = true
 
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-async-lock.workspace = true
-
-[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-async-lock = { workspace = true, features = ["std"] }
-
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 futures-lite.workspace = true
 gpui_tokio.workspace = true

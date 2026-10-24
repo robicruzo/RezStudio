@@ -1435,7 +1435,8 @@
   "word_diff_enabled": true,
   // Control what info is collected by Zed.
   "telemetry": {
-    // RezStudio never sends telemetry; these values are ignored.
+    // RezStudio never sends telemetry. Crash reports stay off; enabling metrics only
+    // records events in the local telemetry log ("zed: open telemetry log").
     "diagnostics": false,
     "metrics": false,
     // Allow sending requests to Anthropic models that cannot be offered with
