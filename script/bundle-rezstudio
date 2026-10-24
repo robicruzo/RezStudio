@@ -118,9 +118,9 @@ runtime_flags=()
 if [[ "$signing_identity" != "-" ]]; then
     runtime_flags=(--options runtime)
 fi
-codesign --force "${runtime_flags[@]}" --sign "$signing_identity" "${app_path}/Contents/MacOS/cli"
-codesign --force "${runtime_flags[@]}" --entitlements "$entitlements" --sign "$signing_identity" "${app_path}/Contents/MacOS/rezstudio"
-codesign --force "${runtime_flags[@]}" --entitlements "$entitlements" --sign "$signing_identity" "$app_path"
+codesign --force ${runtime_flags[@]+"${runtime_flags[@]}"} --sign "$signing_identity" "${app_path}/Contents/MacOS/cli"
+codesign --force ${runtime_flags[@]+"${runtime_flags[@]}"} --entitlements "$entitlements" --sign "$signing_identity" "${app_path}/Contents/MacOS/rezstudio"
+codesign --force ${runtime_flags[@]+"${runtime_flags[@]}"} --entitlements "$entitlements" --sign "$signing_identity" "$app_path"
 echo "Built ${app_path}"
 
 if [[ "$make_dmg" == true ]]; then
