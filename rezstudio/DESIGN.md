@@ -127,7 +127,7 @@ packages and addins that call `rstudioapi` keep working.
 | # | Goal | Done when |
 |---|---|---|
 | M0 | Fork surgery and rebrand | AI/collab/cloud crates gone, `client`/`telemetry` stubbed, app renamed, builds green on Linux CI and macOS CI. |
-| M1 | `runtime` + `console` for R | Ark bundled; R discovered; Cmd+Enter / Cmd+Shift+S run code; interrupt and restart work; rich output in the console. |
+| M1 | `runtime` + `console` for R | Ark bundled; R discovered; Cmd+Enter / Cmd+Shift+S run code; interrupt and restart work; rich output in the console; Ark LSP completions in the editor and console. |
 | M2 | Environment + data viewer | Live variables; `View(df)` opens the paged grid on a 10M-row frame without lag. |
 | M3 | Plots | Plot history, resize re-render, export. |
 | M4 | Packages + search | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
@@ -136,6 +136,58 @@ packages and addins that call `rstudioapi` keep working.
 | M7 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
 | M8 | Typst native preview | Live preview with source ↔ preview jumping. |
 | M9 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
+
+### M1 plan
+
+Decisions: Ark's LSP is part of M1; plots are accepted but not shown until M3; the R session
+starts when a project opens; Ark 0.1.252 is bundled in the app.
+
+Findings that shape the plan:
+
+- `jupyter-protocol` already models comm and stdin messages, and `repl::kernels` already runs all
+  five channels and routes interrupts to the control channel, which is what Ark expects.
+- Ark is launched as `ark --connection_file F --session-mode console`, with `R_HOME` in the
+  environment (otherwise it runs `R RHOME` from `PATH`).
+- Ark's Jupyter `complete_request` returns nothing; completions only come from its LSP. The LSP
+  runs inside the R process and is started by opening a `positron.lsp` comm with
+  `{"ip_address": "127.0.0.1"}`, which replies with a TCP port. Zed's `lsp` crate only speaks
+  stdio, so a bridge is needed.
+- Comm target names are `positron.<name>` (`ui`, `variables`, `help`, `lsp`, `dap`, `plot`,
+  `dataViewer`). Ark opens `plot` and `dataViewer` itself; the frontend opens the rest.
+- In console mode Ark sends plots over `positron.plot` comms rather than `display_data`.
+
+Steps:
+
+1. **R language.** Built-in R support in `languages`/`grammars` from `tree-sitter-r` (MIT):
+   highlighting, brackets, indentation, outline, for `.R`, `.r`, `.Rprofile`.
+2. **`runtime`.** Discover R (CRAN `R.framework` versions, rig, Homebrew, `PATH`), with a
+   per-project choice in `.zed/settings.json`. Locate Ark (bundled, then a setting). Launch and
+   supervise one R session per window, reusing `repl::kernels::start_kernel_tasks`. Track
+   busy/idle, prompt and working directory; interrupt, restart, shut down on window close. Open
+   `positron.ui` and answer every frontend request with a safe default so R never blocks; open
+   links (including help) in the system browser until M6. Accept `positron.plot` comms and drop
+   them until M3. Comm types are ported from Ark's MIT-licensed generated Rust, pinned to the
+   bundled release, with contract tests.
+3. **LSP bridge.** A hidden `rezstudio --lsp-bridge <port>` mode pipes stdio to Ark's LSP TCP port;
+   an R `LspAdapter` launches it once the session reports its port.
+4. **`console`.** A bottom-dock panel. Scrollback is a virtualised list of echoed input, ANSI
+   stream text, errors with tracebacks and rich outputs (`repl::outputs`, made public). Input is
+   an auto-height R editor: Enter sends when Ark's `is_complete_request` says the code is
+   complete, otherwise inserts a continuation line; Up/Down history, Ctrl+R search, Esc/Ctrl+C
+   interrupt, Ctrl+L clear; `readline()`/`menu()` answered inline. A header shows the R version,
+   working directory, busy state and a restart button.
+5. **Run from editor.** Cmd+Enter runs the selection or the statement under the cursor (found
+   with tree-sitter) and moves to the next statement; Cmd+Shift+Enter sources with echo;
+   Cmd+Shift+S sources; Cmd+Shift+F10 restarts; Ctrl+1/Ctrl+2 focus source/console; Opt+- and
+   Cmd+Shift+M insert `<-` and the pipe.
+6. **Bundling.** `script/bundle-rezstudio` downloads the pinned Ark release, checks its SHA-256,
+   places it in `Contents/MacOS/ark`, signs it and ships Ark's `LICENSE` and `NOTICE`.
+7. **Tests.** Linux: unit tests against a scripted fake kernel. macOS CI: a job installs R and
+   drives the real Ark through execute, error, interrupt (`Sys.sleep(10)`), `readline()` and
+   restart.
+
+Main risks: console completions need Ark's LSP to treat the console input as a virtual document;
+Ark's comm protocol may change between releases, which the pin and contract tests contain.
 
 ## Risks
 
@@ -155,4 +207,3 @@ packages and addins that call `rstudioapi` keep working.
 - Final app name, bundle identifier and icon.
 - Distribution: signing/notarization requires an Apple Developer account; the update feed
   (e.g. Sparkle or a fork of Zed's updater) is undecided.
-- Ark: bundle it in the app (recommended, version-pinned) or download it on first run.
