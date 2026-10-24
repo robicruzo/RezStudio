@@ -265,10 +265,13 @@ Steps:
    Methods without parameters must omit `params` entirely; Ark rejects `"params": {}`. Against
    real Ark and a 10M-row data frame, `get_state` plus `get_schema` take about 160 ms and a
    100-row page from the middle about 6 ms.
-2. **`variables_panel`.** A right-dock Environment pane: a flattened tree in a `uniform_list`
+2. **`variables_panel`.** *(Done.)* A right-dock Environment pane: a flattened tree in a `uniform_list`
    with Name, Type, Size and Value columns, expanding lists, environments, S4/R6 objects and
    data frames lazily with `inspect`; live updates from `update` events; a filter box; a button
-   to open data frames in the viewer; delete and clear (with confirmation).
+   to open data frames in the viewer; delete and clear (with confirmation). Top-level variables
+   are sorted by name, children keep R's order, and expanded variables stay expanded (and are
+   re-inspected) when R changes them. Rows are laid out by hand rather than with `ListItem`,
+   whose disclosure arrow sits outside unindented rows and whose hover slot shifts columns.
 3. **`data_explorer`.** An editor tab per explorer comm. A `ui::Table` asks for the visible rows
    in blocks (`get_data_values`, cached), so a 10M-row frame only ever loads what's on screen;
    row names from `get_row_labels`; headers with the column name, type and NA count; click to

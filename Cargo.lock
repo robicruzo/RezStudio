@@ -15287,6 +15287,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "variables_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "jupyter-protocol",
+ "languages",
+ "project",
+ "runtime",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -17984,6 +18006,7 @@ dependencies = [
  "urlencoding",
  "util",
  "uuid",
+ "variables_panel",
  "vim",
  "vim_mode_setting",
  "watch",
