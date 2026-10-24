@@ -199,8 +199,16 @@ Steps:
    Cmd+Shift+S saves and runs `source(file)` (replacing Save As in R files). Opt+- and
    Cmd+Shift+M insert `<-` and `|>` in R editors and the console input. Ctrl+1/Ctrl+2 focus the
    editor/console (replacing Zed's tab switching on those keys), Cmd+Shift+F10 restarts R.
-6. **Bundling.** `script/bundle-rezstudio` downloads the pinned Ark release, checks its SHA-256,
-   places it in `Contents/MacOS/ark`, signs it and ships Ark's `LICENSE` and `NOTICE`.
+6. **Bundling.** *(Done.)* `script/bundle-rezstudio` downloads the Ark release matching
+   `runtime::ARK_VERSION` (cached under `target/rezstudio-downloads/`), checks it against the
+   release's published SHA-256 (the script refuses to run if the version and checksums drift
+   apart), and installs it as `Contents/MacOS/ark`, which the runtime finds before any other
+   Ark. It's signed like the rest of the bundle, with `crates/zed/resources/ark.entitlements`
+   (library validation off and `DYLD_*` variables allowed, which R needs under the hardened
+   runtime), and Ark's `LICENSE` and `NOTICE` ship in `Contents/Resources/ark/`. macOS CI checks
+   the bundled Ark's version, signature and license files. Bundling git like Zed does is
+   separate: git is GPL-2.0-only and its archive has no license text, so it needs its own
+   license and source notice first.
 7. **Tests.** Linux: unit tests against a scripted fake kernel. macOS CI: a job installs R and
    drives the real Ark through execute, error, interrupt (`Sys.sleep(10)`), `readline()` and
    restart.

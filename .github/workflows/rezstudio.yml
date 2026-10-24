@@ -90,6 +90,16 @@ jobs:
         if: ${{ inputs.release }}
         run: script/bundle-rezstudio -m
 
+      - name: Check the bundled Ark
+        run: |
+          app_path=$(find target/aarch64-apple-darwin -maxdepth 4 -name "RezStudio*.app" -type d | head -n 1)
+          expected=$(sed -n 's/^pub const ARK_VERSION: &str = "\(.*\)";$/\1/p' crates/runtime/src/comms.rs)
+          "$app_path/Contents/MacOS/ark" --version | tee /dev/stderr | grep -qx "Ark ${expected}"
+          codesign --verify --strict "$app_path/Contents/MacOS/ark"
+          test -s "$app_path/Contents/Resources/ark/LICENSE"
+          test -s "$app_path/Contents/Resources/ark/NOTICE"
+          codesign --verify --deep --strict "$app_path"
+
       - name: Archive bundle
         run: |
           app_path=$(find target/aarch64-apple-darwin -maxdepth 4 -name "RezStudio*.app" -type d | head -n 1)
