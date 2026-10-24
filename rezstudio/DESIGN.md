@@ -209,9 +209,13 @@ Steps:
    the bundled Ark's version, signature and license files. Bundling git like Zed does is
    separate: git is GPL-2.0-only and its archive has no license text, so it needs its own
    license and source notice first.
-7. **Tests.** Linux: unit tests against a scripted fake kernel. macOS CI: a job installs R and
-   drives the real Ark through execute, error, interrupt (`Sys.sleep(10)`), `readline()` and
-   restart.
+7. **Tests.** *(Done.)* Linux CI runs the unit tests: sessions driven by scripted kernel
+   messages, the console against a scripted session, R discovery, the bridge and the
+   supervisor. A macOS CI job installs R from CRAN, fetches the pinned Ark with
+   `script/fetch-ark` (shared with the bundle script, so both use the same version and
+   checksums), and runs the ignored real-Ark test: startup, UI and LSP comms, output, errors,
+   `is_complete`, `readline()`, interrupt and recovery, LSP completions, and shutdown. Locally:
+   `REZSTUDIO_ARK=$PWD/$(script/fetch-ark)/ark cargo test -p runtime -- --include-ignored`.
 
 Main risks: console completions need Ark's LSP to treat the console input as a virtual document;
 Ark's comm protocol may change between releases, which the pin and contract tests contain.

@@ -67,57 +67,18 @@ export CXXFLAGS="-stdlib=libc++"
 
 host_triple=$(rustc --version --verbose | sed -n 's/^host: //p')
 target_triple="${1:-$host_triple}"
-# Ark, the R kernel, is pinned to the release whose comm protocol the runtime
-# crate implements. Checksums are from the release's published asset digests.
-ark_version=$(sed -n 's/^pub const ARK_VERSION: &str = "\(.*\)";$/\1/p' crates/runtime/src/comms.rs)
 case "$target_triple" in
-    aarch64-apple-darwin)
-        arch_suffix="aarch64"
-        ark_asset="ark-${ark_version}-darwin-arm64.zip"
-        ark_sha256="aa1186f6e1ad271abaf246fd76e0aa9039cdeeff2cb52147e8887060afd5fb07"
-        ;;
-    x86_64-apple-darwin)
-        arch_suffix="x86_64"
-        ark_asset="ark-${ark_version}-darwin-x64.zip"
-        ark_sha256="a8df8b55d951732b73fd05e8857b9c4b185b8dc9d6bc307f2ae5dcb84d4cc913"
-        ;;
+    aarch64-apple-darwin) arch_suffix="aarch64" ;;
+    x86_64-apple-darwin) arch_suffix="x86_64" ;;
     *)
         echo "Unsupported target $target_triple"
         exit 1
         ;;
 esac
-if [[ "$ark_version" != "0.1.252" ]]; then
-    echo "ARK_VERSION is ${ark_version}, but the checksums here are for Ark 0.1.252; update them together."
-    exit 1
-fi
 rustup target add "$target_triple"
 
-# Downloads `url` to `destination` unless a copy with the expected SHA-256 is already there.
-download_verified() {
-    local url=$1
-    local expected_sha256=$2
-    local destination=$3
-    if [[ -f "$destination" ]] && [[ "$(shasum -a 256 "$destination" | cut -d ' ' -f 1)" == "$expected_sha256" ]]; then
-        return
-    fi
-    mkdir -p "$(dirname "$destination")"
-    curl --silent --show-error --fail --location --retry 3 --output "${destination}.partial" "$url"
-    local actual_sha256
-    actual_sha256=$(shasum -a 256 "${destination}.partial" | cut -d ' ' -f 1)
-    if [[ "$actual_sha256" != "$expected_sha256" ]]; then
-        rm -f "${destination}.partial"
-        echo "Checksum mismatch for ${url}: expected ${expected_sha256}, got ${actual_sha256}"
-        exit 1
-    fi
-    mv "${destination}.partial" "$destination"
-}
-
-echo "Fetching Ark ${ark_version}"
-ark_archive="target/rezstudio-downloads/${ark_asset}"
-download_verified \
-    "https://github.com/posit-dev/ark/releases/download/${ark_version}/${ark_asset}" \
-    "$ark_sha256" \
-    "$ark_archive"
+# Ark, the R kernel, is pinned to the release the runtime crate speaks to.
+ark_dir=$(script/fetch-ark "$target_triple")
 
 cargo_bundle_version=$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")
 if [[ "$cargo_bundle_version" != "cargo-bundle v0.6.1-zed" ]]; then
@@ -154,13 +115,9 @@ cp "${binary_dir}/rezstudio" "${app_path}/Contents/MacOS/rezstudio"
 cp "${binary_dir}/cli" "${app_path}/Contents/MacOS/cli"
 
 # The runtime finds Ark next to the main binary (App::path_for_auxiliary_executable).
-ark_unpacked=$(mktemp -d)
-unzip -q "$ark_archive" -d "$ark_unpacked"
-cp "${ark_unpacked}/ark" "${app_path}/Contents/MacOS/ark"
-chmod +x "${app_path}/Contents/MacOS/ark"
+cp "${ark_dir}/ark" "${app_path}/Contents/MacOS/ark"
 mkdir -p "${app_path}/Contents/Resources/ark"
-cp "${ark_unpacked}/LICENSE" "${ark_unpacked}/NOTICE" "${app_path}/Contents/Resources/ark/"
-rm -rf "$ark_unpacked"
+cp "${ark_dir}/LICENSE" "${ark_dir}/NOTICE" "${app_path}/Contents/Resources/ark/"
 
 # Associated domains need a provisioning profile tied to a paid developer team.
 entitlements="${app_path}/Contents/Resources/rezstudio.entitlements"

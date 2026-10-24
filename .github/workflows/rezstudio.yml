@@ -113,3 +113,39 @@ jobs:
             target/aarch64-apple-darwin/release/RezStudio-*.dmg
           if-no-files-found: error
           retention-days: 14
+
+  r-session:
+    # Drives the pinned Ark with a real R through everything the
+    # console relies on: startup, output, errors, readline(), interrupt, the UI
+    # and LSP comms, completions and shutdown.
+    name: R session tests (macOS arm64, real R and Ark)
+    if: github.repository == 'robicruzo/RezStudio'
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-r-session
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+
+      - name: Fetch the pinned Ark
+        run: echo "REZSTUDIO_ARK=$PWD/$(script/fetch-ark)/ark" >> "$GITHUB_ENV"
+
+      - name: Show R and Ark versions
+        run: |
+          R --version | head -n 1
+          "$REZSTUDIO_ARK" --version
+
+      - name: Run the runtime tests against real R and Ark
+        run: cargo test --locked -p runtime -- --include-ignored
