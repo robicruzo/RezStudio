@@ -84,8 +84,11 @@ if [[ "$target_dir" == "release" ]]; then
 fi
 
 echo "Compiling RezStudio (${channel}, ${target_triple})"
+# Separate invocations: `--bin` would otherwise restrict the cli package's binaries too.
 cargo --config .cargo/bundle-config.toml build ${build_flag} \
-    --package zed --bin rezstudio --package cli --target "$target_triple"
+    --package zed --bin rezstudio --target "$target_triple"
+cargo --config .cargo/bundle-config.toml build ${build_flag} \
+    --package cli --target "$target_triple"
 
 echo "Creating application bundle"
 pushd crates/zed > /dev/null
