@@ -657,7 +657,7 @@ impl ConsolePanel {
             Some(session) => {
                 let session = session.read(cx);
                 let status = match session.state() {
-                    SessionState::Unavailable(_) => Some("R not found"),
+                    SessionState::Unavailable(_) => Some("R unavailable"),
                     SessionState::Restricted => Some("Waiting for folder trust"),
                     SessionState::Starting => Some("Starting R…"),
                     SessionState::Restarting => Some("Restarting R…"),

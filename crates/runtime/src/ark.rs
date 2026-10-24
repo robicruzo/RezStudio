@@ -128,9 +128,18 @@ pub async fn launch_ark(launch: ArkLaunch<'_>) -> Result<(ArkProcess, ArkConnect
         // Ark logs at `info` by default, which floods the log.
         .env("RUST_LOG", "warn");
 
+    // The spawn error's context repeats the whole supervised command line,
+    // which is noise in the console; the root cause says what went wrong.
     let mut process =
         util::process::Child::spawn(command, Stdio::null(), Stdio::piped(), Stdio::piped())
-            .with_context(|| format!("starting Ark at {}", launch.ark.display()))?;
+            .map_err(|error| {
+                log::error!("failed to spawn Ark: {error:?}");
+                anyhow::anyhow!(
+                    "Couldn't run Ark at {}: {}",
+                    launch.ark.display(),
+                    error.root_cause()
+                )
+            })?;
     forward_output_to_log(&mut process);
     let process = ArkProcess {
         process,

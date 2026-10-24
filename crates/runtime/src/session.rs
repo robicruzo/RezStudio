@@ -212,7 +212,13 @@ impl RSession {
         let generation = self.generation;
         let bundled_ark = self.bundled_ark.clone();
         let env = self.env.clone();
-        let project_root = self.project_root.clone();
+        let working_directory = match launch_directory(&self.project_root) {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.set_state(SessionState::Unavailable(format!("{error}")), cx);
+                return;
+            }
+        };
         self.set_state(SessionState::Starting, cx);
 
         self._launch_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -227,7 +233,7 @@ impl RSession {
                 ark::launch_ark(ArkLaunch {
                     ark: &ark,
                     r_home: &r.r_home,
-                    working_directory: &project_root,
+                    working_directory: &working_directory,
                     env,
                 })
                 .await
@@ -608,7 +614,10 @@ impl RSession {
             |method: &str| comms::rpc_error(format!("RezStudio does not support `{method}` yet."));
         let reply = match request {
             UiFrontendRequest::WorkspaceFolder => comms::rpc_result(serde_json::Value::String(
-                self.project_root.to_string_lossy().into_owned(),
+                launch_directory(&self.project_root)
+                    .unwrap_or_else(|_| self.project_root.clone())
+                    .to_string_lossy()
+                    .into_owned(),
             )),
             UiFrontendRequest::LastActiveEditorContext => {
                 comms::rpc_result(serde_json::Value::Null)
@@ -820,6 +829,23 @@ impl RSession {
     ) {
         self.handle_message(message, window, cx);
     }
+}
+
+/// The folder R runs in: the project folder, or the folder containing the
+/// file when a single file was opened as the project.
+fn launch_directory(project_root: &std::path::Path) -> Result<PathBuf> {
+    if project_root.is_dir() {
+        return Ok(project_root.to_path_buf());
+    }
+    if let Some(parent) = project_root.parent()
+        && project_root.is_file()
+    {
+        return Ok(parent.to_path_buf());
+    }
+    anyhow::bail!(
+        "R can't start because the project folder {} doesn't exist.",
+        project_root.display()
+    )
 }
 
 fn json_object(
@@ -1376,6 +1402,48 @@ mod tests {
         harness.session.update(cx, |session, cx| {
             assert!(matches!(session.state(), SessionState::Exited(_)));
             assert!(session.execute("1".into(), cx).is_err());
+        });
+    }
+
+    #[test]
+    fn test_launch_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("analysis.R");
+        std::fs::write(&script, "1 + 1\n").unwrap();
+
+        assert_eq!(launch_directory(temp.path()).unwrap(), temp.path());
+        assert_eq!(launch_directory(&script).unwrap(), temp.path());
+        let missing = temp.path().join("missing").join("project");
+        let error = launch_directory(&missing).unwrap_err().to_string();
+        assert!(error.contains("doesn't exist"), "{error}");
+    }
+
+    #[gpui::test]
+    fn test_missing_project_folder_is_reported(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let r = RToolchainData {
+            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+            version: Some("4.5.3".to_string()),
+            source: languages::r::RInstallationSource::Rig,
+        };
+        let session = cx.new(|cx| {
+            RSession::new(
+                Some(r),
+                PathBuf::from("/definitely/not/a/real/project"),
+                HashMap::default(),
+                None,
+                cx,
+            )
+        });
+        session.update_in(cx, |session, window, cx| session.start(window, cx));
+        session.read_with(cx, |session, _| {
+            let SessionState::Unavailable(message) = session.state() else {
+                panic!("expected Unavailable, got {:?}", session.state());
+            };
+            assert!(
+                message.contains("/definitely/not/a/real/project"),
+                "{message}"
+            );
         });
     }
 
