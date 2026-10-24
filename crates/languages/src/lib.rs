@@ -25,6 +25,7 @@ mod go;
 mod json;
 mod package_json;
 mod python;
+pub mod r;
 mod rust;
 mod tailwind;
 mod tailwindcss;
@@ -180,6 +181,7 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
         LanguageInfo {
             name: "r",
             adapters: vec![],
+            toolchain: Some(Arc::new(r::RToolchainLister)),
             ..Default::default()
         },
         LanguageInfo {
