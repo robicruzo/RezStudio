@@ -43,6 +43,21 @@ actions!(
         ClearConsole,
         /// Restarts R.
         RestartR,
+        /// Runs the selected code in the R console, or the statement under the
+        /// cursor and moves to the next one.
+        RunLineOrSelection,
+        /// Saves the file and runs it with `source()`.
+        SourceFile,
+        /// Saves the file and runs it with `source(echo = TRUE)`, showing each line.
+        SourceFileWithEcho,
+        /// Inserts R's assignment operator, `<-`.
+        InsertAssignment,
+        /// Inserts R's pipe operator, `|>`.
+        InsertPipe,
+        /// Moves focus to the active editor.
+        FocusSource,
+        /// Moves focus to the R console's input.
+        FocusConsole,
     ]
 );
 
@@ -57,11 +72,310 @@ const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
-        workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
-            workspace.toggle_panel_focus::<ConsolePanel>(window, cx);
-        });
+        workspace
+            .register_action(|workspace, _: &ToggleFocus, window, cx| {
+                workspace.toggle_panel_focus::<ConsolePanel>(window, cx);
+            })
+            .register_action(|workspace, _: &FocusConsole, window, cx| {
+                workspace.focus_panel::<ConsolePanel>(window, cx);
+            })
+            .register_action(|workspace, _: &FocusSource, window, cx| {
+                workspace.focus_center_pane(window, cx);
+            })
+            .register_action(|workspace, _: &RestartR, window, cx| {
+                if let Some(panel) = workspace.panel::<ConsolePanel>(cx) {
+                    panel.update(cx, |panel, cx| panel.restart(&RestartR, window, cx));
+                }
+            });
     })
     .detach();
+
+    cx.observe_new(|editor: &mut Editor, _, cx| {
+        register_editor_actions(editor, cx);
+    })
+    .detach();
+}
+
+fn register_editor_actions(editor: &mut Editor, cx: &mut Context<Editor>) {
+    let handle = cx.entity().downgrade();
+    editor
+        .register_action({
+            let handle = handle.clone();
+            move |_: &RunLineOrSelection, window, cx| {
+                run_line_or_selection(&handle, window, cx).log_err();
+            }
+        })
+        .detach();
+    editor
+        .register_action({
+            let handle = handle.clone();
+            move |_: &SourceFile, window, cx| {
+                source_file(&handle, false, window, cx).log_err();
+            }
+        })
+        .detach();
+    editor
+        .register_action({
+            let handle = handle.clone();
+            move |_: &SourceFileWithEcho, window, cx| {
+                source_file(&handle, true, window, cx).log_err();
+            }
+        })
+        .detach();
+    editor
+        .register_action({
+            let handle = handle.clone();
+            move |_: &InsertAssignment, window, cx| insert_operator(&handle, "<-", window, cx)
+        })
+        .detach();
+    editor
+        .register_action(move |_: &InsertPipe, window, cx| {
+            insert_operator(&handle, "|>", window, cx)
+        })
+        .detach();
+}
+
+/// The console of the workspace containing `editor`, opened and showing.
+fn console_for_editor(
+    editor: &Entity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Entity<ConsolePanel>> {
+    let workspace = editor.read(cx).workspace()?;
+    let panel = workspace.read(cx).panel::<ConsolePanel>(cx)?;
+    workspace.update(cx, |workspace, cx| {
+        workspace.open_panel::<ConsolePanel>(window, cx)
+    });
+    Some(panel)
+}
+
+fn run_line_or_selection(
+    handle: &WeakEntity<Editor>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
+    let editor = handle.upgrade().context("editor was closed")?;
+    let Some((code, next_row)) = editor.update(cx, |editor, cx| code_at_cursor(editor, cx)) else {
+        return Ok(());
+    };
+    if let Some(row) = next_row {
+        editor.update(cx, |editor, cx| {
+            editor.go_to_singleton_buffer_point(Point::new(row, 0), window, cx)
+        });
+    }
+    let Some(code) = code else {
+        return Ok(());
+    };
+    let panel = console_for_editor(&editor, window, cx).context("the R console isn't open")?;
+    panel.update(cx, |panel, cx| panel.run_from_editor(&code, cx));
+    Ok(())
+}
+
+/// The code Cmd+Enter runs, if any, and the row the cursor moves to after.
+/// With a selection, that's the selected text and the cursor stays put.
+fn code_at_cursor(
+    editor: &mut Editor,
+    cx: &mut Context<Editor>,
+) -> Option<(Option<String>, Option<u32>)> {
+    let display_snapshot = editor.display_snapshot(cx);
+    let selection = editor.selections.newest::<Point>(&display_snapshot);
+    let buffer = editor.buffer().read(cx).as_singleton()?;
+    let snapshot = buffer.read(cx).snapshot();
+    if !selection.is_empty() {
+        let text: String = snapshot
+            .text_for_range(selection.start..selection.end)
+            .collect();
+        return Some((Some(text), None));
+    }
+    let plan = plan_line_run(&snapshot, selection.head().row);
+    let code = plan.rows.map(|rows| {
+        let end = Point::new(*rows.end(), snapshot.line_len(*rows.end()));
+        snapshot
+            .text_for_range(Point::new(*rows.start(), 0)..end)
+            .collect::<String>()
+    });
+    Some((code, Some(plan.next_row)))
+}
+
+/// What Cmd+Enter does without a selection, given the cursor's row.
+#[derive(Debug, PartialEq)]
+struct LineRun {
+    /// The lines to run, or `None` on a blank or comment-only line.
+    rows: Option<std::ops::RangeInclusive<u32>>,
+    /// Where the cursor goes next: the start of the following statement.
+    next_row: u32,
+}
+
+/// Finds the whole top-level statement under `row` (a multi-line call or
+/// function definition, or every statement on the line), the way RStudio's
+/// Cmd+Enter does.
+fn plan_line_run(snapshot: &language::BufferSnapshot, row: u32) -> LineRun {
+    let max_row = snapshot.max_point().row;
+    let Some(layer) = snapshot.syntax_layers().next() else {
+        return LineRun {
+            rows: Some(row..=row),
+            next_row: (row + 1).min(max_row),
+        };
+    };
+    let root = layer.node();
+    let mut statements: Vec<(u32, u32, bool)> = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if !child.is_named() || child.kind() == "comment" {
+            continue;
+        }
+        statements.push((
+            child.start_position().row as u32,
+            child.end_position().row as u32,
+            child.has_error(),
+        ));
+    }
+
+    let Some(&(mut start, mut end, broken)) = statements
+        .iter()
+        .find(|(start, end, _)| *start <= row && row <= *end)
+    else {
+        let next_row = statements
+            .iter()
+            .find(|(start, _, _)| *start > row)
+            .map_or(row, |(start, _, _)| *start);
+        return LineRun {
+            rows: None,
+            next_row,
+        };
+    };
+    if broken {
+        // Code R can't parse yet: run just this line, rather than everything
+        // the parser lumped into the error.
+        start = row;
+        end = row;
+    } else {
+        // Statements sharing a line with this one run together.
+        loop {
+            let mut grew = false;
+            for &(other_start, other_end, other_broken) in &statements {
+                let overlaps = other_start <= end && other_end >= start;
+                if !other_broken && overlaps && (other_start < start || other_end > end) {
+                    start = start.min(other_start);
+                    end = end.max(other_end);
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+    }
+    let next_row = statements
+        .iter()
+        .find(|(statement_start, _, _)| *statement_start > end)
+        .map_or((end + 1).min(max_row), |(statement_start, _, _)| {
+            *statement_start
+        });
+    LineRun {
+        rows: Some(start..=end),
+        next_row,
+    }
+}
+
+fn source_file(
+    handle: &WeakEntity<Editor>,
+    echo: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
+    let editor = handle.upgrade().context("editor was closed")?;
+    let panel = console_for_editor(&editor, window, cx).context("the R console isn't open")?;
+    let workspace = editor
+        .read(cx)
+        .workspace()
+        .context("editor has no workspace")?;
+    let Some(buffer) = editor.read(cx).buffer().read(cx).as_singleton() else {
+        return Ok(());
+    };
+    let Some(path) = buffer
+        .read(cx)
+        .file()
+        .and_then(|file| file.as_local())
+        .map(|file| file.abs_path(cx))
+    else {
+        panel.update(cx, |panel, cx| {
+            panel.write_notice("Save this file before sourcing it.", WARNING_STYLE, cx)
+        });
+        return Ok(());
+    };
+    let code = source_call(&path, echo);
+    // Like RStudio, save first so `source()` reads what's on screen.
+    let save = buffer.read(cx).is_dirty().then(|| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.project().update(cx, |project, cx| {
+                project.save_buffers(std::collections::HashSet::from_iter([buffer.clone()]), cx)
+            })
+        })
+    });
+    window
+        .spawn(cx, async move |cx| {
+            if let Some(save) = save {
+                save.await?;
+            }
+            panel.update(cx, |panel, cx| panel.run_from_editor(&code, cx));
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    Ok(())
+}
+
+fn source_call(path: &std::path::Path, echo: bool) -> String {
+    let path = path
+        .strip_prefix(util::paths::home_dir())
+        .map(|relative| PathBuf::from("~").join(relative))
+        .unwrap_or_else(|_| path.to_path_buf());
+    let echo = if echo { ", echo = TRUE" } else { "" };
+    format!(
+        "source({}{echo})",
+        r_string_literal(&path.to_string_lossy())
+    )
+}
+
+fn r_string_literal(text: &str) -> String {
+    let mut literal = String::with_capacity(text.len() + 2);
+    literal.push('"');
+    for character in text.chars() {
+        match character {
+            '\\' => literal.push_str("\\\\"),
+            '"' => literal.push_str("\\\""),
+            _ => literal.push(character),
+        }
+    }
+    literal.push('"');
+    literal
+}
+
+fn insert_operator(handle: &WeakEntity<Editor>, operator: &str, window: &mut Window, cx: &mut App) {
+    let Some(editor) = handle.upgrade() else {
+        return;
+    };
+    editor.update(cx, |editor, cx| {
+        let display_snapshot = editor.display_snapshot(cx);
+        let cursor = editor.selections.newest::<Point>(&display_snapshot).start;
+        let previous = editor.buffer().read(cx).as_singleton().and_then(|buffer| {
+            let snapshot = buffer.read(cx).snapshot();
+            (cursor.column > 0)
+                .then(|| snapshot.reversed_chars_at(cursor).next())
+                .flatten()
+        });
+        editor.insert(&operator_text(operator, previous), window, cx);
+    });
+}
+
+/// Surrounds `operator` with single spaces, without doubling a space that's
+/// already before the cursor, as RStudio does.
+fn operator_text(operator: &str, previous: Option<char>) -> String {
+    match previous {
+        None => format!("{operator} "),
+        Some(character) if character.is_whitespace() => format!("{operator} "),
+        Some(_) => format!(" {operator} "),
+    }
 }
 
 pub struct ConsolePanel {
@@ -229,6 +543,13 @@ impl ConsolePanel {
         session.update(cx, |session, cx| session.execute(code.clone(), cx))?;
         self.push_history(code);
         Ok(())
+    }
+
+    /// Runs code sent from an editor, reporting problems in the console.
+    pub fn run_from_editor(&mut self, code: &str, cx: &mut Context<Self>) {
+        if let Err(error) = self.execute(code, cx) {
+            self.write_notice(&format!("{error:#}"), WARNING_STYLE, cx);
+        }
     }
 
     fn handle_session_event(
@@ -868,6 +1189,7 @@ mod tests {
     use workspace::MultiWorkspace;
 
     struct Harness {
+        workspace: Entity<Workspace>,
         panel: Entity<ConsolePanel>,
         session: Entity<RSession>,
         requests: mpsc::Receiver<JupyterMessage>,
@@ -893,6 +1215,9 @@ mod tests {
 
             let panel = workspace.update_in(cx, |workspace, window, cx| {
                 cx.new(|cx| ConsolePanel::new(workspace, window, cx))
+            });
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx)
             });
             let session = cx.new(|cx| {
                 RSession::new(
@@ -922,6 +1247,7 @@ mod tests {
                 requests.try_recv().unwrap();
             }
             let harness = Self {
+                workspace,
                 panel,
                 session,
                 requests,
@@ -1189,5 +1515,174 @@ mod tests {
             panel.clear_console(&ClearConsole, window, cx)
         });
         assert!(!harness.output(cx).contains("x <- 1"));
+    }
+
+    fn r_buffer_snapshot(text: &str, cx: &mut gpui::App) -> language::BufferSnapshot {
+        let language = languages::language("r", tree_sitter_r::LANGUAGE.into());
+        let buffer = cx.new(|cx| {
+            let mut buffer = language::Buffer::local(text, cx);
+            buffer.set_sync_parse_timeout(Some(std::time::Duration::from_secs(5)));
+            buffer.set_language(Some(language), cx);
+            buffer
+        });
+        buffer.read(cx).snapshot()
+    }
+
+    #[gpui::test]
+    fn test_plan_line_run(cx: &mut gpui::App) {
+        let text = "x <- 1\n\nmodel <- lm(\n  y ~ x,\n  data = d\n)\n# a comment\ny <- 2; z <- 3\nf <- function() {\n  1\n}\n";
+        let snapshot = r_buffer_snapshot(text, cx);
+        let plan = |row| plan_line_run(&snapshot, row);
+
+        assert_eq!(
+            plan(0),
+            LineRun {
+                rows: Some(0..=0),
+                next_row: 2
+            }
+        );
+        // A blank line runs nothing and moves to the next statement.
+        assert_eq!(
+            plan(1),
+            LineRun {
+                rows: None,
+                next_row: 2
+            }
+        );
+        // Anywhere inside a multi-line call runs the whole call.
+        assert_eq!(
+            plan(3),
+            LineRun {
+                rows: Some(2..=5),
+                next_row: 7
+            }
+        );
+        assert_eq!(
+            plan(6),
+            LineRun {
+                rows: None,
+                next_row: 7
+            }
+        );
+        // Two statements on one line run together.
+        assert_eq!(
+            plan(7),
+            LineRun {
+                rows: Some(7..=7),
+                next_row: 8
+            }
+        );
+        // Inside a function body, the whole definition runs.
+        assert_eq!(
+            plan(9),
+            LineRun {
+                rows: Some(8..=10),
+                next_row: 11
+            }
+        );
+    }
+
+    #[gpui::test]
+    fn test_plan_line_run_with_unparsable_code(cx: &mut gpui::App) {
+        let snapshot = r_buffer_snapshot("x <- 1\ny <- (2 +\nz <- 3\n", cx);
+        let plan = plan_line_run(&snapshot, 1);
+        assert_eq!(plan.rows, Some(1..=1));
+    }
+
+    #[test]
+    fn test_operator_text() {
+        assert_eq!(operator_text("<-", Some('x')), " <- ");
+        assert_eq!(operator_text("<-", Some(' ')), "<- ");
+        assert_eq!(operator_text("|>", None), "|> ");
+    }
+
+    #[test]
+    fn test_source_call() {
+        let home = util::paths::home_dir();
+        assert_eq!(
+            source_call(&home.join("project").join("analysis.R"), true),
+            "source(\"~/project/analysis.R\", echo = TRUE)"
+        );
+        assert_eq!(
+            source_call(std::path::Path::new("/data/odd \"name\".R"), false),
+            "source(\"/data/odd \\\"name\\\".R\")"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_run_line_or_selection_sends_statement_and_moves_cursor(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        let project = harness
+            .workspace
+            .read_with(cx, |workspace, _| workspace.project().clone());
+        let buffer = cx.new(|cx| {
+            let mut buffer = language::Buffer::local(
+                "fit <- lm(\n  mpg ~ wt,\n  data = mtcars\n)\n\nsummary(fit)\n",
+                cx,
+            );
+            buffer.set_sync_parse_timeout(Some(std::time::Duration::from_secs(5)));
+            buffer.set_language(
+                Some(languages::language("r", tree_sitter_r::LANGUAGE.into())),
+                cx,
+            );
+            buffer
+        });
+        let editor = harness.workspace.update_in(cx, |workspace, window, cx| {
+            let editor = cx.new(|cx| Editor::for_buffer(buffer, Some(project), window, cx));
+            workspace.add_item_to_active_pane(Box::new(editor.clone()), None, true, window, cx);
+            editor
+        });
+        editor.update_in(cx, |editor, window, cx| {
+            editor.go_to_singleton_buffer_point(Point::new(1, 4), window, cx)
+        });
+
+        cx.update(|window, cx| run_line_or_selection(&editor.downgrade(), window, cx))
+            .unwrap();
+        cx.run_until_parked();
+
+        let execute = harness.requests.try_recv().unwrap();
+        let JupyterMessageContent::ExecuteRequest(request) = &execute.content else {
+            panic!("expected execute_request, got {}", execute.header.msg_type);
+        };
+        assert_eq!(request.code, "fit <- lm(\n  mpg ~ wt,\n  data = mtcars\n)");
+        let cursor = editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            editor.selections.newest::<Point>(&snapshot).head()
+        });
+        assert_eq!(cursor, Point::new(5, 0));
+        assert!(harness.output(cx).contains("> fit <- lm("));
+    }
+
+    #[gpui::test]
+    fn test_default_keymaps_bind_console_actions(cx: &mut gpui::App) {
+        // Only this crate's actions are registered here, so other bindings
+        // fail to load; ours must all load with valid contexts.
+        for path in ["keymaps/default-macos.json", "keymaps/default-linux.json"] {
+            let bindings =
+                settings::KeymapFile::load_asset_allow_partial_failure(path, cx).unwrap();
+            let names: std::collections::HashSet<&str> = bindings
+                .iter()
+                .map(|binding| binding.action().name())
+                .filter(|name| name.starts_with("r_console::"))
+                .collect();
+            for expected in [
+                "r_console::Submit",
+                "r_console::PreviousHistory",
+                "r_console::NextHistory",
+                "r_console::Escape",
+                "r_console::Interrupt",
+                "r_console::ClearConsole",
+                "r_console::RunLineOrSelection",
+                "r_console::SourceFile",
+                "r_console::SourceFileWithEcho",
+                "r_console::InsertAssignment",
+                "r_console::InsertPipe",
+                "r_console::FocusSource",
+                "r_console::FocusConsole",
+                "r_console::RestartR",
+            ] {
+                assert!(names.contains(expected), "{path} doesn't bind {expected}");
+            }
+        }
     }
 }

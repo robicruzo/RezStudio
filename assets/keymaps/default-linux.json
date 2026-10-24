@@ -1085,6 +1085,37 @@
       "escape": "r_console::Escape",
       "ctrl-c": "r_console::Interrupt",
       "ctrl-l": "r_console::ClearConsole",
+      "alt--": "r_console::InsertAssignment",
+      "ctrl-shift-m": "r_console::InsertPipe",
+    },
+  },
+  {
+    "context": "Editor && mode == full && (extension == R || extension == r)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-enter": "r_console::RunLineOrSelection",
+      "ctrl-shift-enter": "r_console::SourceFileWithEcho",
+      "ctrl-shift-s": "r_console::SourceFile",
+      "alt--": "r_console::InsertAssignment",
+      "ctrl-shift-m": "r_console::InsertPipe",
+    },
+  },
+  {
+    "context": "Workspace",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-1": "r_console::FocusSource",
+      "ctrl-2": "r_console::FocusConsole",
+      "ctrl-shift-f10": "r_console::RestartR",
+    },
+  },
+  {
+    // RStudio's focus keys replace Zed's tab switching on Ctrl+1/Ctrl+2.
+    "context": "Pane",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-1": "r_console::FocusSource",
+      "ctrl-2": "r_console::FocusConsole",
     },
   },
   {

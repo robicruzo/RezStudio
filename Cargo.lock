@@ -11073,6 +11073,7 @@ dependencies = [
  "terminal_view",
  "theme",
  "theme_settings",
+ "tree-sitter-r",
  "ui",
  "util",
  "workspace",

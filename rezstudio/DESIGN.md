@@ -191,10 +191,14 @@ Steps:
    echoed input blue. The header shows the R version, working directory, a busy spinner and
    interrupt/clear/restart buttons. Still to do: completions in the console input (the input
    isn't a project file, so Ark's LSP needs a virtual document for it).
-5. **Run from editor.** Cmd+Enter runs the selection or the statement under the cursor (found
-   with tree-sitter) and moves to the next statement; Cmd+Shift+Enter sources with echo;
-   Cmd+Shift+S sources; Cmd+Shift+F10 restarts; Ctrl+1/Ctrl+2 focus source/console; Opt+- and
-   Cmd+Shift+M insert `<-` and the pipe.
+5. **Run from editor.** *(Done.)* In `.R`/`.r` editors: Cmd+Enter runs the selection, or the
+   whole top-level statement under the cursor (found in the tree-sitter tree, so multi-line calls
+   and function definitions run as one; statements sharing a line run together; a statement with
+   a syntax error runs only the cursor's line) and moves to the next statement; on a blank or
+   comment line it only moves. Cmd+Shift+Enter saves and runs `source(file, echo = TRUE)`;
+   Cmd+Shift+S saves and runs `source(file)` (replacing Save As in R files). Opt+- and
+   Cmd+Shift+M insert `<-` and `|>` in R editors and the console input. Ctrl+1/Ctrl+2 focus the
+   editor/console (replacing Zed's tab switching on those keys), Cmd+Shift+F10 restarts R.
 6. **Bundling.** `script/bundle-rezstudio` downloads the pinned Ark release, checks its SHA-256,
    places it in `Contents/MacOS/ark`, signs it and ships Ark's `LICENSE` and `NOTICE`.
 7. **Tests.** Linux: unit tests against a scripted fake kernel. macOS CI: a job installs R and
