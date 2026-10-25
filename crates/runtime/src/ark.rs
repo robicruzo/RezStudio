@@ -178,8 +178,9 @@ pub async fn launch_ark(launch: ArkLaunch<'_>) -> Result<(ArkProcess, ArkConnect
 
 /// Ark doesn't notice when its frontend dies, so a crashed or force-quit
 /// RezStudio would leave R running. This shell wrapper polls for the process
-/// that started it and stops Ark once that process is gone. Ark's exit status
-/// is passed through, and the connection file is removed when Ark exits.
+/// that started it and stops Ark once that process is gone. Ark can ignore
+/// SIGTERM, so after a few seconds it's killed outright. Ark's exit status is
+/// passed through, and the connection file is removed when Ark exits.
 const SUPERVISOR_SCRIPT: &str = r#"
 connection_file="$1"
 ark="$2"
@@ -192,6 +193,12 @@ ark_pid=$!
   # Ark can take its whole process group down when stopped, so clean up first.
   rm -f "$connection_file"
   kill -TERM "$ark_pid" 2>/dev/null
+  waited=0
+  while kill -0 "$ark_pid" 2>/dev/null && [ "$waited" -lt 5 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -KILL "$ark_pid" 2>/dev/null
 ) &
 watcher_pid=$!
 wait "$ark_pid"
@@ -358,8 +365,10 @@ mod supervisor_tests {
         assert!(!connection_file.exists());
     }
 
-    #[test]
-    fn test_supervisor_stops_program_when_parent_dies() {
+    /// Runs a fake Ark doing `body` under the supervisor, from a parent that
+    /// exits right away as a crashed RezStudio would, and asserts the fake is
+    /// stopped and the connection file removed.
+    fn assert_stopped_when_parent_dies(body: &str) {
         let temp = tempfile::tempdir().unwrap();
         let connection_file = temp.path().join("kernel.json");
         std::fs::write(&connection_file, "{}").unwrap();
@@ -367,10 +376,7 @@ mod supervisor_tests {
         let program = temp.path().join("fake-ark");
         std::fs::write(
             &program,
-            format!(
-                "#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n",
-                pid_file.display()
-            ),
+            format!("#!/bin/sh\necho $$ > '{}'\n{body}\n", pid_file.display()),
         )
         .unwrap();
         std::process::Command::new("chmod")
@@ -379,8 +385,6 @@ mod supervisor_tests {
             .status()
             .unwrap();
 
-        // A short-lived parent stands in for RezStudio: it starts the
-        // supervisor in the background and exits right away.
         let supervisor = supervised_command(&program, &connection_file);
         let mut parent = std::process::Command::new("/bin/sh");
         parent
@@ -401,6 +405,17 @@ mod supervisor_tests {
             "the program kept running after its parent exited"
         );
         assert!(wait_for(|| !connection_file.exists()));
+    }
+
+    #[test]
+    fn test_supervisor_stops_program_when_parent_dies() {
+        assert_stopped_when_parent_dies("exec sleep 60");
+    }
+
+    #[test]
+    fn test_supervisor_kills_program_that_ignores_sigterm() {
+        // As Ark did, leaving R running after RezStudio quit.
+        assert_stopped_when_parent_dies("trap '' TERM\nwhile true; do sleep 1; done");
     }
 }
 
