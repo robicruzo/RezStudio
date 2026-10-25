@@ -30,6 +30,10 @@ use workspace::item::Item;
 /// Ark answers on R's thread; sorting 10M rows can take a few seconds.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const COLUMN_WIDTH: f32 = 120.;
+/// Ark answers one request at a time, so dragging the scrollbar would queue a
+/// fetch for every block passed. Capping them lets the rows where the drag
+/// stops load next.
+const MAX_FETCHES_IN_FLIGHT: usize = 4;
 
 /// Opens a viewer tab whenever Ark opens a data explorer for this window's R.
 pub fn init(cx: &mut App) {
@@ -119,6 +123,7 @@ pub struct DataExplorerView {
     /// Bumped whenever fetched data becomes stale, so late replies are dropped.
     generation: usize,
     profile_callback: Option<String>,
+    fetches_in_flight: usize,
     focus_handle: FocusHandle,
     interaction: Entity<TableInteractionState>,
     widths: Entity<ResizableColumnsState>,
@@ -145,6 +150,7 @@ impl DataExplorerView {
             error: None,
             generation: 0,
             profile_callback: None,
+            fetches_in_flight: 0,
             focus_handle: cx.focus_handle(),
             interaction: cx.new(|cx| TableInteractionState::new(cx)),
             widths: cx.new(|_| column_widths(0)),
@@ -317,7 +323,8 @@ impl DataExplorerView {
         if self.status != Status::Ready {
             return;
         }
-        for block in self.data.claim_missing_blocks(rows) {
+        let limit = MAX_FETCHES_IN_FLIGHT.saturating_sub(self.fetches_in_flight);
+        for block in self.data.claim_missing_blocks(rows, limit) {
             self.fetch_block(block, cx);
         }
     }
@@ -354,6 +361,7 @@ impl DataExplorerView {
             .map_err(anyhow::Error::from)
             .and_then(|params| self.request("get_row_labels", params, cx))
         });
+        self.fetches_in_flight += 1;
         cx.spawn(async move |this, cx| {
             let block_value = async {
                 let values: TableData = serde_json::from_value(values?.await?)
@@ -374,6 +382,9 @@ impl DataExplorerView {
             .await
             .unwrap_or_else(|error| Block::Failed(format!("{error:#}")));
             this.update(cx, |this, cx| {
+                this.fetches_in_flight = this.fetches_in_flight.saturating_sub(1);
+                // Rendering again lets rows that waited for a free fetch ask now.
+                cx.notify();
                 if this.generation != generation {
                     return;
                 }
@@ -381,7 +392,6 @@ impl DataExplorerView {
                     this.error = Some(message.clone());
                 }
                 this.data.set_block(block, block_value);
-                cx.notify();
             })
             .log_err();
         })
@@ -995,6 +1005,18 @@ mod tests {
             assert_eq!(cell(2), Some(("NA", true)));
             assert_eq!(view.data.row_label(5_000_010).as_deref(), Some("r5000010"));
         });
+
+        // A long jump asks for at most four blocks at once; the rest wait.
+        view.update(cx, |view, cx| view.ensure_rows(6_000_000..6_000_600, cx));
+        let mut fetched = Vec::new();
+        while let Ok(request) = harness.requests.try_recv() {
+            if let JupyterMessageContent::CommMsg(message) = &request.content
+                && message.data["method"] == "get_data_values"
+            {
+                fetched.push(message.data["params"]["columns"][0]["spec"]["first_index"].clone());
+            }
+        }
+        assert_eq!(fetched, [6_000_000, 6_000_100, 6_000_200, 6_000_300]);
     }
 
     #[gpui::test]
