@@ -480,9 +480,9 @@ impl PlotsPanel {
                         cx,
                     )
                 });
-                let result = render
-                    .await
-                    .map_err(|error| anyhow::anyhow!(describe_render_error(&error)))?;
+                let result = render.await.map_err(|error| {
+                    anyhow::anyhow!(describe_export_error(export.format, &error))
+                })?;
                 write_plot(path, result, cx).await
             }
             .await;
@@ -607,6 +607,21 @@ impl PlotsPanel {
                         }),
                     ),
             )
+    }
+}
+
+/// Like [`describe_render_error`], with a way out for SVG: without the
+/// svglite package, Ark falls back to R's own `svg()`, which on macOS needs
+/// XQuartz and otherwise writes nothing, so Ark can't find the file.
+fn describe_export_error(format: PlotRenderFormat, error: &anyhow::Error) -> String {
+    let description = describe_render_error(error);
+    if format == PlotRenderFormat::Svg && format!("{error:#}").contains("No such file or directory")
+    {
+        format!(
+            "{description}. Saving as SVG needs the svglite package: run install.packages(\"svglite\") in the console."
+        )
+    } else {
+        description
     }
 }
 
@@ -1371,6 +1386,23 @@ mod tests {
                 .iter()
                 .all(|window| window.downcast::<zoom_window::PlotZoomWindow>().is_none())
         );
+    }
+
+    #[test]
+    fn test_export_errors_explain_missing_svglite() {
+        let missing = anyhow::anyhow!(
+            "Failed to process positron.plot request: No such file or directory (os error 2)"
+        );
+        let message = describe_export_error(PlotRenderFormat::Svg, &missing);
+        assert!(
+            message.starts_with("R couldn't draw the plot: No such file or directory"),
+            "{message}"
+        );
+        assert!(
+            message.contains("install.packages(\"svglite\")"),
+            "{message}"
+        );
+        assert!(!describe_export_error(PlotRenderFormat::Pdf, &missing).contains("svglite"));
     }
 
     #[gpui::test]

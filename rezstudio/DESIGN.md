@@ -380,6 +380,11 @@ Steps:
    - **Zoom:** opens the plot in its own window, starting from the pane's image. It's
      redrawn to fit once a resize settles, and again when R updates the plot. The title is
      the plot's name from `get_metadata`. Esc or Cmd-W closes it.
+   - **SVG without svglite:** Ark draws SVGs with svglite when it's installed, and falls back
+     to R's own `svg()` otherwise. On CRAN R for macOS, `svg()` needs XQuartz and silently
+     writes nothing, so Ark fails with "No such file or directory". Saving as SVG then says
+     to install svglite, and the macOS CI job installs it so the real-Ark test checks a
+     real SVG.
    - **Shared code:** the pane and the zoom window share `fitting.rs`: measuring, settling,
      the minimum size, decoding and the one-line error.
    - **Checked live:** Copy put the plot's PNG on the macOS clipboard. The zoom window opened.

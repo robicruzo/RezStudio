@@ -139,6 +139,10 @@ jobs:
         with:
           r-version: release
 
+      # Ark draws SVG plots with svglite; R's own svg() needs XQuartz on macOS.
+      - name: Install svglite
+        run: Rscript -e 'install.packages("svglite", repos = "https://cloud.r-project.org")'
+
       - name: Fetch the pinned Ark
         run: echo "REZSTUDIO_ARK=$PWD/$(script/fetch-ark)/ark" >> "$GITHUB_ENV"
 
