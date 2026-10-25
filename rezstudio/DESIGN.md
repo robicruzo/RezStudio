@@ -103,7 +103,9 @@ languages without language-specific code paths beyond formatting.
   grammars, so first-class languages don't depend on an external extension. Python is already
   built in.
 - `workspace` / `zed`: default four-quadrant layout (source top-left, console bottom-left,
-  environment/history top-right, files/plots/packages/help/viewer bottom-right), using Zed's docks.
+  environment/history top-right, files/plots/packages/help/viewer bottom-right). Zed's docks
+  show one panel at a time, switched from the status bar, so this needs the dock changes M7
+  plans.
 - `assets/keymaps`: RStudio-style default keymap (Cmd+Enter, Cmd+Shift+Enter, Cmd+Shift+S,
   Cmd+Shift+M for the pipe, Opt+- for `<-`, Cmd+Opt+I for a new chunk, Ctrl+1/2 to focus the
   source or console). Zed's keymap remains available as an alternative.
@@ -133,9 +135,10 @@ packages and addins that call `rstudioapi` keep working.
 | M4 | Packages + search *(done)* | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
 | M5 | Rmd/Quarto inline chunks *(done)* | Chunk execution with inline output. |
 | M6 | Help + Viewer | WKWebView embedded; help, htmlwidgets, Shiny. |
-| M7 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
-| M8 | Typst native preview | Live preview with source ↔ preview jumping. |
-| M9 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
+| M7 | RStudio layout | Two stacked, tabbed panes in the right dock; Console and Terminal as tabs; outline from an editor button. |
+| M8 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
+| M9 | Typst native preview | Live preview with source ↔ preview jumping. |
+| M10 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
 
 ### M1 plan (done)
 
@@ -895,6 +898,38 @@ and forward step through pages. F1 on `lm` in an R file, a chunk and the console
 help. `plotly::plot_ly(mtcars, x = ~wt, y = ~mpg)` shows an interactive plot in the
 Viewer. `shiny::runApp()` on an example app runs it in the Viewer, and Stop ends it. Menus
 and the command palette are never hidden behind the web view.
+
+### M7 scope (to plan after M6)
+
+Agreed so far:
+- **Right dock:** two stacked panes, each with a row of tabs (Plots, Help, Git and so on)
+  and a divider between them, as in RStudio. The status bar's panel buttons stay, for
+  getting panes back when a dock is closed.
+- **Console:** the bottom dock shows the R console and the terminal as tabs. Background
+  jobs come later, as another tab.
+- **Outline:** no outline panel. A button in the editor's toolbar, beside buffer search and
+  the selection controls, shows the outline.
+- **Visual mode:** the Quarto and R Markdown visual-mode button goes in that toolbar too,
+  once a visual editor exists. It's a large feature of its own.
+
+Findings so far:
+- Zed's `Dock` holds panels but shows only its active one, chosen from the status bar; it
+  has no tabs and no split. The likely approach is to give `Dock` a tab row and an optional
+  split into two groups, so panels keep their actions, focus, zoom and saved sizes. The
+  alternative, a RezStudio container panel hosting the panes, would leave Zed's own panels
+  (Git, Files) without their dock behaviour.
+- Zed's `bottom_dock_layout` setting can already keep the bottom dock under the editor
+  with the right dock full height, which is RStudio's arrangement.
+- Help's web view follows its pane's bounds and snapshots under modals, so it should work
+  in a half-height pane; to check.
+
+Open questions:
+- Which tabs go in the top and bottom panes by default (RStudio: Environment, History,
+  Connections, Git, Tutorial on top; Files, Plots, Packages, Help, Viewer below).
+- Whether Files moves from the left dock to the bottom-right pane.
+- Whether tabs can move between the two panes at first, or the split is fixed.
+- What the outline button opens: an RStudio-style outline sidebar inside the editor, Zed's
+  minimap with the outline beside it, or Zed's outline picker.
 
 ## Risks
 
