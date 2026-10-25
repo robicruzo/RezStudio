@@ -295,6 +295,61 @@ Done when: assignments in the console appear in the Environment pane immediately
 expand, and `View()` of a 10M-row data frame opens and scrolls without visible lag. All met:
 checked by hand down to the 10,000,000th row, with CI green on every job.
 
+### M3 plan
+
+Decisions: the Plots pane goes in the right dock beside Environment, one shown at a time like
+RStudio's tabs; a new plot brings Plots to the front, opening the dock if needed, without
+taking focus from the editor or console; history is RStudio's back/forward arrows with
+"3 / 7", delete and clear (thumbnails may come later); M3 includes saving as PNG, SVG or PDF at
+a chosen size, copying to the clipboard, and a zoom window.
+
+Findings that shape the plan (Ark 0.1.252, `plot_comm.rs` and `graphics_device.rs`):
+
+- Ark uses dynamic plots only in console mode with the UI comm connected, which RezStudio
+  already does. Each new plot gets its own `positron.plot` comm opened by Ark, whose open
+  data carries a `pre_render`: a PNG already drawn at the default size, so it can show at once.
+- The default is 640×400 at pixel ratio 1 until the frontend sends the UI comm notification
+  `did_change_plots_render_settings` `{settings: {size, pixel_ratio, format}}` (a `comm_msg`
+  without an `id`). Sending the pane's size and scale on every resize makes new plots arrive
+  at the right size, with no second render.
+- `render {size?, pixel_ratio, format}` redraws a plot from R's recording at any size, as `png`,
+  `svg`, `pdf`, `jpeg` or `tiff`. Sizes are logical pixels; `pixel_ratio` scales them. The reply
+  is `{data, mime_type, settings}`, with `data` in base64 **without padding**. `get_metadata`
+  gives a name (like `ggplot2 1`), kind, and the code that drew it.
+- Drawing more on the current plot (`lines()` after `plot()`) sends an `update` event with a
+  fresh pre-render; `show` asks the frontend to bring a plot to the front.
+- Closing a plot's comm deletes its recording in R. After R restarts, old plots can't be
+  redrawn, but their last image can still be shown.
+- Ark renders on R's thread, so renders wait while R is busy. Ark uses `ragg` (and `svglite`
+  for SVG) when installed, and R's own devices otherwise.
+- GPUI shows PNG and SVG with `img()` from bytes, and `ClipboardItem::new_image` copies images.
+
+Steps:
+
+1. **Runtime plot comm.** Port the plot comm types. New session events: a plot opened (comm id,
+   pre-render), updated, asked to be shown, and closed (including when R stops). A method to send
+   `did_change_plots_render_settings` on the UI comm. The real-Ark test gains: `plot(1:10)`
+   opens a comm with a PNG pre-render; `render` at 800×600 and pixel ratio 2 returns a
+   1600×1200 PNG; SVG and PDF render; `lines()` sends `update`; closing the comm frees the plot.
+2. **`plots_panel`.** A right-dock Plots pane. It shows the current plot fitted to the pane,
+   using the pre-render at once and then a render at the pane's exact size and scale. Resizing
+   re-renders after a short pause and sends the new settings to Ark. Back/forward arrows with
+   "3 / 7", delete (closes the comm) and clear all (with confirmation). A new plot, or `show`,
+   makes it current and brings the pane to the front. Plots from a stopped R stay as images,
+   marked as no longer live.
+3. **Export, copy and zoom.** Save opens a small dialog for format (PNG/SVG/PDF), width and
+   height (defaulting to the pane's size), then a save dialog, and writes R's render. Copy puts
+   a PNG at the pane's size and scale on the clipboard. Zoom opens the plot in its own window,
+   which re-renders as it's resized.
+4. **Tests.** Unit tests drive the pane with scripted plot comms: history, navigation, delete,
+   resize renders (only the latest kept), updates, `show`, R stopping, and export writing the
+   decoded file.
+
+Done when: `plot(1:10)` and a ggplot2 plot appear in Plots straight away and sharp on a Retina
+screen; resizing the dock redraws them at the new size; the arrows step through history;
+saved PNG, SVG and PDF files open in Preview; a copied plot pastes into another app; and the
+zoom window redraws as it's resized.
+
 ## Risks
 
 - **Ark's comm protocol is Positron-driven and may change.** Mitigation: bundle a pinned Ark
