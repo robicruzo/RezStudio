@@ -164,6 +164,16 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
             ..Default::default()
         },
         LanguageInfo {
+            name: "rmarkdown",
+            adapters: vec![],
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "quarto",
+            adapters: vec![],
+            ..Default::default()
+        },
+        LanguageInfo {
             name: "python",
             adapters: vec![
                 basedpyright_lsp_adapter,
@@ -385,7 +395,7 @@ fn register_language(
             async move {
                 Ok(LoadedLanguage {
                     config,
-                    queries: grammars::load_queries(name),
+                    queries: grammars::load_queries(queries_name(name)),
                     context_provider: context,
                     toolchain_provider: toolchain,
                     manifest_name,
@@ -396,11 +406,23 @@ fn register_language(
     );
 }
 
+/// R Markdown and Quarto are Markdown with their own names and file types;
+/// their R chunks come from Markdown's code fence injection.
+const MARKDOWN_DIALECTS: [&str; 2] = ["rmarkdown", "quarto"];
+
+fn queries_name(name: &str) -> &str {
+    if MARKDOWN_DIALECTS.contains(&name) {
+        "markdown"
+    } else {
+        name
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn language(name: &str, grammar: tree_sitter::Language) -> Arc<Language> {
     Arc::new(
         Language::new(grammars::load_config(name), Some(grammar))
-            .with_queries(grammars::load_queries(name))
+            .with_queries(grammars::load_queries(queries_name(name)))
             .unwrap(),
     )
 }
@@ -467,13 +489,76 @@ mod tests {
         assert_eq!(language_of("analysis.R", cx), Some("R".into()));
         assert_eq!(language_of("utils.r", cx), Some("R".into()));
         assert_eq!(language_of(".Rprofile", cx), Some("R".into()));
-        assert_eq!(language_of("notes.Rmd", cx), None);
+        assert_eq!(language_of("notes.Rmd", cx), None, "R Markdown isn't R");
 
         let r_settings = registry.language_settings().languages.0.get("R").cloned();
         assert_eq!(
             r_settings.and_then(|settings| settings.tab_size),
             std::num::NonZeroU32::new(2)
         );
+    }
+
+    #[gpui::test]
+    async fn test_r_markdown_and_quarto(cx: &mut gpui::TestAppContext) {
+        use language::{Buffer, Point};
+
+        let registry = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            let registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
+            registry.add(crate::language(
+                "rmarkdown",
+                tree_sitter_md::LANGUAGE.into(),
+            ));
+            registry.add(crate::language("quarto", tree_sitter_md::LANGUAGE.into()));
+            registry.add(crate::language(
+                "markdown-inline",
+                tree_sitter_md::INLINE_LANGUAGE.into(),
+            ));
+            registry.add(crate::language("r", tree_sitter_r::LANGUAGE.into()));
+            registry
+        });
+        let language_of = |path: &str, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                let file: Arc<dyn File> = Arc::new(TestFile {
+                    path: Arc::from(rel_path(path)),
+                    root_name: "project".into(),
+                    local_root: None,
+                });
+                registry
+                    .language_for_file(&file, None, cx)
+                    .and_then(|id| registry.language_name_for_id(id))
+            })
+        };
+        assert_eq!(language_of("report.Rmd", cx), Some("R Markdown".into()));
+        assert_eq!(
+            language_of("notes.rmarkdown", cx),
+            Some("R Markdown".into())
+        );
+        assert_eq!(language_of("paper.qmd", cx), Some("Quarto".into()));
+
+        // R chunks, with or without options, are parsed as R; prose stays Markdown.
+        let text = "---\ntitle: Report\n---\n\nSome *prose*.\n\n```{r setup, echo=FALSE}\nx <- 1\n```\n\n```{r}\nmean(x)\n```\n";
+        let rmarkdown = registry.language_for_name("R Markdown").await.unwrap();
+        // The registry comes first, so the parse can find R for the chunks.
+        let buffer = cx.new(|cx| {
+            let mut buffer = Buffer::local(text, cx);
+            buffer.set_language_registry(registry.clone());
+            buffer.set_language(Some(rmarkdown), cx);
+            buffer
+        });
+        cx.run_until_parked();
+        buffer.read_with(cx, |buffer, _| {
+            let language_at = |row: u32| {
+                buffer
+                    .snapshot()
+                    .language_at(Point::new(row, 1))
+                    .map(|language| language.name().to_string())
+            };
+            assert_eq!(language_at(4).as_deref(), Some("R Markdown"));
+            assert_eq!(language_at(7).as_deref(), Some("R"));
+            assert_eq!(language_at(11).as_deref(), Some("R"));
+        });
     }
 
     #[gpui::test]

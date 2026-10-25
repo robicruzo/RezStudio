@@ -590,12 +590,25 @@ Findings that shape the plan (Zed's `repl` and Markdown grammar, and Ark 0.1.252
 
 Steps:
 
-1. **File types and chunks.**
-   - `.Rmd`, `.Rmarkdown` and `.qmd` open as R Markdown or Quarto, using the Markdown
-     grammar, so prose is Markdown and chunks are R.
-   - A chunk parser finds each fenced chunk with its language, label and options
-     (`{r label, echo=FALSE}` and Quarto's `#|` lines), and the code between the fences.
-     Only R chunks run; other languages are skipped.
+1. **File types and chunks.** *(Done.)*
+   - **File types:** `.Rmd`, `.rmd`, `.Rmarkdown` and `.rmarkdown` open as "R Markdown",
+     and `.qmd` as "Quarto". Their configs in `grammars` use the Markdown grammar, and
+     `languages` loads Markdown's queries for them, so nothing is copied.
+   - **Separate languages:** they show their own names in the status bar, and Zed's
+     Markdown REPL, which runs code blocks only in "Markdown", leaves them alone.
+   - **Highlighting:** a test checks that R Markdown prose is R Markdown and both
+     ```` ```{r} ```` and ```` ```{r setup, echo=FALSE} ```` chunks are R. Live, a sample
+     report showed Markdown and YAML highlighting with R in its chunks. The buffer needs its
+     language registry before its language, so the first parse can find R.
+   - **Chunk parser:** `r_markdown::chunks` reads lines, not the syntax tree, so it works on
+     any text. It finds each braced fence with its engine, label and options: header
+     options split on top-level commas (quotes and brackets respected), then Quarto's `#|`
+     lines, the last winning. It also gives the code rows and the closing fence.
+     - **Accepted:** backtick or tilde fences, indented chunks, and a chunk left open to
+       the end.
+     - **Not chunks:** plain fences such as ```` ```r ````, whose contents can't start
+       another chunk.
+     - **Helpers:** `is_r`, `is_eval_false` and `chunk_at_row`.
 2. **Runtime.**
    - `RSession::execute_inline(code)` runs code without the console echoing it.
    - `PlotOpened` carries the request it came from, which says whether that was an inline

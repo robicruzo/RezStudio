@@ -7046,6 +7046,7 @@ dependencies = [
  "tree-sitter-css",
  "tree-sitter-gitcommit",
  "tree-sitter-go",
+ "tree-sitter-md",
  "tree-sitter-python",
  "tree-sitter-r",
  "tree-sitter-rust",
@@ -11172,6 +11173,10 @@ dependencies = [
  "workspace",
  "zed_actions",
 ]
+
+[[package]]
+name = "r_markdown"
+version = "0.1.0"
 
 [[package]]
 name = "rand"

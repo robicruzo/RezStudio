@@ -128,6 +128,7 @@ members = [
     "crates/project_benchmarks",
     "crates/project_panel",
     "crates/r_console",
+    "crates/r_markdown",
     "crates/project_symbols",
     "crates/proto",
     "crates/proxy_handshake",
@@ -355,6 +356,7 @@ prettier = { path = "crates/prettier" }
 project = { path = "crates/project" }
 project_panel = { path = "crates/project_panel" }
 r_console = { path = "crates/r_console" }
+r_markdown = { path = "crates/r_markdown" }
 project_symbols = { path = "crates/project_symbols" }
 proto = { path = "crates/proto" }
 proxy_handshake = { path = "crates/proxy_handshake" }
