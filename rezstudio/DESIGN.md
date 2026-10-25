@@ -628,6 +628,10 @@ Steps:
    - **Actions:** Run Chunk (Cmd+Shift+Enter), Run Chunks Above (Cmd+Alt+P), Run All
      Chunks (Cmd+Alt+R) and Clear Chunk Outputs, with Ctrl on Linux. They're registered on
      the workspace and act on the active editor.
+   - **Running a selection:** with a selection in an R chunk, Run Chunk runs only the
+     selected code, with the output under that chunk. The selection is clipped to the
+     chunk's code lines, so a fence never reaches R. A selection of only fence lines runs
+     the whole chunk. The run line above a chunk always runs all of it.
    - **Run line:** above each R chunk's fence, "▶ Run Chunk | Run Chunks Above", drawn as a
      spacer block like Zed's code lenses. Positron puts the same lens above Quarto cells.
      Zed has no API for custom gutter buttons, and its run triangles only launch shell

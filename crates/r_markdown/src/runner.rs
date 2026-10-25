@@ -13,6 +13,7 @@ use gpui::{AnyElement, App, Entity, MouseButton, Subscription, Task, WeakEntity,
 use language::Point;
 use runtime::comms::PlotEvent;
 use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
@@ -30,6 +31,12 @@ struct OutputBlock {
     request_id: Option<String>,
 }
 
+/// A chunk waiting to run, with the code to run when it's only part of it.
+struct QueuedRun {
+    header: Anchor,
+    code: Option<String>,
+}
+
 struct LensBlock {
     header: Anchor,
     block_id: CustomBlockId,
@@ -41,8 +48,8 @@ pub struct ChunkRunner {
     session: Option<Entity<RSession>>,
     outputs: Vec<OutputBlock>,
     lenses: Vec<LensBlock>,
-    /// Chunks waiting to run, by their opening fence, oldest first.
-    queue: VecDeque<Anchor>,
+    /// Chunks waiting to run, oldest first.
+    queue: VecDeque<QueuedRun>,
     /// The execution of the chunk running now.
     running: Option<String>,
     _rescan: Option<Task<()>>,
@@ -140,7 +147,47 @@ impl ChunkRunner {
         if let Some(chunk) = crate::chunks::chunk_at_row(&chunks, row).filter(|chunk| chunk.is_r())
         {
             let header = snapshot.anchor_before(Point::new(chunk.header_row, 0));
-            self.enqueue(vec![header], window, cx);
+            self.enqueue(vec![(header, None)], window, cx);
+        }
+    }
+
+    /// Runs the selected code when there is a selection in an R chunk, and
+    /// the whole chunk at `row` otherwise. The output shows under the chunk
+    /// either way.
+    pub fn run_selection_or_chunk(
+        &mut self,
+        selection: Range<Point>,
+        row: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((snapshot, chunks)) = self.chunks(cx) else {
+            return;
+        };
+        let selected = (!selection.is_empty())
+            .then(|| crate::chunks::chunk_at_row(&chunks, selection.start.row))
+            .flatten()
+            .filter(|chunk| chunk.is_r() && !chunk.code_rows.is_empty())
+            .and_then(|chunk| {
+                // Only the code counts: a selection that takes in a fence doesn't send
+                // backticks to R.
+                let last = chunk.code_rows.end - 1;
+                let code_start = Point::new(chunk.code_rows.start, 0);
+                let code_end =
+                    Point::new(last, snapshot.line_len(multi_buffer::MultiBufferRow(last)));
+                let start = selection.start.max(code_start);
+                let end = selection.end.min(code_end);
+                let code: String = snapshot.text_for_range(start..end).collect();
+                (start < end && !code.trim().is_empty()).then(|| {
+                    (
+                        snapshot.anchor_before(Point::new(chunk.header_row, 0)),
+                        code,
+                    )
+                })
+            });
+        match selected {
+            Some((header, code)) => self.enqueue(vec![(header, Some(code))], window, cx),
+            None => self.run_chunk_at(row, window, cx),
         }
     }
 
@@ -153,7 +200,12 @@ impl ChunkRunner {
         let headers = chunks
             .iter()
             .filter(|chunk| chunk.is_r() && !chunk.is_eval_false() && chunk.header_row < limit)
-            .map(|chunk| snapshot.anchor_before(Point::new(chunk.header_row, 0)))
+            .map(|chunk| {
+                (
+                    snapshot.anchor_before(Point::new(chunk.header_row, 0)),
+                    None,
+                )
+            })
             .collect();
         self.enqueue(headers, window, cx);
     }
@@ -165,7 +217,12 @@ impl ChunkRunner {
         let headers = chunks
             .iter()
             .filter(|chunk| chunk.is_r() && !chunk.is_eval_false())
-            .map(|chunk| snapshot.anchor_before(Point::new(chunk.header_row, 0)))
+            .map(|chunk| {
+                (
+                    snapshot.anchor_before(Point::new(chunk.header_row, 0)),
+                    None,
+                )
+            })
             .collect();
         self.enqueue(headers, window, cx);
     }
@@ -191,7 +248,7 @@ impl ChunkRunner {
             return;
         };
         let block = self.outputs.remove(index);
-        self.queue.retain(|header| *header != block.header);
+        self.queue.retain(|queued| queued.header != block.header);
         drop_output(&block.output, cx);
         if let Some(editor) = self.editor.upgrade() {
             editor.update(cx, |editor, cx| {
@@ -200,12 +257,17 @@ impl ChunkRunner {
         }
     }
 
-    fn enqueue(&mut self, headers: Vec<Anchor>, window: &mut Window, cx: &mut Context<Self>) {
+    fn enqueue(
+        &mut self,
+        runs: Vec<(Anchor, Option<String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = self.session.clone() else {
             return;
         };
-        for header in headers {
-            if self.queue.contains(&header) {
+        for (header, code) in runs {
+            if self.queue.iter().any(|queued| queued.header == header) {
                 continue;
             }
             let Some(chunk) = self.chunk_for_header(header, cx) else {
@@ -223,7 +285,7 @@ impl ChunkRunner {
                     .output
                     .update(cx, |output, cx| output.reset(aspect, cx));
             }
-            self.queue.push_back(header);
+            self.queue.push_back(QueuedRun { header, code });
         }
         self.run_next(cx);
     }
@@ -285,14 +347,14 @@ impl ChunkRunner {
         let Some(session) = self.session.clone() else {
             return;
         };
-        while let Some(header) = self.queue.pop_front() {
+        while let Some(QueuedRun { header, code }) = self.queue.pop_front() {
             let Some(chunk) = self.chunk_for_header(header, cx) else {
                 continue;
             };
             let Some(snapshot) = self.snapshot(cx) else {
                 return;
             };
-            let code = chunk_code(&snapshot, &chunk);
+            let code = code.unwrap_or_else(|| chunk_code(&snapshot, &chunk));
             let Some(index) = self.outputs.iter().position(|block| block.header == header) else {
                 continue;
             };
@@ -394,8 +456,12 @@ impl ChunkRunner {
     }
 
     fn skip_queue(&mut self, reason: &str, cx: &mut Context<Self>) {
-        for header in std::mem::take(&mut self.queue) {
-            if let Some(block) = self.outputs.iter().find(|block| block.header == header) {
+        for queued in std::mem::take(&mut self.queue) {
+            if let Some(block) = self
+                .outputs
+                .iter()
+                .find(|block| block.header == queued.header)
+            {
                 let reason = reason.to_string();
                 block.output.update(cx, |output, cx| {
                     output.set_state(RunState::Skipped(reason), cx)

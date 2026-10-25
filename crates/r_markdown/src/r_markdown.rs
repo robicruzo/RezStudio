@@ -14,7 +14,8 @@ use workspace::Workspace;
 actions!(
     r_markdown,
     [
-        /// Runs the R chunk under the cursor, showing its output under it.
+        /// Runs the R chunk under the cursor, or only the selected code in it,
+        /// showing the output under the chunk.
         RunChunk,
         /// Runs every R chunk above the cursor, in order.
         RunChunksAbove,
@@ -53,13 +54,13 @@ pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace
             .register_action(|workspace, _: &RunChunk, window, cx| {
-                with_runner(workspace, window, cx, |runner, row, window, cx| {
-                    runner.run_chunk_at(row, window, cx)
+                with_runner(workspace, window, cx, |runner, cursor, window, cx| {
+                    runner.run_selection_or_chunk(cursor.selection, cursor.row, window, cx)
                 })
             })
             .register_action(|workspace, _: &RunChunksAbove, window, cx| {
-                with_runner(workspace, window, cx, |runner, row, window, cx| {
-                    runner.run_chunks_above(row, window, cx)
+                with_runner(workspace, window, cx, |runner, cursor, window, cx| {
+                    runner.run_chunks_above(cursor.row, window, cx)
                 })
             })
             .register_action(|workspace, _: &RunAllChunks, window, cx| {
@@ -110,12 +111,19 @@ fn attach_runner(editor: Entity<Editor>, window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Calls `f` with the active editor's runner and the cursor's row.
+/// Where the cursor is in the active editor.
+struct Cursor {
+    row: u32,
+    /// The newest selection, in order; empty when nothing is selected.
+    selection: std::ops::Range<Point>,
+}
+
+/// Calls `f` with the active editor's runner and its cursor.
 fn with_runner(
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
-    f: impl FnOnce(&mut ChunkRunner, u32, &mut Window, &mut Context<ChunkRunner>),
+    f: impl FnOnce(&mut ChunkRunner, Cursor, &mut Window, &mut Context<ChunkRunner>),
 ) {
     let Some(editor) = workspace.active_item_as::<Editor>(cx) else {
         return;
@@ -127,11 +135,15 @@ fn with_runner(
     else {
         return;
     };
-    let row = editor.update(cx, |editor, cx| {
+    let cursor = editor.update(cx, |editor, cx| {
         let snapshot = editor.display_snapshot(cx);
-        editor.selections.newest::<Point>(&snapshot).head().row
+        let selection = editor.selections.newest::<Point>(&snapshot);
+        Cursor {
+            row: selection.head().row,
+            selection: selection.start..selection.end,
+        }
     });
-    runner.update(cx, |runner, cx| f(runner, row, window, cx));
+    runner.update(cx, |runner, cx| f(runner, cursor, window, cx));
 }
 
 #[cfg(test)]
@@ -174,6 +186,12 @@ stop(\"no\")
 
 ```{r plot}
 plot(x)
+```
+
+```{r many}
+a <- 1
+b <- 2
+c <- 3
 ```
 ";
 
@@ -350,7 +368,7 @@ plot(x)
             harness
                 .runner
                 .read_with(cx, |runner, _| runner.lens_count()),
-            3
+            4
         );
 
         harness.run(|runner, window, cx| runner.run_chunk_at(3, window, cx), cx);
@@ -406,7 +424,12 @@ plot(x)
                 .iter()
                 .map(|(state, _)| state.clone())
                 .collect::<Vec<_>>(),
-            [RunState::Running, RunState::Queued, RunState::Queued]
+            [
+                RunState::Running,
+                RunState::Queued,
+                RunState::Queued,
+                RunState::Queued
+            ]
         );
         harness.finish(&first, true, cx);
         let (code, second) = harness.next_execution();
@@ -422,6 +445,7 @@ plot(x)
             [
                 RunState::Finished { succeeded: true },
                 RunState::Finished { succeeded: false },
+                RunState::Skipped("Not run: an earlier chunk failed.".into()),
                 RunState::Skipped("Not run: an earlier chunk failed.".into()),
             ]
         );
@@ -504,6 +528,50 @@ plot(x)
     }
 
     #[gpui::test]
+    async fn test_run_chunk_runs_only_the_selection(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        let mut run_with_selection = |range: std::ops::Range<Point>, cx: &mut VisualTestContext| {
+            harness.editor.update_in(cx, |editor, window, cx| {
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([range])
+                })
+            });
+            cx.focus(&harness.editor);
+            cx.dispatch_action(RunChunk);
+            cx.run_until_parked();
+            let (code, request) = harness.next_execution();
+            harness.finish(&request, true, cx);
+            code
+        };
+        // Lines 20 and 21 of the `many` chunk.
+        assert_eq!(
+            run_with_selection(Point::new(20, 0)..Point::new(21, 6), cx),
+            "b <- 2\nc <- 3"
+        );
+        // A selection that starts on the fence takes only the code.
+        assert_eq!(
+            run_with_selection(Point::new(18, 0)..Point::new(19, 6), cx),
+            "a <- 1"
+        );
+        // Selecting only the fence, or nothing, runs the whole chunk.
+        assert_eq!(
+            run_with_selection(Point::new(18, 0)..Point::new(18, 5), cx),
+            "a <- 1\nb <- 2\nc <- 3"
+        );
+        assert_eq!(
+            run_with_selection(Point::new(20, 2)..Point::new(20, 2), cx),
+            "a <- 1\nb <- 2\nc <- 3"
+        );
+        // Each run's output replaces the last, under the same chunk.
+        assert_eq!(
+            harness
+                .runner
+                .read_with(cx, |runner, _| runner.outputs_for_test().len()),
+            1
+        );
+    }
+
+    #[gpui::test]
     async fn test_run_lines_follow_edits(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::new(cx).await;
         harness.editor.update_in(cx, |editor, window, cx| {
@@ -517,7 +585,7 @@ plot(x)
             harness
                 .runner
                 .read_with(cx, |runner, _| runner.lens_count()),
-            4
+            5
         );
 
         // The shortcuts reach the runner through the workspace.
