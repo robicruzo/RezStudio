@@ -128,7 +128,7 @@ packages and addins that call `rstudioapi` keep working.
 |---|---|---|
 | M0 | Fork surgery and rebrand | AI/collab/cloud crates gone, `client`/`telemetry` stubbed, app renamed, builds green on Linux CI and macOS CI. |
 | M1 | `runtime` + `console` for R *(done)* | Ark bundled; R discovered; Cmd+Enter / Cmd+Shift+S run code; interrupt and restart work; rich output in the console; Ark LSP completions in the editor and console. |
-| M2 | Environment + data viewer | Live variables; `View(df)` opens the paged grid on a 10M-row frame without lag. |
+| M2 | Environment + data viewer *(done)* | Live variables; `View(df)` opens the paged grid on a 10M-row frame without lag. |
 | M3 | Plots | Plot history, resize re-render, export. |
 | M4 | Packages + search | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
 | M5 | Rmd/Quarto inline chunks | Chunk execution with inline output. |
@@ -229,7 +229,7 @@ Ark's comm protocol may change between releases, which the pin and contract test
 Both are now handled: completions use an in-server document, and macOS CI runs the real-Ark
 test on every push.
 
-### M2 plan
+### M2 plan (done)
 
 Decisions: the Environment pane goes in the right dock (files stay left, the console bottom);
 `View(df)` opens the data viewer as an editor tab beside scripts, as in RStudio; column headers
@@ -284,12 +284,16 @@ Steps:
    can't drop the blocks farthest from view: `uniform_list` renders row 0 every frame to
    measure row height, which would push out the rows on screen and refetch them forever. Numbers use
    Ark's formatting (as in Positron), so `0.6260` and `1.59` can sit in one column.
-4. **Tests.** Unit tests driving both panes with scripted comm messages; the real-Ark test gains
-   a variables refresh/update after an assignment and a `View()` of a 10M-row data frame with
-   timed page fetches.
+4. **Tests.** *(Done.)* Unit tests drive both panes with scripted comm messages: the tree's
+   refresh, update, expansion and filter; the viewer opening from a backend comm, fetching one
+   block from the middle of 10M rows, the four-fetch cap, sorting, `data_update`, tab reuse,
+   closing, and R stopping. The real-Ark test (macOS CI) covers variables refresh, update and
+   inspect after an assignment, and a `View()` of a 10M-row data frame with timed page fetches,
+   sorting and NA counts.
 
 Done when: assignments in the console appear in the Environment pane immediately, children
-expand, and `View()` of a 10M-row data frame opens and scrolls without visible lag.
+expand, and `View()` of a 10M-row data frame opens and scrolls without visible lag. All met:
+checked by hand down to the 10,000,000th row, with CI green on every job.
 
 ## Risks
 
