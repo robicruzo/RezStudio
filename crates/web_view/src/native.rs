@@ -1,15 +1,18 @@
 //! The web view on macOS: a WKWebView, made and driven through `wry`.
 
 use crate::files::{FILE_SCHEME, respond};
-use crate::{NativeEvent, NativeView, is_allowed_url};
+use crate::{NativeEvent, NativeView, PageStyle, is_allowed_url, page_style_script};
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc;
-use gpui::{Bounds, Pixels, Window};
+use gpui::{Bounds, Pixels, Rgba, Window};
+use objc2::{MainThreadMarker, MainThreadOnly as _};
+use objc2_foundation::NSString;
+use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::Response;
-use wry::{NewWindowResponse, PageLoadEvent, Rect, WebViewBuilder};
+use wry::{NewWindowResponse, PageLoadEvent, RGBA, Rect, WebViewBuilder, WebViewExtMacOS as _};
 
 struct WryView(wry::WebView);
 
@@ -28,16 +31,33 @@ fn rect(bounds: Bounds<Pixels>) -> Rect {
     }
 }
 
+fn rgba(color: Rgba) -> RGBA {
+    let channel = |value: f32| (value.clamp(0., 1.) * 255.).round() as u8;
+    (
+        channel(color.r),
+        channel(color.g),
+        channel(color.b),
+        channel(color.a),
+    )
+}
+
 pub(crate) fn create(
     window: &Window,
     bounds: Bounds<Pixels>,
     events: mpsc::UnboundedSender<NativeEvent>,
     file_root: Arc<Mutex<Option<PathBuf>>>,
+    style: Option<PageStyle>,
 ) -> Result<Box<dyn NativeView>> {
     let navigation_events = events.clone();
     let new_window_events = events.clone();
     let title_events = events.clone();
-    let view = WebViewBuilder::new()
+    let mut builder = WebViewBuilder::new();
+    if let Some(style) = style {
+        builder = builder
+            .with_initialization_script(page_style_script(&style.css)?)
+            .with_background_color(rgba(style.background));
+    }
+    let view = builder
         .with_bounds(rect(bounds))
         .with_visible(false)
         .with_custom_protocol(FILE_SCHEME.to_string(), move |_, request| {
@@ -99,5 +119,24 @@ impl NativeView for WryView {
 
     fn reload(&self) -> Result<()> {
         Ok(self.0.reload()?)
+    }
+
+    fn set_page_style(&self, style: &PageStyle) -> Result<()> {
+        let script = page_style_script(&style.css)?;
+        // wry only takes page scripts as the view is made, so this adds one to
+        // WebKit directly. Each change adds another; they run in order, so the
+        // newest style wins. Removing the old ones would remove wry's own.
+        let main_thread = MainThreadMarker::new().context("not on the main thread")?;
+        let user_script = unsafe {
+            WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(main_thread),
+                &NSString::from_str(&script),
+                WKUserScriptInjectionTime::AtDocumentStart,
+                true,
+            )
+        };
+        unsafe { self.0.manager().addUserScript(&user_script) };
+        self.0.evaluate_script(&script)?;
+        Ok(self.0.set_background_color(rgba(style.background))?)
     }
 }

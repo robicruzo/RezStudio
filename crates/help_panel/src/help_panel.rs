@@ -2,6 +2,8 @@
 //! web view. `?topic`, links in help pages, the topic box and F1 all end in
 //! a page here.
 
+mod page_style;
+
 use anyhow::Result;
 use editor::Editor;
 use gpui::{
@@ -221,11 +223,16 @@ impl HelpPanel {
             editor.set_placeholder_text("Search help topics", window, cx);
             editor
         });
-        let mut subscriptions = vec![cx.subscribe(&web_view, |this, _, event, cx| {
-            if let WebViewEvent::Navigated(url) = event {
-                this.navigated(url.clone(), cx);
-            }
-        })];
+        let mut subscriptions = vec![
+            cx.subscribe(&web_view, |this, _, event, cx| {
+                if let WebViewEvent::Navigated(url) = event {
+                    this.navigated(url.clone(), cx);
+                }
+            }),
+            // Pages follow the theme and fonts as they change.
+            cx.observe_global::<settings::SettingsStore>(|this, cx| this.restyle(cx)),
+            cx.observe_global::<theme::GlobalTheme>(|this, cx| this.restyle(cx)),
+        ];
         if let Some(registry) = SessionRegistry::global(cx) {
             subscriptions.push(cx.subscribe_in(
                 &registry,
@@ -270,12 +277,19 @@ impl HelpPanel {
             _cover_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
+        this.restyle(cx);
         let existing = SessionRegistry::global(cx)
             .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
         if let Some(session) = existing {
             this.set_session(session, window, cx);
         }
         this
+    }
+
+    fn restyle(&mut self, cx: &mut Context<Self>) {
+        let style = page_style::help_page_style(cx);
+        self.web_view
+            .update(cx, |web_view, cx| web_view.set_page_style(style, cx));
     }
 
     pub fn set_session(
@@ -876,6 +890,27 @@ mod tests {
             harness.pages(cx),
             (vec![MEAN.into(), MEDIAN.into(), redirected], 2)
         );
+
+        // Pages are styled from the theme and fonts, and follow them.
+        let style = |calls: Vec<String>| {
+            calls
+                .into_iter()
+                .filter(|call| call.starts_with("style") || call.starts_with("create"))
+                .collect::<Vec<_>>()
+        };
+        harness.loads();
+        cx.update(|_, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.theme.ui_font_size = Some(21.0.into());
+                });
+            });
+        });
+        cx.run_until_parked();
+        let restyled = style(take_calls(&harness.calls));
+        assert_eq!(restyled.len(), 1, "{restyled:?}");
+        assert!(restyled[0].contains("--vscode-font-size: 21px;"));
+        assert!(restyled[0].contains("--vscode-editor-background: rgba("));
 
         // The page hides while a modal is open over the workspace.
         harness.workspace.update_in(cx, |workspace, window, cx| {

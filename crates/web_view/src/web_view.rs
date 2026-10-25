@@ -15,7 +15,7 @@ use anyhow::Result;
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{
-    App, Bounds, Context, Entity, EntityId, EventEmitter, Pixels, Subscription, Task, Window,
+    App, Bounds, Context, Entity, EntityId, EventEmitter, Pixels, Rgba, Subscription, Task, Window,
     canvas,
 };
 use std::path::{Path, PathBuf};
@@ -36,6 +36,41 @@ pub enum NativeEvent {
     OpenExternally(String),
 }
 
+/// How a view's pages look, for pages whose owner styles them, as the Help
+/// pane does R's help to match the app's theme.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageStyle {
+    /// Added to every page as it starts, before it draws.
+    pub css: String,
+    /// Shown where there's no page, as between pages, instead of white.
+    pub background: Rgba,
+}
+
+/// The script that puts `css` in a page, in one `<style>` element it
+/// replaces when run again. At document start there may be no `<head>`
+/// yet, so it goes in `<html>`, before the page's own stylesheets.
+pub fn page_style_script(css: &str) -> Result<String> {
+    let css = serde_json::to_string(css)?;
+    Ok(format!(
+        r#"(() => {{
+  const apply = () => {{
+    let style = document.getElementById("rezstudio-page-style");
+    if (!style) {{
+      style = document.createElement("style");
+      style.id = "rezstudio-page-style";
+      document.documentElement.prepend(style);
+    }}
+    style.textContent = {css};
+  }};
+  if (document.documentElement) {{
+    apply();
+  }} else {{
+    document.addEventListener("readystatechange", apply, {{ once: true }});
+  }}
+}})();"#
+    ))
+}
+
 /// The native view, behind a trait so tests don't need WebKit.
 pub trait NativeView {
     fn set_bounds(&self, bounds: Bounds<Pixels>) -> Result<()>;
@@ -43,15 +78,19 @@ pub trait NativeView {
     fn load_url(&self, url: &str) -> Result<()>;
     fn evaluate_script(&self, script: &str) -> Result<()>;
     fn reload(&self) -> Result<()>;
+    /// Restyles the page shown and every page after it.
+    fn set_page_style(&self, style: &PageStyle) -> Result<()>;
 }
 
-/// Makes the native view for a window, which needs the window's handle.
+/// Makes the native view for a window, which needs the window's handle,
+/// styling its pages with the style given, if any.
 pub type NativeFactory = Box<
     dyn Fn(
         &Window,
         Bounds<Pixels>,
         mpsc::UnboundedSender<NativeEvent>,
         Arc<Mutex<Option<PathBuf>>>,
+        Option<PageStyle>,
     ) -> Result<Box<dyn NativeView>>,
 >;
 
@@ -76,6 +115,7 @@ pub struct WebView {
     file_root: Arc<Mutex<Option<PathBuf>>>,
     /// Whether the owner lets it show: its pane is visible and nothing covers it.
     shown: bool,
+    page_style: Option<PageStyle>,
     bounds: Option<Bounds<Pixels>>,
     native_visible: Option<bool>,
     events: Option<mpsc::UnboundedSender<NativeEvent>>,
@@ -117,6 +157,7 @@ impl WebView {
             title: None,
             file_root: Arc::default(),
             shown: false,
+            page_style: None,
             bounds: None,
             native_visible: None,
             events: Some(events_tx),
@@ -176,6 +217,17 @@ impl WebView {
         }
     }
 
+    /// Styles every page from now on, and the one shown now.
+    pub fn set_page_style(&mut self, style: PageStyle, _cx: &mut Context<Self>) {
+        if self.page_style.as_ref() == Some(&style) {
+            return;
+        }
+        if let Some(native) = &self.native {
+            native.set_page_style(&style).log_err();
+        }
+        self.page_style = Some(style);
+    }
+
     /// Whether it may show; the owner calls this when its pane is shown or
     /// hidden, and when something would cover it.
     pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
@@ -190,7 +242,13 @@ impl WebView {
             && self.unavailable.is_none()
             && let (Some(factory), Some(events)) = (&self.factory, &self.events)
         {
-            match factory(window, bounds, events.clone(), self.file_root.clone()) {
+            match factory(
+                window,
+                bounds,
+                events.clone(),
+                self.file_root.clone(),
+                self.page_style.clone(),
+            ) {
                 Ok(native) => self.native = Some(native),
                 Err(error) => {
                     log::error!("couldn't make a web view: {error:#}");
@@ -382,13 +440,20 @@ impl NativeView for FakeNative {
         self.0.borrow_mut().push("reload".into());
         Ok(())
     }
+    fn set_page_style(&self, style: &PageStyle) -> Result<()> {
+        self.0.borrow_mut().push(format!("style {}", style.css));
+        Ok(())
+    }
 }
 
 /// Makes [`FakeNative`]s that record into `calls`, after a "create" line.
 #[cfg(any(test, feature = "test-support"))]
 pub fn fake_factory(calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>) -> NativeFactory {
-    Box::new(move |_, _, _, _| {
-        calls.borrow_mut().push("create".into());
+    Box::new(move |_, _, _, _, style| {
+        calls.borrow_mut().push(match style {
+            Some(style) => format!("create with style {}", style.css),
+            None => "create".into(),
+        });
         Ok(Box::new(FakeNative(calls.clone())))
     })
 }
@@ -424,6 +489,42 @@ mod tests {
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
         });
+    }
+
+    #[gpui::test]
+    fn test_page_style(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let calls: Rc<RefCell<Vec<String>>> = Rc::default();
+        let factory = fake_factory(calls.clone());
+        let style = |css: &str| PageStyle {
+            css: css.to_string(),
+            background: gpui::rgba(0x282c33ff),
+        };
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let view = cx.new(|cx| {
+                let mut view = WebView::with_factory(Some(factory), cx);
+                view.set_page_style(style("body { color: red }"), cx);
+                view
+            });
+            Host { view }
+        });
+        cx.run_until_parked();
+        // A style set before the view exists is part of making it.
+        assert_eq!(
+            take_calls(&calls).first().map(String::as_str),
+            Some("create with style body { color: red }")
+        );
+
+        let view = host.read_with(cx, |host, _| host.view.clone());
+        view.update(cx, |view, cx| {
+            view.set_page_style(style("body { color: red }"), cx);
+            view.set_page_style(style("body { color: blue }"), cx);
+        });
+        assert_eq!(take_calls(&calls), ["style body { color: blue }"]);
+
+        // The CSS reaches the page as a string, quotes and all.
+        let script = page_style_script("a::before { content: \"</style>\" }").unwrap();
+        assert!(script.contains(r#"style.textContent = "a::before { content: \"</style>\" }";"#));
     }
 
     #[gpui::test]

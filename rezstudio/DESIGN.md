@@ -801,6 +801,25 @@ Steps:
      - `WebView::load_url` now always loads, even the URL it loaded last, since links may
        have led away from it.
      - When R stops, the pages go, as that R's help server served them.
+   - **Styling:** pages follow the app's theme and fonts.
+     - Ark serves its own `R.css` and `prism.css` with help pages, which take every font
+       and colour from variables Positron defines (`--vscode-font-family`,
+       `--vscode-editor-background` and so on). Undefined, they fell back to the
+       browser's defaults: Times on white, with code no different from prose.
+     - The pane defines them from the theme (the panel's background, the text and link
+       colours, the terminal's ANSI colours) and from the UI and editor fonts and sizes,
+       in a `<style>` a page script adds at document start, before the page draws. It
+       also adds what Ark's sheets lack: code blocks on the editor's background with a
+       border, bolder headings, table spacing, and the editor's syntax colours for
+       highlighted examples.
+     - The app's bundled fonts (IBM Plex Sans and Lilex) aren't visible to WebKit, which
+       draws in its own process, so unless they're installed pages use the system's.
+     - On a theme or font change the pane restyles the page shown and adds a new page
+       script for later pages. `wry` only takes page scripts as the view is made, so
+       this adds a `WKUserScript` to WebKit directly; the newest runs last and wins.
+     - The view's background is the panel's, not WebKit's white, so nothing flashes
+       white between pages. Views with no page style (the Viewer's) keep white, since
+       htmlwidgets expect it.
    - **Toolbar:**
      - back and forward;
      - the help index, from `utils::help.start()` run silently through `evaluate_code`,
