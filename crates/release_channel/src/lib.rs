@@ -44,10 +44,10 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "RezStudio-Dev",
+        ReleaseChannel::Nightly => "RezStudio-Nightly",
+        ReleaseChannel::Preview => "RezStudio-Preview",
+        ReleaseChannel::Stable => "RezStudio-Stable",
     }
 }
 
@@ -199,16 +199,18 @@ impl ReleaseChannel {
 
     /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
     pub fn poll_for_updates(&self) -> bool {
-        !matches!(self, ReleaseChannel::Dev)
+        // The upstream update server ships Zed builds; RezStudio has no update feed yet,
+        // and polling it would offer to replace RezStudio with Zed.
+        false
     }
 
     /// Returns the display name for this [`ReleaseChannel`].
     pub fn display_name(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "Zed Dev",
-            ReleaseChannel::Nightly => "Zed Nightly",
-            ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
+            ReleaseChannel::Dev => "RezStudio Dev",
+            ReleaseChannel::Nightly => "RezStudio Nightly",
+            ReleaseChannel::Preview => "RezStudio Preview",
+            ReleaseChannel::Stable => "RezStudio",
         }
     }
 
@@ -224,13 +226,13 @@ impl ReleaseChannel {
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the bundle identifier for Zed on macOS.
+    /// This also has to match the bundle identifier for RezStudio on macOS.
     pub fn app_id(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "dev.zed.Zed-Dev",
-            ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
-            ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            ReleaseChannel::Dev => "io.github.robicruzo.RezStudio-Dev",
+            ReleaseChannel::Nightly => "io.github.robicruzo.RezStudio-Nightly",
+            ReleaseChannel::Preview => "io.github.robicruzo.RezStudio-Preview",
+            ReleaseChannel::Stable => "io.github.robicruzo.RezStudio",
         }
     }
 

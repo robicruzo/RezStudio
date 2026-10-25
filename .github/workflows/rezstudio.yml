@@ -1,0 +1,155 @@
+# CI for the RezStudio fork. Zed's own workflows are gated to zed-industries
+# runners and stay inert here.
+name: RezStudio CI
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Build an optimized bundle and DMG instead of a debug bundle"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are useless across CI runs and exhaust runner disks.
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  linux:
+    name: Lint and test (Linux)
+    if: github.repository == 'robicruzo/RezStudio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Install system dependencies
+        run: script/linux
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: ./script/clippy
+
+      - name: Test
+        run: >-
+          cargo test --locked
+          -p paths -p release_channel -p cli -p client -p settings -p settings_ui
+          -p title_bar -p file_finder -p git_ui -p workspace -p remote_server
+          -p zed
+
+  macos:
+    name: Build RezStudio.app (macOS arm64)
+    if: github.repository == 'robicruzo/RezStudio'
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      # Debuginfo doubles the target directory, which does not fit on the runner disk.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-${{ inputs.release && 'release' || 'debug' }}
+
+      - name: Type-check the visual test runner
+        run: cargo check --locked -p zed --features visual-tests --bin zed_visual_test_runner
+
+      - name: Bundle (debug)
+        if: ${{ !inputs.release }}
+        run: script/bundle-rezstudio -d
+
+      - name: Bundle (release)
+        if: ${{ inputs.release }}
+        run: script/bundle-rezstudio -m
+
+      - name: Check the bundled Ark
+        run: |
+          app_path=$(find target/aarch64-apple-darwin -maxdepth 4 -name "RezStudio*.app" -type d | head -n 1)
+          expected=$(sed -n 's/^pub const ARK_VERSION: &str = "\(.*\)";$/\1/p' crates/runtime/src/comms.rs)
+          "$app_path/Contents/MacOS/ark" --version | tee /dev/stderr | grep -qx "Ark ${expected}"
+          codesign --verify --strict "$app_path/Contents/MacOS/ark"
+          test -s "$app_path/Contents/Resources/ark/LICENSE"
+          test -s "$app_path/Contents/Resources/ark/NOTICE"
+          codesign --verify --deep --strict "$app_path"
+
+      - name: Archive bundle
+        run: |
+          app_path=$(find target/aarch64-apple-darwin -maxdepth 4 -name "RezStudio*.app" -type d | head -n 1)
+          ditto -c -k --keepParent "$app_path" RezStudio-macos-aarch64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RezStudio-macos-aarch64
+          path: |
+            RezStudio-macos-aarch64.zip
+            target/aarch64-apple-darwin/release/RezStudio-*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  r-session:
+    # Drives the pinned Ark with a real R through everything the
+    # console relies on: startup, output, errors, readline(), interrupt, the UI
+    # and LSP comms, completions and shutdown.
+    name: R session tests (macOS arm64, real R and Ark)
+    if: github.repository == 'robicruzo/RezStudio'
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-r-session
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+
+      # Ark draws SVG plots with svglite; R's own svg() needs XQuartz on macOS.
+      - name: Install svglite
+        run: Rscript -e 'install.packages("svglite", repos = "https://cloud.r-project.org")'
+
+      - name: Fetch the pinned Ark
+        run: echo "REZSTUDIO_ARK=$PWD/$(script/fetch-ark)/ark" >> "$GITHUB_ENV"
+
+      - name: Show R and Ark versions
+        run: |
+          R --version | head -n 1
+          "$REZSTUDIO_ARK" --version
+
+      - name: Run the runtime tests against real R and Ark
+        run: cargo test --locked -p runtime -- --include-ignored

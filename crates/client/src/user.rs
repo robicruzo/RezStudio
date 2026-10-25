@@ -7,9 +7,6 @@ use cloud_api_client::{
     UpdateSystemSettingsBody,
 };
 use cloud_api_types::OrganizationConfiguration;
-use cloud_llm_client::{
-    EDIT_PREDICTIONS_USAGE_AMOUNT_HEADER_NAME, EDIT_PREDICTIONS_USAGE_LIMIT_HEADER_NAME, UsageLimit,
-};
 use collections::{HashMap, HashSet, hash_map::Entry};
 use derive_more::Deref;
 use feature_flags::FeatureFlagAppExt;
@@ -18,13 +15,9 @@ use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, SharedString, SharedUri, Task,
     TaskExt, WeakEntity,
 };
-use http_client::http::{HeaderMap, HeaderValue};
 use postage::{sink::Sink, watch};
 use rpc::proto::{RequestMessage, UsersResponse};
-use std::{
-    str::FromStr as _,
-    sync::{Arc, Weak},
-};
+use std::sync::{Arc, Weak};
 use text::ReplicaId;
 use util::{ResultExt, TryFutureExt as _};
 
@@ -163,6 +156,12 @@ enum UpdateContacts {
 
 #[derive(Debug, Clone, Copy, Deref)]
 pub struct EditPredictionUsage(pub RequestUsage);
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum UsageLimit {
+    Limited(i32),
+    Unlimited,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RequestUsage {
@@ -920,10 +919,6 @@ impl UserStore {
         self.configuration_by_organization =
             response.configuration_by_organization.into_iter().collect();
 
-        self.edit_prediction_usage = Some(EditPredictionUsage(RequestUsage {
-            limit: response.plan.usage.edit_predictions.limit,
-            amount: response.plan.usage.edit_predictions.used as i32,
-        }));
         self.plan_info = Some(response.plan);
         cx.emit(Event::PrivateUserInfoUpdated);
     }
@@ -1080,34 +1075,6 @@ impl RequestUsage {
             UsageLimit::Limited(limit) => self.amount >= limit,
             UsageLimit::Unlimited => false,
         }
-    }
-
-    fn from_headers(
-        limit_name: &str,
-        amount_name: &str,
-        headers: &HeaderMap<HeaderValue>,
-    ) -> Result<Self> {
-        let limit = headers
-            .get(limit_name)
-            .with_context(|| format!("missing {limit_name:?} header"))?;
-        let limit = UsageLimit::from_str(limit.to_str()?)?;
-
-        let amount = headers
-            .get(amount_name)
-            .with_context(|| format!("missing {amount_name:?} header"))?;
-        let amount = amount.to_str()?.parse::<i32>()?;
-
-        Ok(Self { limit, amount })
-    }
-}
-
-impl EditPredictionUsage {
-    pub fn from_headers(headers: &HeaderMap<HeaderValue>) -> Result<Self> {
-        Ok(Self(RequestUsage::from_headers(
-            EDIT_PREDICTIONS_USAGE_LIMIT_HEADER_NAME,
-            EDIT_PREDICTIONS_USAGE_AMOUNT_HEADER_NAME,
-            headers,
-        )?))
     }
 }
 

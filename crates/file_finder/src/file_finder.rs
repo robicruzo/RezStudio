@@ -6,12 +6,11 @@ mod multi_select_tests;
 use futures::future::join_all;
 pub use open_path_prompt::OpenPathDelegate;
 
-use channel::ChannelStore;
 use client::ChannelId;
 use collections::{HashMap, HashSet};
 use editor::Editor;
 use file_icons::FileIcons;
-use fuzzy::{StringMatch, StringMatchCandidate};
+use fuzzy::StringMatch;
 use fuzzy_nucleo::{PathMatch, PathMatchCandidate};
 use gpui::{
     Action, AnyElement, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
@@ -400,7 +399,6 @@ pub struct FileFinderDelegate {
     file_finder: WeakEntity<FileFinder>,
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
-    channel_store: Option<Entity<ChannelStore>>,
     search_count: usize,
     latest_search_id: usize,
     latest_search_did_cancel: bool,
@@ -468,6 +466,8 @@ enum Match {
         panel_match: Option<ProjectPanelOrdMatch>,
     },
     Search(ProjectPanelOrdMatch),
+    // Channels are a collab feature RezStudio removed; the variant stays to keep this file close to upstream.
+    #[allow(dead_code)]
     Channel {
         channel_id: ChannelId,
         channel_name: SharedString,
@@ -1028,16 +1028,10 @@ impl FileFinderDelegate {
         cx: &mut Context<FileFinder>,
     ) -> Self {
         Self::subscribe_to_updates(&project, window, cx);
-        let channel_store = if FileFinderSettings::get_global(cx).include_channels {
-            ChannelStore::try_global(cx)
-        } else {
-            None
-        };
         Self {
             file_finder,
             workspace,
             project,
-            channel_store,
             search_count: 0,
             latest_search_id: 0,
             latest_search_did_cancel: false,
@@ -1295,68 +1289,6 @@ impl FileFinderDelegate {
                 extend_old_matches,
                 path_style,
             );
-
-            // Add channel matches
-            if let Some(channel_store) = &self.channel_store {
-                let channel_store = channel_store.read(cx);
-                let channels: Vec<_> = channel_store.channels().cloned().collect();
-                if !channels.is_empty() {
-                    let candidates = channels
-                        .iter()
-                        .enumerate()
-                        .map(|(id, channel)| StringMatchCandidate::new(id, &channel.name));
-                    let channel_query = query.path_query();
-                    let query_lower = channel_query.to_lowercase();
-                    let mut channel_matches = Vec::new();
-                    for candidate in candidates {
-                        let channel_name = candidate.string;
-                        let name_lower = channel_name.to_lowercase();
-
-                        let mut positions = Vec::new();
-                        let mut query_idx = 0;
-                        for (name_idx, name_char) in name_lower.char_indices() {
-                            if query_idx < query_lower.len() {
-                                let query_char =
-                                    query_lower[query_idx..].chars().next().unwrap_or_default();
-                                if name_char == query_char {
-                                    positions.push(name_idx);
-                                    query_idx += query_char.len_utf8();
-                                }
-                            }
-                        }
-
-                        if query_idx == query_lower.len() {
-                            let channel = &channels[candidate.id];
-                            let score = if name_lower == query_lower {
-                                1.0
-                            } else if name_lower.starts_with(&query_lower) {
-                                0.8
-                            } else {
-                                0.5 * (query_lower.len() as f64 / name_lower.len() as f64)
-                            };
-                            channel_matches.push(Match::Channel {
-                                channel_id: channel.id,
-                                channel_name: channel.name.clone(),
-                                string_match: StringMatch {
-                                    candidate_id: candidate.id,
-                                    score,
-                                    positions,
-                                    string: channel_name,
-                                },
-                            });
-                        }
-                    }
-                    for channel_match in channel_matches {
-                        match self
-                            .matches
-                            .position(&channel_match, self.currently_opened_path.as_ref())
-                        {
-                            Ok(_duplicate) => {}
-                            Err(ix) => self.matches.matches.insert(ix, channel_match),
-                        }
-                    }
-                }
-            }
 
             let query_path = query.path_query();
             if let Ok(mut query_path) = RelPath::new(Path::new(query_path), path_style) {

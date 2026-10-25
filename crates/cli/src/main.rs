@@ -31,7 +31,14 @@ use walkdir::WalkDir;
 
 use std::io::IsTerminal;
 
-const URL_PREFIX: [&'static str; 5] = ["zed://", "http://", "https://", "file://", "ssh://"];
+const URL_PREFIX: [&'static str; 6] = [
+    "rezstudio://",
+    "zed://",
+    "http://",
+    "https://",
+    "file://",
+    "ssh://",
+];
 
 struct Detect;
 
@@ -48,21 +55,21 @@ trait InstalledApp {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "zed",
+    name = "rezstudio",
     disable_version_flag = true,
-    before_help = "The Zed CLI binary.
-This CLI is a separate binary that invokes Zed.
+    before_help = "The RezStudio CLI binary.
+This CLI is a separate binary that invokes RezStudio.
 
 Examples:
-    `zed`
-          Simply opens Zed
-    `zed --foreground`
+    `rezstudio`
+          Simply opens RezStudio
+    `rezstudio --foreground`
           Runs in foreground (shows all logs)
-    `zed path-to-your-project`
-          Open your project in Zed
-    `zed -n path-to-file `
+    `rezstudio path-to-your-project`
+          Open your project in RezStudio
+    `rezstudio -n path-to-file `
           Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
+    after_help = "To read from stdin, append '-', e.g. 'ps axf | rezstudio -'"
 )]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
@@ -87,11 +94,14 @@ struct Args {
     classic: bool,
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     /// This overrides the default platform-specific data directory location:
-    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Zed`.")]
-    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Zed`.")]
+    #[cfg_attr(
+        target_os = "macos",
+        doc = "`~/Library/Application Support/RezStudio`."
+    )]
+    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\RezStudio`.")]
     #[cfg_attr(
         not(any(target_os = "windows", target_os = "macos")),
-        doc = "`$XDG_DATA_HOME/zed`."
+        doc = "`$XDG_DATA_HOME/rezstudio`."
     )]
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     user_data_dir: Option<String>,
@@ -106,7 +116,7 @@ struct Args {
     /// Run zed in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
-    /// Custom path to Zed.app or the zed binary
+    /// Custom path to RezStudio.app or the rezstudio binary
     #[arg(long)]
     zed: Option<PathBuf>,
     /// Run zed in dev-server mode
@@ -551,7 +561,7 @@ fn run() -> Result<()> {
     if args.system_specs {
         let path = app.path();
         let msg = [
-            "The `--system-specs` argument is not supported in the Zed CLI, only on Zed binary.",
+            "The `--system-specs` argument is not supported in the RezStudio CLI, only on the RezStudio binary.",
             "To retrieve the system specs on the command line, run the following command:",
             &format!("{} --system-specs", path.display()),
         ];
@@ -851,16 +861,19 @@ fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     let blue = console::Style::new().blue();
     let items = [
         format!(
-            "Add to existing Zed window ({})",
-            blue.apply_to("zed --existing")
+            "Add to existing RezStudio window ({})",
+            blue.apply_to("rezstudio --existing")
         ),
-        format!("Open a new window ({})", blue.apply_to("zed --classic")),
+        format!(
+            "Open a new window ({})",
+            blue.apply_to("rezstudio --classic")
+        ),
     ];
 
     let prompt = format!(
         "Configure default behavior for {}\n{}",
-        blue.apply_to("zed <path>"),
-        console::style("You can change this later in Zed settings"),
+        blue.apply_to("rezstudio <path>"),
+        console::style("You can change this later in RezStudio settings"),
     );
 
     let selection = dialoguer::Select::new()
@@ -925,7 +938,7 @@ mod linux {
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
             format!(
-                "Zed {}{}{} – {}",
+                "RezStudio {}{}{} – {}",
                 if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
                     "".to_string()
                 } else {
@@ -1452,7 +1465,7 @@ mod mac_os {
             user_data_dir: Option<&str>,
         ) -> io::Result<ExitStatus> {
             let path = match self {
-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
+                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/rezstudio"),
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             };
 
@@ -1466,7 +1479,7 @@ mod mac_os {
 
         fn path(&self) -> PathBuf {
             match self {
-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
+                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/rezstudio"),
                 Bundle::LocalPath { executable, .. } => executable.clone(),
             }
         }

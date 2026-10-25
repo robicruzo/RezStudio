@@ -15,7 +15,7 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 /// and state directory paths.
 ///
 /// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Zed";
+pub const APP_NAME: &str = "RezStudio";
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
 /// Linux/FreeBSD and the macOS `~/.config` fallback.
@@ -60,15 +60,16 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved config directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/.config/zed`.
-/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/zed`.
-/// On Windows, this is `%APPDATA%\Zed`.
+/// On macOS, this is `~/.config/rezstudio`.
+/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/rezstudio`.
+/// On Windows, this is `%APPDATA%\RezStudio`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Returns the relative path to the zed_server directory on the ssh host.
+/// Returns the relative path to the remote server directory on the ssh host.
+/// Kept separate from Zed's `.zed_server` so both editors can share a host without clobbering each other.
 pub fn remote_server_dir_relative() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::from_unix_str(".zed_server").unwrap());
+        LazyLock::new(|| RelPath::from_unix_str(".rezstudio_server").unwrap());
     *CACHED
 }
 

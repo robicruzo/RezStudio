@@ -18,6 +18,8 @@ pub use runtimelib::ExecutionState;
 
 pub use crate::jupyter_settings::JupyterSettings;
 pub use crate::kernels::{Kernel, KernelSpecification, KernelStatus, PythonEnvKernelSpecification};
+// R Markdown chunks render their output with the same view, fed by RezStudio's R session.
+pub use crate::outputs::{ExecutionStatus, ExecutionView};
 pub use crate::repl_editor::*;
 pub use crate::repl_sessions_ui::{
     ClearCurrentOutput, ClearOutputs, Interrupt, ReplSessionsPage, Restart, Run, Sessions, Shutdown,

@@ -1,0 +1,37 @@
+[package]
+name = "data_explorer"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/data_explorer.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+collections.workspace = true
+gpui.workspace = true
+log.workspace = true
+runtime.workspace = true
+serde_json.workspace = true
+ui.workspace = true
+util.workspace = true
+uuid.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+jupyter-protocol.workspace = true
+languages.workspace = true
+project = { workspace = true, features = ["test-support"] }
+runtime = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+theme = { workspace = true, features = ["test-support"] }
+theme_settings.workspace = true
+workspace = { workspace = true, features = ["test-support"] }

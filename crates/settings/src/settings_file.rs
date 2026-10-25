@@ -130,6 +130,16 @@ pub fn test_settings() -> &'static str {
             crate::default_settings().as_ref(),
         )
         .unwrap();
+        // RezStudio ships with AI and telemetry metrics off and soft wrap on, but upstream
+        // tests exercise those code paths assuming Zed's defaults.
+        util::merge_non_null_json_value_into(
+            serde_json::json!({
+                "disable_ai": false,
+                "telemetry": { "metrics": true },
+                "soft_wrap": "none",
+            }),
+            &mut value,
+        );
         #[cfg(not(target_os = "windows"))]
         util::merge_non_null_json_value_into(
             serde_json::json!({

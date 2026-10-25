@@ -25,6 +25,7 @@ mod go;
 mod json;
 mod package_json;
 mod python;
+pub mod r;
 mod rust;
 mod tailwind;
 mod tailwindcss;
@@ -163,6 +164,16 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
             ..Default::default()
         },
         LanguageInfo {
+            name: "rmarkdown",
+            adapters: vec![],
+            ..Default::default()
+        },
+        LanguageInfo {
+            name: "quarto",
+            adapters: vec![],
+            ..Default::default()
+        },
+        LanguageInfo {
             name: "python",
             adapters: vec![
                 basedpyright_lsp_adapter,
@@ -176,6 +187,12 @@ pub fn init(languages: Arc<LanguageRegistry>, fs: Arc<dyn Fs>, node: NodeRuntime
             toolchain: Some(python_toolchain_provider),
             manifest_name: Some(SharedString::new_static("pyproject.toml").into()),
             semantic_token_rules: Some(python::semantic_token_rules()),
+        },
+        LanguageInfo {
+            name: "r",
+            adapters: vec![],
+            toolchain: Some(Arc::new(r::RToolchainLister)),
+            ..Default::default()
         },
         LanguageInfo {
             name: "rust",
@@ -378,7 +395,7 @@ fn register_language(
             async move {
                 Ok(LoadedLanguage {
                     config,
-                    queries: grammars::load_queries(name),
+                    queries: grammars::load_queries(queries_name(name)),
                     context_provider: context,
                     toolchain_provider: toolchain,
                     manifest_name,
@@ -389,11 +406,23 @@ fn register_language(
     );
 }
 
+/// R Markdown and Quarto are Markdown with their own names and file types;
+/// their R chunks come from Markdown's code fence injection.
+const MARKDOWN_DIALECTS: [&str; 2] = ["rmarkdown", "quarto"];
+
+fn queries_name(name: &str) -> &str {
+    if MARKDOWN_DIALECTS.contains(&name) {
+        "markdown"
+    } else {
+        name
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn language(name: &str, grammar: tree_sitter::Language) -> Arc<Language> {
     Arc::new(
         Language::new(grammars::load_config(name), Some(grammar))
-            .with_queries(grammars::load_queries(name))
+            .with_queries(grammars::load_queries(queries_name(name)))
             .unwrap(),
     )
 }
@@ -405,7 +434,7 @@ fn load_config(name: &str) -> LanguageConfig {
 
 #[cfg(test)]
 mod tests {
-    use gpui::App;
+    use gpui::{App, AppContext as _, BorrowAppContext as _};
     use language::{File, LanguageRegistry, TestFile};
     use settings::SettingsStore;
     use std::sync::Arc;
@@ -435,5 +464,263 @@ mod tests {
         assert_eq!(language_of(".env", cx), Some("Env".into()));
         assert_eq!(language_of(".envrc", cx), Some("Shell Script".into()));
         assert_eq!(language_of("deploy.sh", cx), Some("Shell Script".into()));
+    }
+
+    #[gpui::test]
+    fn test_r_file_detection(cx: &mut App) {
+        let settings_store = SettingsStore::test(cx);
+        cx.set_global(settings_store);
+
+        let registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
+        registry.add(crate::language("r", tree_sitter_r::LANGUAGE.into()));
+
+        let language_of = |path: &str, cx: &App| {
+            let file: Arc<dyn File> = Arc::new(TestFile {
+                path: Arc::from(rel_path(path)),
+                root_name: "project".into(),
+                local_root: None,
+            });
+
+            registry
+                .language_for_file(&file, None, cx)
+                .and_then(|id| registry.language_name_for_id(id))
+        };
+
+        assert_eq!(language_of("analysis.R", cx), Some("R".into()));
+        assert_eq!(language_of("utils.r", cx), Some("R".into()));
+        assert_eq!(language_of(".Rprofile", cx), Some("R".into()));
+        assert_eq!(language_of("notes.Rmd", cx), None, "R Markdown isn't R");
+
+        let r_settings = registry.language_settings().languages.0.get("R").cloned();
+        assert_eq!(
+            r_settings.and_then(|settings| settings.tab_size),
+            std::num::NonZeroU32::new(2)
+        );
+    }
+
+    #[gpui::test]
+    async fn test_r_markdown_and_quarto(cx: &mut gpui::TestAppContext) {
+        use language::{Buffer, Point};
+
+        let registry = cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            let registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
+            registry.add(crate::language(
+                "rmarkdown",
+                tree_sitter_md::LANGUAGE.into(),
+            ));
+            registry.add(crate::language("quarto", tree_sitter_md::LANGUAGE.into()));
+            registry.add(crate::language(
+                "markdown-inline",
+                tree_sitter_md::INLINE_LANGUAGE.into(),
+            ));
+            registry.add(crate::language("r", tree_sitter_r::LANGUAGE.into()));
+            registry
+        });
+        let language_of = |path: &str, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                let file: Arc<dyn File> = Arc::new(TestFile {
+                    path: Arc::from(rel_path(path)),
+                    root_name: "project".into(),
+                    local_root: None,
+                });
+                registry
+                    .language_for_file(&file, None, cx)
+                    .and_then(|id| registry.language_name_for_id(id))
+            })
+        };
+        assert_eq!(language_of("report.Rmd", cx), Some("R Markdown".into()));
+        assert_eq!(
+            language_of("notes.rmarkdown", cx),
+            Some("R Markdown".into())
+        );
+        assert_eq!(language_of("paper.qmd", cx), Some("Quarto".into()));
+
+        // R chunks, with or without options, are parsed as R; prose stays Markdown.
+        let text = "---\ntitle: Report\n---\n\nSome *prose*.\n\n```{r setup, echo=FALSE}\nx <- 1\n```\n\n```{r}\nmean(x)\n```\n";
+        let rmarkdown = registry.language_for_name("R Markdown").await.unwrap();
+        // The registry comes first, so the parse can find R for the chunks.
+        let buffer = cx.new(|cx| {
+            let mut buffer = Buffer::local(text, cx);
+            buffer.set_language_registry(registry.clone());
+            buffer.set_language(Some(rmarkdown), cx);
+            buffer
+        });
+        cx.run_until_parked();
+        buffer.read_with(cx, |buffer, _| {
+            let language_at = |row: u32| {
+                buffer
+                    .snapshot()
+                    .language_at(Point::new(row, 1))
+                    .map(|language| language.name().to_string())
+            };
+            assert_eq!(language_at(4).as_deref(), Some("R Markdown"));
+            assert_eq!(language_at(7).as_deref(), Some("R"));
+            assert_eq!(language_at(11).as_deref(), Some("R"));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_r_outline(cx: &mut gpui::TestAppContext) {
+        let language = crate::language("r", tree_sitter_r::LANGUAGE.into());
+        let text = unindent::Unindent::unindent(
+            r#"
+            # Load data ----
+            data <- read.csv("data.csv")
+
+            clean <- function(df) {
+              helper = function(x) x + 1
+              df
+            }
+
+            # Models ====
+            "fit model" <- function(df, ...) lm(y ~ x, df)
+            summarise = \(df) summary(df)
+            # not a section --
+            "#,
+        );
+
+        let buffer = cx.new(|cx| {
+            let mut buffer = language::Buffer::local(text, cx);
+            buffer.set_sync_parse_timeout(None);
+            buffer.set_language(Some(language), cx);
+            buffer
+        });
+        buffer
+            .read_with(cx, |buffer, _| buffer.parsing_idle())
+            .await;
+        let outline = buffer.read_with(cx, |buffer, _| buffer.snapshot().outline(None));
+        pretty_assertions::assert_eq!(
+            outline
+                .items
+                .iter()
+                .map(|item| (item.text.as_str(), item.depth))
+                .collect::<Vec<_>>(),
+            &[
+                ("# Load data ----", 0),
+                ("clean", 0),
+                ("helper", 1),
+                ("# Models ====", 0),
+                ("\"fit model\"", 0),
+                ("summarise", 0),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn test_r_highlights() {
+        let language = crate::language("r", tree_sitter_r::LANGUAGE.into());
+        let capture_names = [
+            "variable",
+            "variable.parameter",
+            "variable.special",
+            "function",
+            "keyword",
+            "operator",
+            "property",
+            "namespace",
+            "string",
+            "number",
+            "boolean",
+            "constant.builtin",
+            "comment",
+            "comment.doc",
+        ];
+        let theme =
+            theme::SyntaxTheme::new_test(capture_names.map(|name| (name, gpui::Hsla::default())));
+        language.set_theme(&theme);
+        let grammar = language.grammar().expect("R has a grammar");
+
+        let text = unindent::Unindent::unindent(
+            r#"
+            #' Fit a model
+            fit <- function(df, ...) {
+              if (is.null(df)) return(NA)
+              stats::lm(y ~ x, data = df$values, 1L, TRUE)
+            }
+            "#,
+        );
+        let runs = language
+            .highlight_text(text.as_str(), 0..text.len())
+            .collect::<Vec<_>>();
+        let capture_at = |needle: &str, occurrence: usize| {
+            let start = text
+                .match_indices(needle)
+                .nth(occurrence)
+                .unwrap_or_else(|| panic!("{needle:?} not in sample"))
+                .0;
+            runs.iter()
+                .find(|(range, _)| *range == (start..start + needle.len()))
+                .map(|(_, id)| *id)
+        };
+        let expect = |needle: &str, occurrence: usize, capture: &str| {
+            let expected = grammar
+                .highlight_id_for_name(capture)
+                .unwrap_or_else(|| panic!("{capture} is not in the test theme"));
+            assert_eq!(
+                capture_at(needle, occurrence),
+                Some(expected),
+                "{needle:?} should be highlighted as {capture}"
+            );
+        };
+
+        expect("#' Fit a model", 0, "comment.doc");
+        expect("fit", 0, "function");
+        expect("<-", 0, "operator");
+        expect("function", 0, "keyword");
+        expect("df", 0, "variable.parameter");
+        expect("...", 0, "variable.special");
+        expect("if", 0, "keyword");
+        expect("is.null", 0, "function");
+        expect("return", 0, "keyword");
+        expect("NA", 0, "constant.builtin");
+        expect("stats", 0, "namespace");
+        expect("lm", 0, "function");
+        expect("data", 0, "variable.parameter");
+        expect("values", 0, "property");
+        expect("1L", 0, "number");
+        expect("TRUE", 0, "boolean");
+    }
+
+    #[gpui::test]
+    async fn test_r_autoindent(cx: &mut gpui::TestAppContext) {
+        cx.executor().set_block_on_ticks(usize::MAX..=usize::MAX);
+        let language = crate::language("r", tree_sitter_r::LANGUAGE.into());
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.all_languages.defaults.tab_size = std::num::NonZeroU32::new(2);
+                });
+            });
+        });
+
+        // The editor auto-closes brackets, so newlines are typed between a matched pair.
+        cx.new(|cx| {
+            let mut buffer = language::Buffer::local("", cx).with_language(language, cx);
+
+            buffer.edit([(0..0, "f <- function(x) {}")], None, cx);
+            let before_brace = buffer.len() - 1;
+            buffer.edit(
+                [(before_brace..before_brace, "\n\n")],
+                Some(language::AutoindentMode::EachLine),
+                cx,
+            );
+            assert_eq!(buffer.text(), "f <- function(x) {\n  \n}");
+
+            let end = buffer.len();
+            buffer.edit([(end..end, "\nmean()")], None, cx);
+            let before_paren = buffer.len() - 1;
+            buffer.edit(
+                [(before_paren..before_paren, "\n\n")],
+                Some(language::AutoindentMode::EachLine),
+                cx,
+            );
+            assert_eq!(buffer.text(), "f <- function(x) {\n  \n}\nmean(\n  \n)");
+
+            buffer
+        });
     }
 }

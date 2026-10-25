@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+# Downloads the Ark release RezStudio is pinned to, verifies it, and unpacks it.
+# Prints the directory holding `ark`, `LICENSE` and `NOTICE`; progress goes to stderr.
+#
+# Usage: script/fetch-ark [target-triple]
+
+set -euo pipefail
+
+host_triple=$(rustc --version --verbose | sed -n 's/^host: //p')
+target_triple="${1:-$host_triple}"
+
+# Ark is pinned to the release whose comm protocol the runtime crate implements.
+# Checksums are from the release's published asset digests.
+ark_version=$(sed -n 's/^pub const ARK_VERSION: &str = "\(.*\)";$/\1/p' crates/runtime/src/comms.rs)
+if [[ "$ark_version" != "0.1.252" ]]; then
+    echo "ARK_VERSION is ${ark_version}, but the checksums here are for Ark 0.1.252; update them together." >&2
+    exit 1
+fi
+case "$target_triple" in
+    aarch64-apple-darwin)
+        ark_platform="darwin-arm64"
+        ark_sha256="aa1186f6e1ad271abaf246fd76e0aa9039cdeeff2cb52147e8887060afd5fb07"
+        ;;
+    x86_64-apple-darwin)
+        ark_platform="darwin-x64"
+        ark_sha256="a8df8b55d951732b73fd05e8857b9c4b185b8dc9d6bc307f2ae5dcb84d4cc913"
+        ;;
+    *)
+        echo "No pinned Ark build for ${target_triple}" >&2
+        exit 1
+        ;;
+esac
+
+downloads="target/rezstudio-downloads"
+archive="${downloads}/ark-${ark_version}-${ark_platform}.zip"
+unpacked="${downloads}/ark-${ark_version}-${ark_platform}"
+
+sha256_of() {
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+}
+
+if [[ ! -f "$archive" ]] || [[ "$(sha256_of "$archive")" != "$ark_sha256" ]]; then
+    echo "Downloading Ark ${ark_version} (${ark_platform})" >&2
+    mkdir -p "$downloads"
+    rm -rf "$unpacked"
+    curl --silent --show-error --fail --location --retry 3 --output "${archive}.partial" \
+        "https://github.com/posit-dev/ark/releases/download/${ark_version}/ark-${ark_version}-${ark_platform}.zip"
+    actual_sha256=$(sha256_of "${archive}.partial")
+    if [[ "$actual_sha256" != "$ark_sha256" ]]; then
+        rm -f "${archive}.partial"
+        echo "Checksum mismatch for Ark ${ark_version}: expected ${ark_sha256}, got ${actual_sha256}" >&2
+        exit 1
+    fi
+    mv "${archive}.partial" "$archive"
+fi
+
+if [[ ! -x "${unpacked}/ark" ]]; then
+    rm -rf "$unpacked"
+    mkdir -p "$unpacked"
+    unzip -q "$archive" -d "$unpacked"
+    chmod +x "${unpacked}/ark"
+fi
+
+echo "$unpacked"

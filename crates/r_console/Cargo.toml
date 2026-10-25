@@ -1,0 +1,52 @@
+[package]
+name = "r_console"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/r_console.rs"
+doctest = false
+
+[features]
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+editor.workspace = true
+gpui.workspace = true
+jupyter-protocol.workspace = true
+language.workspace = true
+lsp.workspace = true
+paths.workspace = true
+project.workspace = true
+runtime.workspace = true
+serde.workspace = true
+settings.workspace = true
+terminal.workspace = true
+terminal_view.workspace = true
+text.workspace = true
+theme_settings.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+zed_actions.workspace = true
+
+[dev-dependencies]
+editor = { workspace = true, features = ["test-support"] }
+futures.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+language = { workspace = true, features = ["test-support"] }
+lsp = { workspace = true, features = ["test-support"] }
+languages = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+runtime = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+theme = { workspace = true, features = ["test-support"] }
+tree-sitter-r.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
