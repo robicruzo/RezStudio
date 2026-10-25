@@ -482,7 +482,8 @@ pub fn watch_cover<T: 'static>(
     let workspace_handle = workspace.downgrade();
     let multi_workspace = window.root::<MultiWorkspace>().flatten();
     let covered = {
-        let multi_workspace = multi_workspace.clone();
+        // Weak, as the panes holding these subscriptions belong to it.
+        let multi_workspace = multi_workspace.as_ref().map(|multi| multi.downgrade());
         move |cx: &App| -> bool {
             let Some(workspace) = workspace_handle.upgrade() else {
                 return true;
@@ -493,9 +494,12 @@ pub fn watch_cover<T: 'static>(
                 .zoomed_item()
                 .and_then(|zoomed| zoomed.upgrade())
                 .is_some_and(|zoomed| zoomed.entity_id() != own);
-            let other_workspace = multi_workspace.as_ref().is_some_and(|multi| {
-                multi.read(cx).workspace().entity_id() != workspace.entity_id()
-            });
+            let other_workspace = multi_workspace
+                .as_ref()
+                .and_then(|multi| multi.upgrade())
+                .is_some_and(|multi| {
+                    multi.read(cx).workspace().entity_id() != workspace.entity_id()
+                });
             modal || zoomed || other_workspace
         }
     };
