@@ -654,6 +654,77 @@ pub enum DataExplorerEvent {
     ReturnColumnProfiles(ReturnColumnProfiles),
 }
 
+// UI comm requests that run R code: `call_method` runs `.ps.rpc.<method>`,
+// and `evaluate_code` runs a line silently. Both reply with JSON.
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CallMethodParams {
+    pub method: String,
+    /// Passed to the R function in order.
+    pub params: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EvaluateCodeParams {
+    pub code: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EvalResult {
+    pub result: Value,
+    /// What the code printed while it ran.
+    #[serde(default)]
+    pub output: String,
+}
+
+// Packages, from Ark 0.1.252's `packages_pane.R`, which Positron's
+// Packages pane calls through `call_method`.
+
+/// One installed package, from `pkg_list`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct InstalledPackage {
+    pub name: String,
+    pub version: String,
+    /// On the search path, as after `library()`; a package can be loaded
+    /// without being attached.
+    pub attached: bool,
+    /// The DESCRIPTION's Description, on one line; empty when it has none.
+    #[serde(default)]
+    pub description: String,
+    /// The first URL in the DESCRIPTION, usually the package's website.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// The reply to `pkg_detail`, for an installed package.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageDetail {
+    pub name: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The maintainer, or the authors when there's no maintainer.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// The primary license, without any "+ file LICENSE".
+    #[serde(default)]
+    pub license: Option<String>,
+    /// Where it was installed from, such as `CRAN`.
+    #[serde(default)]
+    pub source_repository: Option<String>,
+    #[serde(default)]
+    pub published_date: Option<String>,
+}
+
+/// An installed package with a newer version in the session's repositories,
+/// from `pkg_outdated`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OutdatedPackage {
+    pub name: String,
+    pub latest_version: String,
+}
+
 // Plot comm (`positron.plot`), from Ark 0.1.252's `plot_comm.rs`. Ark opens
 // one per plot.
 

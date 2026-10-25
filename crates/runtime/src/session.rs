@@ -1,9 +1,10 @@
 use crate::ark::{self, ArkLaunch, ArkProcess};
 use crate::comms::{
-    self, DATA_EXPLORER_COMM_TARGET, DataExplorerEvent, DataExplorerOpenData, LSP_COMM_TARGET,
-    LspCommMessage, PLOT_COMM_TARGET, PlotEvent, PlotMetadata, PlotOpenData, PlotRenderSettings,
-    PlotResult, PromptStateParams, RPC_REPLY_MSG_TYPE, RPC_REQUEST_MSG_TYPE, RenderParams,
-    ServerStartData, UI_COMM_TARGET, UiBackendEvent, UiCommOpenData, UiFrontendEvent,
+    self, CallMethodParams, DATA_EXPLORER_COMM_TARGET, DataExplorerEvent, DataExplorerOpenData,
+    EvalResult, EvaluateCodeParams, InstalledPackage, LSP_COMM_TARGET, LspCommMessage,
+    OutdatedPackage, PLOT_COMM_TARGET, PackageDetail, PlotEvent, PlotMetadata, PlotOpenData,
+    PlotRenderSettings, PlotResult, PromptStateParams, RPC_REPLY_MSG_TYPE, RPC_REQUEST_MSG_TYPE,
+    RenderParams, ServerStartData, UI_COMM_TARGET, UiBackendEvent, UiCommOpenData, UiFrontendEvent,
     UiFrontendRequest, VARIABLES_COMM_TARGET, VariablesEvent,
 };
 use anyhow::{Context as _, Result};
@@ -29,6 +30,10 @@ const DEFAULT_CONSOLE_WIDTH: i32 = 80;
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(3);
 /// Redrawing a complex plot, such as a large ggplot2 scatter, can take a while.
 const PLOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Calls into R wait for any code R is running.
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// `pkg_outdated` asks every configured repository over the network.
+const OUTDATED_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionState {
@@ -336,6 +341,81 @@ impl RSession {
         );
         cx.background_spawn(async move {
             serde_json::from_value(reply.await?).context("unexpected reply to `get_metadata`")
+        })
+    }
+
+    /// Runs Ark's `.ps.rpc.<method>` in R with `params`, returning its JSON result.
+    pub fn call_method(
+        &mut self,
+        method: &str,
+        params: Vec<serde_json::Value>,
+        timeout: Duration,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<serde_json::Value>> {
+        let Some(ui_comm_id) = self.ui_comm_id.clone() else {
+            return Task::ready(Err(anyhow::anyhow!("R isn't running")));
+        };
+        let params = match serde_json::to_value(CallMethodParams {
+            method: method.to_string(),
+            params,
+        }) {
+            Ok(params) => params,
+            Err(error) => return Task::ready(Err(error.into())),
+        };
+        self.comm_request(&ui_comm_id, "call_method", params, timeout, cx)
+    }
+
+    /// Runs R code silently, returning its value as JSON and what it printed.
+    pub fn evaluate_code(
+        &mut self,
+        code: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<EvalResult>> {
+        let Some(ui_comm_id) = self.ui_comm_id.clone() else {
+            return Task::ready(Err(anyhow::anyhow!("R isn't running")));
+        };
+        let params = match serde_json::to_value(EvaluateCodeParams {
+            code: code.to_string(),
+        }) {
+            Ok(params) => params,
+            Err(error) => return Task::ready(Err(error.into())),
+        };
+        let reply = self.comm_request(&ui_comm_id, "evaluate_code", params, CALL_TIMEOUT, cx);
+        cx.background_spawn(async move {
+            serde_json::from_value(reply.await?).context("unexpected reply to `evaluate_code`")
+        })
+    }
+
+    pub fn installed_packages(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<InstalledPackage>>> {
+        let reply = self.call_method("pkg_list", Vec::new(), CALL_TIMEOUT, cx);
+        cx.background_spawn(async move {
+            json_list(reply.await?).context("unexpected reply to `pkg_list`")
+        })
+    }
+
+    /// Details of an installed package; `None` when it isn't installed.
+    pub fn package_detail(
+        &mut self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<PackageDetail>>> {
+        let reply = self.call_method("pkg_detail", vec![name.into()], CALL_TIMEOUT, cx);
+        cx.background_spawn(async move {
+            serde_json::from_value(reply.await?).context("unexpected reply to `pkg_detail`")
+        })
+    }
+
+    /// Installed packages with a newer version in the session's repositories.
+    pub fn outdated_packages(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<OutdatedPackage>>> {
+        let reply = self.call_method("pkg_outdated", Vec::new(), OUTDATED_TIMEOUT, cx);
+        cx.background_spawn(async move {
+            json_list(reply.await?).context("unexpected reply to `pkg_outdated`")
         })
     }
 
@@ -1128,6 +1208,15 @@ fn launch_directory(project_root: &std::path::Path) -> Result<PathBuf> {
     )
 }
 
+/// R's empty list becomes `[]`, `{}` or `null` depending on how it was built.
+fn json_list<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<Vec<T>> {
+    match value {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Object(object) if object.is_empty() => Ok(Vec::new()),
+        value => Ok(serde_json::from_value(value)?),
+    }
+}
+
 fn json_object(
     value: &impl serde::Serialize,
 ) -> Result<serde_json::Map<String, serde_json::Value>> {
@@ -1782,6 +1871,159 @@ mod tests {
             &harness.take_events()[..],
             [SessionEvent::Variables(VariablesEvent::Refresh(refresh))] if refresh.version == 1
         ));
+    }
+
+    #[gpui::test]
+    fn test_package_calls(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut harness = Harness::new(cx);
+        let (ui_comm, _) = harness.finish_startup(cx);
+
+        // Takes the next request, checks it's `method` on the UI comm with
+        // `params`, and answers it with `reply`.
+        let answer = |harness: &mut Harness,
+                      method: &str,
+                      params: serde_json::Value,
+                      reply: serde_json::Value,
+                      cx: &mut VisualTestContext| {
+            let request = harness.next_request();
+            let JupyterMessageContent::CommMsg(message) = &request.content else {
+                panic!("expected comm_msg");
+            };
+            assert_eq!(message.comm_id, ui_comm);
+            assert_eq!(message.data["method"], method);
+            assert_eq!(message.data["params"], params);
+            harness.receive(
+                JupyterMessage::new(
+                    CommMsg {
+                        comm_id: ui_comm.clone(),
+                        data: json_object(&reply).unwrap(),
+                    },
+                    Some(&request),
+                ),
+                cx,
+            );
+        };
+
+        let installed = harness
+            .session
+            .update(cx, |session, cx| session.installed_packages(cx));
+        answer(
+            &mut harness,
+            "call_method",
+            json!({ "method": "pkg_list", "params": [] }),
+            json!({ "method": "call_method", "result": [
+                { "id": "stats-4.5.3", "name": "stats", "displayName": "stats", "version": "4.5.3",
+                  "attached": true, "description": "R statistical functions." },
+                { "id": "cli-3.6.5", "name": "cli", "displayName": "cli", "version": "3.6.5",
+                  "attached": false, "description": "", "url": "https://cli.r-lib.org" },
+            ]}),
+            cx,
+        );
+        let installed = cx.foreground_executor().block_test(installed).unwrap();
+        assert_eq!(installed.len(), 2);
+        assert!(installed[0].attached);
+        assert_eq!(installed[1].url.as_deref(), Some("https://cli.r-lib.org"));
+
+        let detail = harness
+            .session
+            .update(cx, |session, cx| session.package_detail("stats", cx));
+        answer(
+            &mut harness,
+            "call_method",
+            json!({ "method": "pkg_detail", "params": ["stats"] }),
+            json!({ "method": "call_method", "result": {
+                "name": "stats", "title": "The R Stats Package", "author": "R Core Team",
+                "license": "Part of R 4.5.3"
+            }}),
+            cx,
+        );
+        let detail = cx
+            .foreground_executor()
+            .block_test(detail)
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.title.as_deref(), Some("The R Stats Package"));
+        assert_eq!(detail.source_repository, None);
+
+        // A package that isn't installed has no detail.
+        let missing = harness
+            .session
+            .update(cx, |session, cx| session.package_detail("nope", cx));
+        answer(
+            &mut harness,
+            "call_method",
+            json!({ "method": "pkg_detail", "params": ["nope"] }),
+            json!({ "method": "call_method", "result": null }),
+            cx,
+        );
+        assert_eq!(cx.foreground_executor().block_test(missing).unwrap(), None);
+
+        // R's empty list arrives as `{}`.
+        let outdated = harness
+            .session
+            .update(cx, |session, cx| session.outdated_packages(cx));
+        answer(
+            &mut harness,
+            "call_method",
+            json!({ "method": "pkg_outdated", "params": [] }),
+            json!({ "method": "call_method", "result": {} }),
+            cx,
+        );
+        assert!(
+            cx.foreground_executor()
+                .block_test(outdated)
+                .unwrap()
+                .is_empty()
+        );
+        let outdated = harness
+            .session
+            .update(cx, |session, cx| session.outdated_packages(cx));
+        answer(
+            &mut harness,
+            "call_method",
+            json!({ "method": "pkg_outdated", "params": [] }),
+            json!({ "method": "call_method", "result": [{ "name": "cli", "latestVersion": "3.7.0" }] }),
+            cx,
+        );
+        let outdated = cx.foreground_executor().block_test(outdated).unwrap();
+        assert_eq!(outdated[0].latest_version, "3.7.0");
+
+        let evaluated = harness.session.update(cx, |session, cx| {
+            session.evaluate_code("nzchar(Sys.getenv('RENV_PROJECT'))", cx)
+        });
+        answer(
+            &mut harness,
+            "evaluate_code",
+            json!({ "code": "nzchar(Sys.getenv('RENV_PROJECT'))" }),
+            json!({ "method": "evaluate_code", "result": { "result": false, "output": "" } }),
+            cx,
+        );
+        let evaluated = cx.foreground_executor().block_test(evaluated).unwrap();
+        assert_eq!(evaluated.result, json!(false));
+
+        // Errors from R come back as errors.
+        let failing = harness
+            .session
+            .update(cx, |session, cx| session.installed_packages(cx));
+        answer(
+            &mut harness,
+            "call_method",
+            json!({ "method": "pkg_list", "params": [] }),
+            json!({ "error": { "code": -32603, "message": "No such method: pkg_list" } }),
+            cx,
+        );
+        let error = cx.foreground_executor().block_test(failing).unwrap_err();
+        assert!(format!("{error:#}").contains("No such method"), "{error:#}");
+
+        // Without R, calls fail at once rather than waiting.
+        harness.session.update(cx, |session, cx| {
+            session.handle_exit("R exited.".into(), cx)
+        });
+        let stopped = harness
+            .session
+            .update(cx, |session, cx| session.installed_packages(cx));
+        assert!(cx.foreground_executor().block_test(stopped).is_err());
     }
 
     #[gpui::test]

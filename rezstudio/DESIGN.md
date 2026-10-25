@@ -454,11 +454,19 @@ indexes' public APIs):
 
 Steps:
 
-1. **Runtime calls.** `RSession::call_method` and `evaluate_code` on the UI comm, and typed
-   replies for `pkg_list`, `pkg_detail` and `pkg_outdated`. The real-Ark test gains:
-   `pkg_list` includes `stats` as attached and `tools` as not; after `library(tools)` it's
-   attached; `pkg_detail("stats")` has a title; `evaluate_code` returns a value; an unknown
-   method returns an error.
+1. **Runtime calls.** *(Done.)* `RSession::call_method` and `evaluate_code` on the UI comm,
+   with typed wrappers: `installed_packages`, `package_detail` (`None` when the package isn't
+   installed) and `outdated_packages`.
+   - **Without R:** calls fail at once instead of waiting.
+   - **Empty lists:** R's empty list can arrive as `[]`, `{}` or `null`, so list replies
+     accept all three.
+   - **`pkg_outdated`:** its timeout is three minutes, since it asks every repository.
+   - **Checked against real Ark:**
+     - 247 installed packages listed in about 115 ms, including the round trip;
+     - `stats` attached and `tools` not, until `library(tools)`;
+     - `pkg_detail("stats")` has a title, and `pkg_detail` of a missing package is `null`;
+     - `evaluate_code` returns a value;
+     - an unknown method returns Ark's "No such method" error.
 2. **`package_index`.** Downloads the r-universe listing and CRAN's `PACKAGES` in the
    background, at most daily, and keeps a compact copy in RezStudio's data directory. A
    failed refresh keeps the last copy. Search is fuzzy on the name, with matches in the

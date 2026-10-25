@@ -492,6 +492,18 @@ mod integration_tests {
             method: &str,
             params: serde_json::Value,
         ) -> serde_json::Value {
+            self.try_comm_rpc(comm_id, method, params)
+                .await
+                .unwrap_or_else(|error| panic!("{method} failed: {error}"))
+        }
+
+        /// Like [`Self::comm_rpc`], returning Ark's error rather than panicking.
+        async fn try_comm_rpc(
+            &mut self,
+            comm_id: &CommId,
+            method: &str,
+            params: serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
             let mut message = JupyterMessage::new(
                 jupyter_protocol::CommMsg {
                     comm_id: comm_id.clone(),
@@ -513,7 +525,6 @@ mod integration_tests {
                 .await;
             let reply = data_object(&messages.last().unwrap().1).unwrap();
             crate::comms::rpc_reply_result(reply)
-                .unwrap_or_else(|error| panic!("{method} failed: {error}"))
         }
 
         async fn execute(
@@ -1246,6 +1257,98 @@ mod integration_tests {
                 .await;
             let (_, messages) = kernel.execute("plot(2:3)").await;
             assert_ne!(plot_open(&messages).comm_id, plot.comm_id);
+
+            // Ark's functions for a Packages pane, through the UI comm.
+            let call_method = |method: &str, params: serde_json::Value| serde_json::json!({ "method": method, "params": params });
+            let installed = |reply: serde_json::Value| {
+                serde_json::from_value::<Vec<crate::comms::InstalledPackage>>(reply).unwrap()
+            };
+            let attached = |packages: &[crate::comms::InstalledPackage], name: &str| {
+                packages
+                    .iter()
+                    .find(|package| package.name == name)
+                    .unwrap_or_else(|| panic!("{name} isn't installed"))
+                    .attached
+            };
+            let started = Instant::now();
+            let packages = installed(
+                kernel
+                    .comm_rpc(
+                        &ui_comm,
+                        "call_method",
+                        call_method("pkg_list", serde_json::json!([])),
+                    )
+                    .await,
+            );
+            eprintln!(
+                "packages: {} installed, listed in {:?}",
+                packages.len(),
+                started.elapsed()
+            );
+            assert!(attached(&packages, "stats"));
+            assert!(!attached(&packages, "tools"));
+            let (_, messages) = kernel.execute("library(tools)").await;
+            assert_eq!(execute_reply_status(&messages), ReplyStatus::Ok);
+            let packages = installed(
+                kernel
+                    .comm_rpc(
+                        &ui_comm,
+                        "call_method",
+                        call_method("pkg_list", serde_json::json!([])),
+                    )
+                    .await,
+            );
+            assert!(attached(&packages, "tools"));
+            let detail: Option<crate::comms::PackageDetail> = serde_json::from_value(
+                kernel
+                    .comm_rpc(
+                        &ui_comm,
+                        "call_method",
+                        call_method("pkg_detail", serde_json::json!(["stats"])),
+                    )
+                    .await,
+            )
+            .unwrap();
+            let detail = detail.expect("stats is installed");
+            assert!(
+                detail
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.contains("Stats")),
+                "{detail:?}"
+            );
+            let missing = kernel
+                .comm_rpc(
+                    &ui_comm,
+                    "call_method",
+                    call_method("pkg_detail", serde_json::json!(["notAPackageAnywhere"])),
+                )
+                .await;
+            assert_eq!(missing, serde_json::Value::Null);
+            let evaluated: crate::comms::EvalResult = serde_json::from_value(
+                kernel
+                    .comm_rpc(
+                        &ui_comm,
+                        "evaluate_code",
+                        serde_json::json!({ "code": "nzchar(Sys.getenv('RENV_PROJECT'))" }),
+                    )
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(evaluated.result, serde_json::json!(false));
+            let unknown = kernel
+                .try_comm_rpc(
+                    &ui_comm,
+                    "call_method",
+                    call_method("no_such_method", serde_json::json!([])),
+                )
+                .await;
+            assert!(
+                unknown
+                    .as_ref()
+                    .is_err_and(|error| error.to_string().contains("No such method")),
+                "{unknown:?}"
+            );
 
             kernel
                 .connections
