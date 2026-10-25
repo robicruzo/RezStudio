@@ -131,7 +131,7 @@ packages and addins that call `rstudioapi` keep working.
 | M2 | Environment + data viewer *(done)* | Live variables; `View(df)` opens the paged grid on a 10M-row frame without lag. |
 | M3 | Plots *(done)* | Plot history, resize re-render, export. |
 | M4 | Packages + search *(done)* | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
-| M5 | Rmd/Quarto inline chunks | Chunk execution with inline output. |
+| M5 | Rmd/Quarto inline chunks *(done)* | Chunk execution with inline output. |
 | M6 | Help + Viewer | WKWebView embedded; help, htmlwidgets, Shiny. |
 | M7 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
 | M8 | Typst native preview | Live preview with source ↔ preview jumping. |
@@ -549,7 +549,7 @@ Install uses renv. Met with CI green on every job. Checked by hand: the checkbox
 from search, details and Update. Search reads only the copy on disk, so it works offline,
 and renv's commands are covered by tests; neither was tried by hand.
 
-### M5 plan
+### M5 plan (done)
 
 Decisions:
 - Plots from a chunk appear only under it, sized to the editor; the Plots pane doesn't take
@@ -692,6 +692,12 @@ Done when: opening an `.Rmd` or `.qmd` file highlights R in its chunks. Cmd+Shif
 runs a chunk and shows its printed output, a data frame, an error, and a plot sized to the
 editor under it. Run Chunks Above and Run All work. Rerunning replaces the output. Chunk
 plots stay out of the Plots pane. Typing `mtc` in a chunk offers `mtcars`.
+
+All met, with CI green on every job:
+- **Checked by hand:** running one chunk, Run All stopping at an error, inline plots,
+  rerunning and clearing, and running a selection with Cmd+Shift+Enter.
+- **Checked live:** highlighting and `mtc` offering `mtcars`.
+- **Not tried by hand:** Quarto (`.qmd`), which shares R Markdown's code and has tests.
 
 ## Risks
 
