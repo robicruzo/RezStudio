@@ -759,15 +759,34 @@ Steps:
      - R's `viewer` option, which htmlwidgets use, sends `show_html_file` for a file in
        the temp directory that exists;
      - `browseURL('http://127.0.0.1:5678/')` sends `show_url`.
-2. **`web_view`.** A GPUI element hosting a `wry` web view:
-   - **Placement:** sized and placed to the element's bounds every frame, and hidden in any
-     frame it isn't painted.
-   - **Overlap:** hidden while a modal is open, so it can't cover the command palette or a
-     dialog.
-   - **Local files:** served through a custom protocol scoped to the file's directory, so
-     htmlwidget dependencies load.
-   - **Navigation:** back, forward, reload, and the current URL and title for the pane's
-     toolbar. Links to other sites open in the browser.
+2. **`web_view`.** *(Done.)* A GPUI element hosting a `wry` web view.
+   - **`wry`:** 0.57, a macOS-only dependency with default features off; on macOS it
+     always uses WKWebView, and its defaults are Linux's GTK backend. Other platforms get a
+     "can't show web pages" placeholder, and pages open in the browser.
+   - **Placement:** the native view is made on the element's first paint (it needs the
+     window's handle) as a child of GPUI's content view, starting hidden. Each paint moves
+     it to the element's bounds.
+   - **Visibility follows state, not painting:** docked panels are cached views, and on
+     frames where they don't change GPUI replays their last paint without running element
+     code. "Not painted this frame" can't mean hidden. So the owner calls
+     `set_shown(bool)`, and `watch_cover(workspace, own_id, …)` reports what would draw
+     GPUI content over the view: an open modal (observing the modal layer, which the
+     workspace now exposes through `modal_layer()`), another item zoomed over the
+     workspace, or another workspace active in the window. Panels also get `set_active`
+     when their dock closes or another tab shows. Dropping a view hides it at once.
+   - **Local files:** `load_file` serves the file through a `rezfile://` scheme rooted at
+     its folder, since WebKit won't let a page loaded from `file://` read files beside it.
+     Paths are percent-encoded; anything outside the folder or with `..` gets a 403.
+   - **Navigation:** the view goes to its own files, local addresses and `about:blank`.
+     Other links, and links that open a new window, go to the browser.
+   - **Page information:** WebKit's title and page-load callbacks reach GPUI through a
+     channel, as `WebViewEvent::{TitleChanged, Navigated}`. Back and forward run
+     `history.back()` and `history.forward()`, since `wry` has no API for them.
+   - **Testing:** the native view is behind a `NativeView` trait, so tests use a fake.
+   - **Checked live:** a test window with a 300 px GPUI panel showed a local page beside
+     it at exactly the element's bounds (the page measured 668×608 for a 668×608
+     element), the right way up, with its `lib/` stylesheet and script loaded through
+     `rezfile://`.
 3. **`help_panel`.** A right-dock Help pane showing Ark's help pages:
    - **Toolbar:** back, forward and home (the R help index), a topic search box (Enter runs
      `show_help_topic`, and a miss says so), and open in browser.
