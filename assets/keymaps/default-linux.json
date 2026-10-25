@@ -1075,6 +1075,13 @@
     },
   },
   {
+    "context": "PlotZoomWindow",
+    "bindings": {
+      "escape": "plots_panel::CloseZoomWindow",
+      "ctrl-w": "plots_panel::CloseZoomWindow",
+    },
+  },
+  {
     // Off while the completion menu is open, so Enter, arrows and Escape act on it.
     "context": "RConsole > Editor && !showing_completions",
     "use_key_equivalents": true,

@@ -1,21 +1,23 @@
 //! The Plots pane: the plots R draws, redrawn by R at the pane's exact size,
 //! with history like RStudio's.
 
+mod fitting;
 mod history;
+mod save_dialog;
+mod zoom_window;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use fitting::{PlotImage, Viewport, ViewportChange, decode_plot, describe_render_error};
 use gpui::{
-    Action, App, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable, Image,
-    ImageFormat, ImageSource, ObjectFit, Pixels, PromptLevel, RenderImage, Size, Subscription,
-    Task, WeakEntity, Window, actions, canvas, img, px,
+    Action, App, AsyncWindowContext, ClipboardItem, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, Pixels, PromptLevel, Size, Subscription, Task, WeakEntity, Window, actions, px,
 };
 use history::PlotHistory;
 use runtime::comms::{
     PlotEvent, PlotRenderFormat, PlotRenderSettings, PlotResult, PlotSize, RenderParams,
 };
 use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry};
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::PathBuf;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::Workspace;
@@ -34,15 +36,18 @@ actions!(
         RemovePlot,
         /// Removes every plot from the history.
         ClearPlots,
+        /// Copies the plot shown, at the pane's size, as an image.
+        CopyPlot,
+        /// Saves the plot shown as a PNG, SVG or PDF file at a chosen size.
+        SavePlot,
+        /// Opens the plot shown in its own window, redrawn to fit as it's resized.
+        ZoomPlot,
+        /// Closes a plot's zoom window.
+        CloseZoomWindow,
     ]
 );
 
 const PANEL_KEY: &str = "PlotsPanel";
-/// Dragging the dock's edge resizes it every frame; R redraws once it settles.
-const RESIZE_DEBOUNCE: Duration = Duration::from_millis(150);
-/// Smaller than this, R often can't fit a plot's margins and fails with
-/// "figure margins too large" or "invalid graphics state".
-const MIN_PLOT_SIZE: i64 = 120;
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -53,10 +58,11 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-/// A render decoded and ready to paint.
-#[derive(Clone)]
-struct PlotImage {
-    render: Arc<RenderImage>,
+/// What a plot is saved as; the dialog starts from the last one used.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PlotExport {
+    pub format: PlotRenderFormat,
+    pub size: PlotSize,
 }
 
 pub struct PlotsPanel {
@@ -64,11 +70,9 @@ pub struct PlotsPanel {
     workspace_id: EntityId,
     session: Option<Entity<RSession>>,
     history: PlotHistory<PlotImage>,
-    /// The plot area's size in logical pixels and the screen's scale, as last laid out.
-    viewport: Option<(PlotSize, f32)>,
-    /// The viewport once it stopped changing. Plots are only drawn at this
-    /// size: mid-drag sizes are passing, and very narrow ones make R fail.
-    settled_viewport: Option<(PlotSize, f32)>,
+    viewport: Viewport,
+    /// The last format and size a plot was saved with.
+    last_export: Option<PlotExport>,
     focus_handle: FocusHandle,
     position: DockPosition,
     /// The last failure, shown under the toolbar.
@@ -113,8 +117,8 @@ impl PlotsPanel {
             workspace_id,
             session: None,
             history: PlotHistory::default(),
-            viewport: None,
-            settled_viewport: None,
+            viewport: Viewport::default(),
+            last_export: None,
             focus_handle: cx.focus_handle(),
             position: DockPosition::Right,
             error: None,
@@ -211,40 +215,26 @@ impl PlotsPanel {
 
     /// The settings that draw a plot to fill the pane exactly.
     fn desired_settings(&self) -> Option<PlotRenderSettings> {
-        let (size, scale) = self.settled_viewport?;
-        (size.width >= MIN_PLOT_SIZE && size.height >= MIN_PLOT_SIZE).then_some(
-            PlotRenderSettings {
-                size,
-                pixel_ratio: f64::from(scale),
-                format: PlotRenderFormat::Png,
-            },
-        )
+        self.viewport.render_settings()
     }
 
     fn set_viewport(&mut self, size: Size<Pixels>, scale: f32, cx: &mut Context<Self>) {
-        let size = PlotSize {
-            width: f32::from(size.width).floor() as i64,
-            height: f32::from(size.height).floor() as i64,
-        };
-        if self.viewport == Some((size, scale)) {
-            return;
+        match self.viewport.update(size, scale) {
+            ViewportChange::Unchanged => {}
+            ViewportChange::First => self.apply_viewport(cx),
+            ViewportChange::Changed => {
+                let timer = cx.background_executor().timer(fitting::RESIZE_DEBOUNCE);
+                self._resize_task = Some(cx.spawn(async move |this, cx| {
+                    timer.await;
+                    this.update(cx, |this, cx| this.apply_viewport(cx))
+                        .log_err();
+                }));
+            }
         }
-        let first_layout = self.viewport.is_none();
-        self.viewport = Some((size, scale));
-        if first_layout {
-            self.apply_viewport(cx);
-            return;
-        }
-        let timer = cx.background_executor().timer(RESIZE_DEBOUNCE);
-        self._resize_task = Some(cx.spawn(async move |this, cx| {
-            timer.await;
-            this.update(cx, |this, cx| this.apply_viewport(cx))
-                .log_err();
-        }));
     }
 
     fn apply_viewport(&mut self, cx: &mut Context<Self>) {
-        self.settled_viewport = self.viewport;
+        self.viewport.settle();
         self.send_render_settings(cx);
         self.ensure_render(cx);
     }
@@ -294,7 +284,7 @@ impl PlotsPanel {
                 Ok(result) => this.accept_render(comm_id, result, Some(settings), cx),
                 Err(error) => {
                     this.finish_pending(&comm_id, Some(settings));
-                    this.error = Some(describe_error(&error));
+                    this.error = Some(describe_render_error(&error));
                     cx.notify();
                 }
             })
@@ -323,32 +313,21 @@ impl PlotsPanel {
         {
             self.pending_render = Some((comm_id.clone(), settings));
         }
-        let svg_renderer = cx.svg_renderer();
-        let decode = cx.background_spawn(async move {
-            anyhow::ensure!(
-                result.mime_type == "image/png",
-                "R sent a plot as {}, not PNG",
-                result.mime_type
-            );
-            Image::from_bytes(ImageFormat::Png, result.decode()?).to_image_data(svg_renderer)
-        });
+        let decode = decode_plot(result, cx);
         cx.spawn(async move |this, cx| {
             let decoded = decode.await;
             this.update(cx, |this, cx| {
                 this.finish_pending(&comm_id, settings);
                 match decoded {
-                    Ok(render) => {
-                        if let Some(replaced) = this.history.set_image(
-                            &comm_id,
-                            PlotImage { render },
-                            settings,
-                            sequence,
-                        ) {
+                    Ok(image) => {
+                        if let Some(replaced) =
+                            this.history.set_image(&comm_id, image, settings, sequence)
+                        {
                             cx.drop_image(replaced.render, None);
                         }
                         this.error = None;
                     }
-                    Err(error) => this.error = Some(describe_error(&error)),
+                    Err(error) => this.error = Some(describe_render_error(&error)),
                 }
                 this.ensure_render(cx);
                 cx.notify();
@@ -432,9 +411,113 @@ impl PlotsPanel {
         }
     }
 
+    /// Copies the image shown, which R drew at the pane's size and scale.
+    fn copy_plot(&mut self, _: &CopyPlot, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(image) = self.history.current().and_then(|plot| plot.image.as_ref()) {
+            cx.write_to_clipboard(ClipboardItem::new_image(&image.png));
+        }
+    }
+
+    fn open_save_dialog(&mut self, _: &SavePlot, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(plot) = self.history.current().filter(|plot| plot.live) else {
+            return;
+        };
+        let comm_id = plot.comm_id.clone();
+        let export = self.last_export.unwrap_or(PlotExport {
+            format: PlotRenderFormat::Png,
+            size: self.viewport.settled_size().unwrap_or(PlotSize {
+                width: 800,
+                height: 600,
+            }),
+        });
+        let panel = cx.entity().downgrade();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, |window, cx| {
+                    save_dialog::SavePlotDialog::new(panel, comm_id, export, window, cx)
+                })
+            })
+            .log_err();
+    }
+
+    /// Asks where to save, then has R draw the file at `export`'s size.
+    pub(crate) fn save_plot(
+        &mut self,
+        comm_id: String,
+        export: PlotExport,
+        cx: &mut Context<Self>,
+    ) {
+        self.last_export = Some(export);
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let directory = {
+            let session = session.read(cx);
+            session
+                .working_directory()
+                .cloned()
+                .unwrap_or_else(|| session.project_root().clone())
+        };
+        let extension = export.format.extension();
+        let chosen = cx.prompt_for_new_path(&directory, Some(&format!("Rplot.{extension}")));
+        cx.spawn(async move |this, cx| {
+            let saved: Result<()> = async {
+                let Some(mut path) = chosen.await.context("the save dialog closed")?? else {
+                    return Ok(());
+                };
+                if path.extension().is_none() {
+                    path.set_extension(extension);
+                }
+                let render = session.update(cx, |session, cx| {
+                    session.render_plot(
+                        &comm_id,
+                        RenderParams {
+                            size: Some(export.size),
+                            // A PNG is saved at exactly the pixels asked for.
+                            pixel_ratio: 1.0,
+                            format: export.format,
+                        },
+                        cx,
+                    )
+                });
+                let result = render
+                    .await
+                    .map_err(|error| anyhow::anyhow!(describe_render_error(&error)))?;
+                write_plot(path, result, cx).await
+            }
+            .await;
+            if let Err(error) = saved {
+                this.update(cx, |this, cx| {
+                    this.error = Some(format!("{error:#}"));
+                    cx.notify();
+                })
+                .log_err();
+            }
+        })
+        .detach();
+    }
+
+    fn zoom_plot(&mut self, _: &ZoomPlot, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some(plot), Some(session)) = (self.history.current(), self.session.clone()) else {
+            return;
+        };
+        zoom_window::open(
+            session,
+            plot.comm_id.clone(),
+            plot.image.clone(),
+            plot.live,
+            cx,
+        )
+        .log_err();
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_empty = self.history.is_empty();
         let not_live = self.history.current().is_some_and(|plot| !plot.live);
+        let has_image = self
+            .history
+            .current()
+            .is_some_and(|plot| plot.image.is_some());
         h_flex()
             .px_2()
             .py_1()
@@ -476,6 +559,33 @@ impl PlotsPanel {
             })
             .child(div().flex_1())
             .child(
+                IconButton::new("zoom-plot", IconName::Maximize)
+                    .icon_size(IconSize::Small)
+                    .disabled(is_empty)
+                    .tooltip(Tooltip::text("Zoom"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.zoom_plot(&ZoomPlot, window, cx)),
+                    ),
+            )
+            .child(
+                IconButton::new("copy-plot", IconName::Copy)
+                    .icon_size(IconSize::Small)
+                    .disabled(!has_image)
+                    .tooltip(Tooltip::text("Copy Plot"))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.copy_plot(&CopyPlot, window, cx)),
+                    ),
+            )
+            .child(
+                IconButton::new("save-plot", IconName::Download)
+                    .icon_size(IconSize::Small)
+                    .disabled(is_empty || not_live)
+                    .tooltip(Tooltip::text("Save Plot…"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_save_dialog(&SavePlot, window, cx)
+                    })),
+            )
+            .child(
                 IconButton::new("remove-plot", IconName::Close)
                     .icon_size(IconSize::Small)
                     .disabled(is_empty)
@@ -500,19 +610,14 @@ impl PlotsPanel {
     }
 }
 
-/// One line for the pane: Ark's errors carry R's message, wrapped in Ark's
-/// own context and followed by R and Rust backtraces.
-fn describe_error(error: &anyhow::Error) -> String {
-    let message = format!("{error:#}");
-    let first_line = message.lines().next().unwrap_or_default().trim();
-    let message = first_line
-        .strip_prefix("Failed to process positron.plot request: ")
-        .unwrap_or(first_line);
-    let message = match message.strip_prefix("Error evaluating '") {
-        Some(rest) => rest.split_once("': ").map_or(message, |(_, reason)| reason),
-        None => message,
-    };
-    format!("R couldn't draw the plot: {message}")
+/// Writes R's render of a plot to `path`.
+async fn write_plot(path: PathBuf, result: PlotResult, cx: &mut gpui::AsyncApp) -> Result<()> {
+    cx.background_spawn(async move {
+        let bytes = result.decode()?;
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("couldn't save the plot to {}", path.display()))
+    })
+    .await
 }
 
 impl Render for PlotsPanel {
@@ -535,6 +640,9 @@ impl Render for PlotsPanel {
             .on_action(cx.listener(Self::next_plot))
             .on_action(cx.listener(Self::remove_plot))
             .on_action(cx.listener(Self::clear_plots))
+            .on_action(cx.listener(Self::copy_plot))
+            .on_action(cx.listener(Self::open_save_dialog))
+            .on_action(cx.listener(Self::zoom_plot))
             .size_full()
             .bg(cx.theme().colors().panel_background)
             .child(self.render_toolbar(cx))
@@ -544,59 +652,14 @@ impl Render for PlotsPanel {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |bounds, _, window, cx| {
-                                let scale = window.scale_factor();
-                                entity.update(cx, |this, cx| {
-                                    this.set_viewport(bounds.size, scale, cx)
-                                });
-                            },
-                        )
-                        .absolute()
-                        .size_full(),
+                    .child(fitting::measure(entity, Self::set_viewport))
+                    .children(image.map(fitting::plot_image))
+                    .children(
+                        self.error
+                            .clone()
+                            .map(|error| fitting::error_overlay(error.into(), cx)),
                     )
-                    .children(image.map(|image| {
-                        div().absolute().size_full().child(
-                            img(ImageSource::Render(image))
-                                .size_full()
-                                .object_fit(ObjectFit::Contain),
-                        )
-                    }))
-                    // Over the plot rather than above it, so an error never
-                    // changes the size plots are drawn at.
-                    .children(self.error.clone().map(|error| {
-                        div()
-                            .id("plot-error")
-                            .absolute()
-                            .bottom_0()
-                            .left_0()
-                            .right_0()
-                            .px_2()
-                            .py_1()
-                            .bg(cx.theme().colors().panel_background)
-                            .border_t_1()
-                            .border_color(cx.theme().colors().border_variant)
-                            .tooltip(Tooltip::text(error.clone()))
-                            .child(
-                                Label::new(error)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Error)
-                                    .single_line()
-                                    .truncate(),
-                            )
-                    }))
-                    .children(placeholder.map(|text| {
-                        div()
-                            .absolute()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .p_4()
-                            .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
-                    })),
+                    .children(placeholder.map(fitting::placeholder)),
             )
     }
 }
@@ -696,6 +759,7 @@ mod tests {
                 let settings = SettingsStore::test(cx);
                 cx.set_global(settings);
                 theme_settings::init(theme::LoadThemes::JustBase, cx);
+                editor::init(cx);
             });
             let fs = FakeFs::new(cx.executor());
             let project = Project::test(fs, [] as [&std::path::Path; 0], cx).await;
@@ -908,7 +972,7 @@ mod tests {
         }
 
         fn settle(&self, cx: &mut VisualTestContext) {
-            cx.executor().advance_clock(RESIZE_DEBOUNCE * 2);
+            cx.executor().advance_clock(fitting::RESIZE_DEBOUNCE * 2);
             cx.run_until_parked();
         }
     }
@@ -1115,7 +1179,9 @@ mod tests {
         // over the plot so the pane's size doesn't change.
         harness.resize(650., cx);
         harness.settle(cx);
-        let viewport = harness.panel.read_with(cx, |panel, _| panel.viewport);
+        let viewport = harness
+            .panel
+            .read_with(cx, |panel, _| panel.viewport.current());
         let (_, message) = harness.drain().pop().expect("a render");
         harness.reply(
             &message,
@@ -1128,7 +1194,7 @@ mod tests {
                 Some("R couldn't draw the plot: invalid graphics state")
             );
             assert!(panel.history.current().unwrap().image.is_some());
-            assert_eq!(panel.viewport, viewport);
+            assert_eq!(panel.viewport.current(), viewport);
         });
         harness.resize(600., cx);
         harness.settle(cx);
@@ -1142,6 +1208,169 @@ mod tests {
         harness.resize(150., cx);
         harness.settle(cx);
         assert!(harness.requests().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_copying_and_saving(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        harness.open_plot("plot-1", ark_default(), cx);
+        harness.answer_render("plot-1", cx);
+
+        // Copy puts the PNG R drew for the pane on the clipboard.
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.copy_plot(&CopyPlot, window, cx)
+        });
+        let copied = cx.read_from_clipboard().expect("something copied");
+        let Some(gpui::ClipboardEntry::Image(image)) = copied.entries().first() else {
+            panic!("expected an image, got {copied:?}");
+        };
+        assert_eq!(image.format, gpui::ImageFormat::Png);
+        assert_eq!(
+            image.bytes,
+            PlotResult {
+                data: PNG.into(),
+                mime_type: "image/png".into(),
+                settings: None
+            }
+            .decode()
+            .unwrap()
+        );
+
+        // Save asks for a format and size, then where, then has R draw the file.
+        let dialog = |harness: &Harness, cx: &mut VisualTestContext| {
+            harness.workspace.read_with(cx, |workspace, cx| {
+                workspace.active_modal::<save_dialog::SavePlotDialog>(cx)
+            })
+        };
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.open_save_dialog(&SavePlot, window, cx)
+        });
+        let save = dialog(&harness, cx).expect("the save dialog");
+        save.update_in(cx, |dialog, window, cx| {
+            dialog.set_for_test(PlotRenderFormat::Svg, "800", "abc", window, cx);
+            dialog.confirm(&menu::Confirm, window, cx);
+        });
+        assert!(
+            save.read_with(cx, |dialog, _| dialog.error_for_test())
+                .is_some(),
+            "a bad height is reported"
+        );
+        save.update_in(cx, |dialog, window, cx| {
+            dialog.set_for_test(PlotRenderFormat::Svg, "800", " 600 ", window, cx);
+            dialog.confirm(&menu::Confirm, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(dialog(&harness, cx).is_none(), "the dialog closes");
+        let directory = tempfile::tempdir().unwrap();
+        let chosen = directory.path().join("chart");
+        cx.simulate_new_path_selection(|_| Some(chosen.clone()));
+        cx.run_until_parked();
+        let (render, message) = harness.drain().pop().expect("a render for the file");
+        assert_eq!(
+            render.params,
+            json!({ "size": { "width": 800, "height": 600 }, "pixel_ratio": 1.0, "format": "svg" })
+        );
+        harness.reply(
+            &message,
+            json!({ "method": "render", "result": {
+                "data": "PHN2Zz4", "mime_type": "image/svg+xml", "settings": null
+            }}),
+            cx,
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("chart.svg")).unwrap(),
+            "<svg>"
+        );
+
+        // The dialog starts from what was used last.
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.open_save_dialog(&SavePlot, window, cx)
+        });
+        let save = dialog(&harness, cx).expect("the save dialog");
+        save.read_with(cx, |dialog, cx| {
+            assert_eq!(
+                dialog.values_for_test(cx),
+                (PlotRenderFormat::Svg, "800".into(), "600".into())
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_zoom_window_redraws_to_fit(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        harness.open_plot("plot-1", ark_default(), cx);
+        harness.answer_render("plot-1", cx);
+
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.zoom_plot(&ZoomPlot, window, cx)
+        });
+        cx.run_until_parked();
+        let zoom = cx
+            .windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<zoom_window::PlotZoomWindow>())
+            .expect("a zoom window");
+        let requests = harness.drain();
+        let methods: Vec<&str> = requests
+            .iter()
+            .map(|(request, _)| request.method.as_str())
+            .collect();
+        assert_eq!(methods, ["get_metadata", "render"]);
+        let (render, message) = &requests[1];
+        assert_eq!(
+            render.params["size"],
+            json!({ "width": 800, "height": 600 })
+        );
+        let zoom_size = render.params.clone();
+        harness.reply(
+            &requests[0].1,
+            json!({ "method": "get_metadata", "result": {
+                "name": "plot 1", "kind": "base", "execution_id": "", "code": "plot(1:10)"
+            }}),
+            cx,
+        );
+        harness.reply(
+            message,
+            json!({ "method": "render", "result": pre_render(json!({
+            "size": zoom_size["size"], "pixel_ratio": zoom_size["pixel_ratio"], "format": "png"
+        })) }),
+            cx,
+        );
+        cx.run_until_parked();
+        assert!(harness.requests().is_empty(), "drawn once");
+        zoom.read_with(cx, |zoom, _| assert!(zoom.has_own_image_for_test()))
+            .unwrap();
+
+        // More drawn on the plot redraws it in the window as well as the pane.
+        harness.event(
+            "plot-1",
+            json!({ "method": "update", "params": { "pre_render": null } }),
+            cx,
+        );
+        let sizes: Vec<Value> = harness
+            .requests()
+            .into_iter()
+            .filter(|request| request.method == "render")
+            .map(|request| request.params["size"].clone())
+            .collect();
+        assert!(
+            sizes.contains(&json!({ "width": 800, "height": 600 })),
+            "{sizes:?}"
+        );
+        assert_eq!(sizes.len(), 2, "{sizes:?}");
+
+        // Escape closes it.
+        zoom.update(cx, |_, window, cx| {
+            window.dispatch_action(Box::new(CloseZoomWindow), cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(
+            cx.windows()
+                .iter()
+                .all(|window| window.downcast::<zoom_window::PlotZoomWindow>().is_none())
+        );
     }
 
     #[gpui::test]

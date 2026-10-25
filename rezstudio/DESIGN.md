@@ -367,10 +367,24 @@ Steps:
    - **Checked live:** `plot()` and a ggplot2 plot drawn after startup appear at once. The
      first arrives at Ark's 640×400 default and is redrawn to fit; the second arrives already
      fitted.
-3. **Export, copy and zoom.** Save opens a small dialog for format (PNG/SVG/PDF), width and
-   height (defaulting to the pane's size), then a save dialog, and writes R's render. Copy puts
-   a PNG at the pane's size and scale on the clipboard. Zoom opens the plot in its own window,
-   which re-renders as it's resized.
+3. **Export, copy and zoom.** *(Done.)*
+   - **Save:** opens a small dialog for format (PNG/SVG/PDF), width and height, then a save
+     dialog, and writes R's render.
+     - The dialog starts from the pane's size, or from the last format and size used.
+     - Sizes are checked before anything is drawn.
+     - A PNG is drawn at pixel ratio 1, so the file has exactly the pixels asked for.
+     - A name without an extension gets the format's extension.
+     - Save is off for plots that aren't live.
+   - **Copy:** puts the image shown on the clipboard. It's R's PNG at the pane's size and
+     scale, kept beside the decoded image, so copying needs no new render.
+   - **Zoom:** opens the plot in its own window, starting from the pane's image. It's
+     redrawn to fit once a resize settles, and again when R updates the plot. The title is
+     the plot's name from `get_metadata`. Esc or Cmd-W closes it.
+   - **Shared code:** the pane and the zoom window share `fitting.rs`: measuring, settling,
+     the minimum size, decoding and the one-line error.
+   - **Checked live:** Copy put the plot's PNG on the macOS clipboard. The zoom window opened.
+     While the main window was in macOS full screen, its bounds looked odd, which is worth
+     checking by hand.
 4. **Tests.** Unit tests drive the pane with scripted plot comms: history, navigation, delete,
    resize renders (only the latest kept), updates, `show`, R stopping, and export writing the
    decoded file.

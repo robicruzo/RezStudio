@@ -10205,14 +10205,17 @@ name = "plots_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "editor",
  "futures 0.3.34",
  "gpui",
  "jupyter-protocol",
  "languages",
+ "menu",
  "project",
  "runtime",
  "serde_json",
  "settings",
+ "tempfile",
  "theme",
  "theme_settings",
  "ui",
