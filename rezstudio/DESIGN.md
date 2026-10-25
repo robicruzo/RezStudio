@@ -175,7 +175,9 @@ Steps:
    only) Positron's copy. One `RSession` per window starts when its first local folder opens, once
    that folder is trusted (R runs the project's `.Rprofile`, so it waits for Zed's Restricted
    Mode like language servers do), and stops gracefully when the window closes. Ark runs under a small shell supervisor that stops it
-   if RezStudio dies, since Ark doesn't watch its parent. An execution is finished only once both
+   if RezStudio dies, since Ark doesn't watch its parent. Ark can ignore SIGTERM, which left R
+   running after RezStudio quit, so the supervisor kills it 5 seconds after SIGTERM if it's
+   still there. An execution is finished only once both
    its `execute_reply` (shell) and iopub `idle` have arrived, because output can trail the reply.
    Ark's `rpc_request`s on stdin are always answered: questions and dialogs use native prompts,
    the workspace folder is the project root, and unsupported ones return a JSON-RPC error. Links

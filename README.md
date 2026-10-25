@@ -1,3 +1,5 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
 # RezStudio
 
 RezStudio is a data-science IDE for macOS built on [Zed](https://github.com/zed-industries/zed): RStudio's workflow and panes (console, environment, plots, packages, help) with Zed's speed and editor.
