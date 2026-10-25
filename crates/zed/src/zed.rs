@@ -717,6 +717,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let packages_panel =
             packages_panel::PackagesPanel::load(workspace_handle.clone(), cx.clone());
         let help_panel = help_panel::HelpPanel::load(workspace_handle.clone(), cx.clone());
+        let viewer_panel = viewer_panel::ViewerPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -745,6 +746,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(plots_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(packages_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(help_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(viewer_panel, workspace_handle.clone(), cx.clone()),
         );
 
         workspace_handle.update(cx, |workspace, cx| {
@@ -5832,6 +5834,7 @@ mod tests {
                 "keymap_editor",
                 "keystroke_input",
                 "language_selector",
+                "viewer_panel",
                 "welcome",
                 "line_ending_selector",
                 "lsp_command_selector",

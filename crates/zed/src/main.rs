@@ -688,6 +688,7 @@ fn main() {
         plots_panel::init(cx);
         packages_panel::init(cx);
         help_panel::init(cx);
+        viewer_panel::init(cx);
         r_markdown::init(cx);
         data_explorer::init(cx);
         recent_projects::init(cx);

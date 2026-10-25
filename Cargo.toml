@@ -192,6 +192,7 @@ members = [
     "crates/vim_mode_setting",
     "crates/watch",
     "crates/help_panel",
+    "crates/viewer_panel",
     "crates/web_view",
     "crates/which_key",
     "crates/windows_resources",
@@ -419,6 +420,7 @@ variables_panel = { path = "crates/variables_panel" }
 vim = { path = "crates/vim" }
 vim_mode_setting = { path = "crates/vim_mode_setting" }
 watch = { path = "crates/watch" }
+viewer_panel = { path = "crates/viewer_panel" }
 web_view = { path = "crates/web_view" }
 which_key = { path = "crates/which_key" }
 windows_resources = { path = "crates/windows_resources" }

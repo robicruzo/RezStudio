@@ -185,7 +185,6 @@ fn start_session(
                 }
                 let session = cx.new(|cx| RSession::new(r, project_root, env, bundled_ark, cx));
                 restart_language_server_on_new_port(&session, project.downgrade(), cx);
-                open_pages_in_browser(&session, cx);
                 start_when_trusted(&session, &project, worktree_id, window, cx);
                 registry.update(cx, |registry, cx| {
                     registry.sessions.insert(workspace_id, session.clone());
@@ -198,17 +197,6 @@ fn start_session(
             .ok();
         })
         .detach();
-}
-
-/// HTML files and local web apps open in the browser until the Viewer pane
-/// shows them (M6 step 4). Help pages go to the Help pane.
-fn open_pages_in_browser(session: &Entity<RSession>, cx: &mut App) {
-    cx.subscribe(session, |_, event, cx| match event {
-        SessionEvent::ShowUrl { url } => cx.open_url(url),
-        SessionEvent::ShowHtmlFile { path, .. } => cx.open_with_system(path),
-        _ => {}
-    })
-    .detach();
 }
 
 /// A restarted R listens on a new port, and the bridge to the old one has

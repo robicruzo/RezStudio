@@ -15641,6 +15641,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "viewer_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.34",
+ "gpui",
+ "jupyter-protocol",
+ "languages",
+ "project",
+ "runtime",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "url",
+ "util",
+ "web_view",
+ "workspace",
+]
+
+[[package]]
 name = "vim"
 version = "0.1.0"
 dependencies = [
@@ -18493,6 +18515,7 @@ dependencies = [
  "util",
  "uuid",
  "variables_panel",
+ "viewer_panel",
  "vim",
  "vim_mode_setting",
  "watch",

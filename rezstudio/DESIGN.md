@@ -880,12 +880,29 @@ Steps:
      - **Chunks:** F1 is checked in R Markdown's completion test.
      - **Real Ark:** `help.start()` through `evaluate_code` sends the index, which loads
        over HTTP.
-4. **`viewer_panel`.** A right-dock Viewer pane:
-   - **What it shows:** htmlwidgets from `show_html_file`, and local web apps from
-     `show_url`. Each one brings the pane to the front.
-   - **Toolbar:** a history of what was shown (back and forward, like Plots), reload, stop
-     for an app (interrupts R, as Shiny's console does), open in browser, and clear.
-   - **Sizing:** a widget's `height` is honoured as a minimum.
+4. **`viewer_panel`.** *(Done.)* A right-dock Viewer pane, after Help.
+   - **What it shows:** htmlwidgets from `show_html_file`, whatever its `destination`
+     (served from their folder through `rezfile://`, with their `lib/` beside them), and
+     local web apps from `show_url`, such as Shiny's. Each brings the pane to the front.
+     The runtime no longer sends either to the browser; builds without a web view open
+     them in the browser or the system's opener.
+   - **History:** like Plots: what was shown, oldest first, with previous and next and a
+     "2 / 3" count. Showing the same app again (as when it's run again on its port)
+     reloads it rather than adding to the history. When R stops, the history goes, as R
+     deletes its temporary directory and its apps stop.
+   - **Toolbar:** previous and next, the widget's title (or the page's), Stop while R is
+     busy running the shown app (it interrupts R, as Shiny's console does), reload, open in
+     browser, remove and clear all.
+   - **Pages** keep their own styling on a white background, unlike Help's. They share the
+     web view's snapshot under modals and its keyboard handoff.
+   - **Sizing (changed from the plan):** the height R asks for is kept with the widget but
+     not applied. The right dock is full height, so there's nothing to resize until M7
+     splits it.
+   - **Tests:** widgets and apps, history, reloading the same app, remove and clear, and
+     Stop interrupting R.
+   - **Checked live:** a reactable widget written the way R writes it for the Viewer
+     rendered through the web view in a throwaway window, its React table drawn from the
+     `lib/` scripts beside it.
 5. **Tests.**
    - **Unit tests:** the help comm and viewer events in the session; the Help pane's
      history, topic search and F1 from scripted replies; the Viewer's history and what
