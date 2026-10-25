@@ -5850,6 +5850,7 @@ mod tests {
                 "project_symbols",
                 "projects",
                 "r_console",
+                "r_markdown",
                 "recent_projects",
                 "remote_debug",
                 "repl",

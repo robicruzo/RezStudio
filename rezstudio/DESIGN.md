@@ -622,16 +622,34 @@ Steps:
    - **Tests:** unit tests cover the session's tags, the console and the Plots pane. The
      real-Ark test checks the ordering the tags rely on: a plot's comm opens on iopub before
      its execution goes idle.
-3. **`r_markdown` (chunk execution).** In R Markdown and Quarto editors:
-   - **Actions:** Run Chunk, Run Chunks Above, Run All Chunks, Clear Outputs.
-   - **Output block:** each run puts an output block under the chunk's closing fence:
-     `ExecutionView` for text, tables and errors, and the chunk's plots redrawn at the
-     editor's width.
-   - **Rerunning** replaces a chunk's output, and editing keeps outputs attached to their
-     chunks.
-   - **Run button:** on each chunk's opening line.
-   - **Queueing:** chunks queued behind running code show that they're waiting, and an
-     error stops the rest of a Run All, as in RStudio.
+3. **`r_markdown` (chunk execution).** *(Done.)* Each R Markdown or Quarto editor gets a
+   `ChunkRunner`, attached as an editor addon once its buffer's language is known
+   (languages often finish loading after the editor opens).
+   - **Actions:** Run Chunk (Cmd+Shift+Enter), Run Chunks Above (Cmd+Alt+P), Run All
+     Chunks (Cmd+Alt+R) and Clear Chunk Outputs, with Ctrl on Linux. They're registered on
+     the workspace and act on the active editor.
+   - **Run line:** above each R chunk's fence, "▶ Run Chunk | Run Chunks Above", drawn as a
+     spacer block like Zed's code lenses. Positron puts the same lens above Quarto cells.
+     Zed has no API for custom gutter buttons, and its run triangles only launch shell
+     tasks. The lines are rebuilt 200 ms after edits stop, keeping existing ones.
+   - **Running:** chunks go into a queue and run one at a time through `execute_inline`.
+     That's what lets an error stop the rest of a Run All, as in RStudio: chunks still
+     waiting say "Not run: an earlier chunk failed." So does R stopping. Run All and Run
+     Chunks Above skip `eval=FALSE` chunks; Run Chunk runs them. Chunks in other
+     languages are skipped.
+   - **Output block:** below the closing fence, framed like Zed's REPL output, with a
+     button to clear it. It holds the chunk's `ExecutionView`, which `repl` now exports, and
+     the session's `Output` events for that request go into it. A rerun resets the same
+     block.
+   - **Plots:** plots tagged with the chunk's request are drawn by R as PNG. The width is
+     the output area's own, measured as it paints and settled after 150 ms; between 200
+     and 900 px. The shape comes from `fig.width`/`fig.height` (or Quarto's
+     `fig-width`/`fig-height`), with knitr's 7 by 5 as the default. Clearing or rerunning
+     closes the plots' comms, so R frees them.
+   - **Following edits:** blocks are placed by anchors, so they move with the text.
+   - **Checked live:** a sample report run with Run All showed a `message()`, a printed
+     data frame, a plot drawn inline at the chunk's 7:4 shape, an error, and the next chunk
+     skipped. The console and Plots pane stayed out of it.
 4. **Completion in chunks.** Like the console:
    - a hidden R document mirrors the file, with each chunk's code at its own line numbers
      and everything else blank, kept in sync as you type;

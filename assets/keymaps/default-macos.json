@@ -1132,6 +1132,16 @@
     },
   },
   {
+    // RStudio's shortcuts for R Markdown and Quarto chunks.
+    "context": "Editor && mode == full && (extension == Rmd || extension == rmd || extension == Rmarkdown || extension == rmarkdown || extension == qmd)",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-shift-enter": "r_markdown::RunChunk",
+      "cmd-alt-p": "r_markdown::RunChunksAbove",
+      "cmd-alt-r": "r_markdown::RunAllChunks",
+    },
+  },
+  {
     "context": "PlotZoomWindow",
     "bindings": {
       "escape": "plots_panel::CloseZoomWindow",

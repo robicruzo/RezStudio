@@ -11177,6 +11177,27 @@ dependencies = [
 [[package]]
 name = "r_markdown"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "jupyter-protocol",
+ "language",
+ "languages",
+ "multi_buffer",
+ "project",
+ "repl",
+ "runtime",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
 
 [[package]]
 name = "rand"
@@ -18058,6 +18079,7 @@ dependencies = [
  "project_symbols",
  "proto",
  "r_console",
+ "r_markdown",
  "rayon",
  "recent_projects",
  "release_channel",
