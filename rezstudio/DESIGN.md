@@ -609,13 +609,19 @@ Steps:
      - **Not chunks:** plain fences such as ```` ```r ````, whose contents can't start
        another chunk.
      - **Helpers:** `is_r`, `is_eval_false` and `chunk_at_row`.
-2. **Runtime.**
-   - `RSession::execute_inline(code)` runs code without the console echoing it.
-   - `PlotOpened` carries the request it came from, which says whether that was an inline
-     execution.
-   - The Plots pane leaves inline executions' plots alone, and the console ignores their
-     output.
-   - The real-Ark test checks that a plot drawn by an inline execution is tagged with it.
+2. **Runtime.** *(Done.)*
+   - **Inline executions:** `RSession::execute_inline(code)` runs code for a chunk, and
+     `is_inline(request_id)` says whether a request was one.
+   - **Keeping the IDs:** inline request IDs are kept for the session's life. GPUI delivers
+     events after the update that emitted them, so handlers ask about executions that have
+     already finished.
+   - **Plot tags:** `PlotOpened` carries `request_id`, the oldest pending execution when the
+     comm opened, or `None` for a plot drawn outside any execution.
+   - **The panes:** the console skips `Output` from inline executions, and the Plots pane
+     skips their plots and ignores later events on comms it doesn't hold.
+   - **Tests:** unit tests cover the session's tags, the console and the Plots pane. The
+     real-Ark test checks the ordering the tags rely on: a plot's comm opens on iopub before
+     its execution goes idle.
 3. **`r_markdown` (chunk execution).** In R Markdown and Quarto editors:
    - **Actions:** Run Chunk, Run Chunks Above, Run All Chunks, Clear Outputs.
    - **Output block:** each run puts an output block under the chunk's closing fence:

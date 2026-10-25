@@ -596,6 +596,11 @@ impl ConsolePanel {
         cx: &mut Context<Self>,
     ) {
         match event {
+            // A chunk's output shows under the chunk instead.
+            SessionEvent::Output {
+                request_id: Some(request_id),
+                ..
+            } if session.read(cx).is_inline(request_id) => {}
             SessionEvent::Output { content, .. } => self.write_output(content, cx),
             SessionEvent::ExecutionFinished { .. } => {
                 // An interrupt cancels any pending `readline()`.
@@ -1545,6 +1550,32 @@ mod tests {
         let output = harness.output(cx);
         assert!(output.contains("In log(-1) : NaNs produced"), "{output}");
         assert!(output.contains("! boom"), "{output}");
+    }
+
+    #[gpui::test]
+    async fn test_chunk_output_stays_out_of_the_console(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        let session = harness
+            .panel
+            .read_with(cx, |panel, _| panel.session().cloned().unwrap());
+        session
+            .update(cx, |session, cx| {
+                session.execute_inline("print(\"from a chunk\")".into(), cx)
+            })
+            .unwrap();
+        let chunk = harness.requests.try_recv().unwrap();
+        harness.receive(
+            JupyterMessage::new(
+                StreamContent {
+                    name: Stdio::Stdout,
+                    text: "[1] \"from a chunk\"\n".into(),
+                },
+                Some(&chunk),
+            ),
+            cx,
+        );
+        let output = harness.output(cx);
+        assert!(!output.contains("from a chunk"), "{output}");
     }
 
     #[gpui::test]

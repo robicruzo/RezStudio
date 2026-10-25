@@ -162,7 +162,14 @@ impl PlotsPanel {
             SessionEvent::PlotOpened {
                 comm_id,
                 pre_render,
+                request_id,
             } => {
+                // A chunk's plots show under the chunk instead.
+                if let (Some(session), Some(request_id)) = (&self.session, request_id)
+                    && session.read(cx).is_inline(request_id)
+                {
+                    return;
+                }
                 self.history.add(comm_id.clone());
                 if let Some(pre_render) = pre_render {
                     self.accept_render(comm_id.clone(), pre_render.clone(), None, cx);
@@ -171,7 +178,7 @@ impl PlotsPanel {
                 self.ensure_render(cx);
                 cx.notify();
             }
-            SessionEvent::PlotEvent { comm_id, event } => {
+            SessionEvent::PlotEvent { comm_id, event } if self.history.contains(comm_id) => {
                 let pre_render = match event {
                     PlotEvent::Update { pre_render } => {
                         // What was drawn changed, so any image of it is out of date.
@@ -1403,6 +1410,34 @@ mod tests {
             "{message}"
         );
         assert!(!describe_export_error(PlotRenderFormat::Pdf, &missing).contains("svglite"));
+    }
+
+    #[gpui::test]
+    async fn test_chunk_plots_stay_out_of_the_pane(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        let right_dock = harness
+            .workspace
+            .read_with(cx, |workspace, _| workspace.right_dock().clone());
+        harness
+            .session
+            .update(cx, |session, cx| {
+                session.execute_inline("plot(1)".into(), cx)
+            })
+            .unwrap();
+        harness.requests.try_recv().unwrap();
+
+        harness.open_plot("chunk-plot", ark_default(), cx);
+        harness.event(
+            "chunk-plot",
+            json!({ "method": "update", "params": { "pre_render": null } }),
+            cx,
+        );
+        assert_eq!(harness.current(cx), (None, None));
+        assert!(
+            !right_dock.read_with(cx, |dock, _| dock.is_open()),
+            "the pane stays put"
+        );
+        assert!(harness.requests().is_empty(), "nothing is drawn for it");
     }
 
     #[gpui::test]

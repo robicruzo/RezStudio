@@ -43,6 +43,10 @@ impl<I> PlotHistory<I> {
             .map(|_| format!("{} / {}", self.current + 1, self.plots.len()))
     }
 
+    pub fn contains(&self, comm_id: &str) -> bool {
+        self.plots.iter().any(|plot| plot.comm_id == comm_id)
+    }
+
     /// Adds a new plot and shows it.
     pub fn add(&mut self, comm_id: String) {
         self.plots.push(Plot {

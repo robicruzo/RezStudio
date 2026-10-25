@@ -8,7 +8,7 @@ use crate::comms::{
     UiFrontendRequest, VARIABLES_COMM_TARGET, VariablesEvent,
 };
 use anyhow::{Context as _, Result};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use futures::channel::{mpsc, oneshot};
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
@@ -100,6 +100,9 @@ pub enum SessionEvent {
     PlotOpened {
         comm_id: String,
         pre_render: Option<PlotResult>,
+        /// The execution that drew it, when one was running. See
+        /// [`RSession::is_inline`] for plots that belong to a chunk.
+        request_id: Option<String>,
     },
     PlotEvent {
         comm_id: String,
@@ -154,6 +157,10 @@ pub struct RSession {
     working_directory: Option<PathBuf>,
     /// Execute requests sent and not yet finished, oldest first.
     pending_executions: Vec<PendingExecution>,
+    /// Executions whose output shows under a chunk rather than in the console.
+    /// Kept for the session's life, as events about them are handled after the
+    /// execution is over; a run adds a few bytes.
+    inline_requests: HashSet<String>,
     pending_replies: HashMap<String, oneshot::Sender<JupyterMessageContent>>,
     pending_input_request: Option<JupyterMessage>,
     _launch_task: Option<Task<()>>,
@@ -200,6 +207,7 @@ impl RSession {
             },
             working_directory: None,
             pending_executions: Vec::new(),
+            inline_requests: HashSet::default(),
             pending_replies: HashMap::default(),
             variables_comm_id: None,
             data_explorer_comm_ids: Vec::new(),
@@ -562,6 +570,26 @@ impl RSession {
     }
 
     pub fn execute(&mut self, code: String, cx: &mut Context<Self>) -> Result<String> {
+        self.execute_with(code, false, cx)
+    }
+
+    /// Runs code whose output shows under a chunk: the console leaves its
+    /// output out, and the Plots pane its plots.
+    pub fn execute_inline(&mut self, code: String, cx: &mut Context<Self>) -> Result<String> {
+        self.execute_with(code, true, cx)
+    }
+
+    /// Whether `request_id` came from [`Self::execute_inline`].
+    pub fn is_inline(&self, request_id: &str) -> bool {
+        self.inline_requests.contains(request_id)
+    }
+
+    fn execute_with(
+        &mut self,
+        code: String,
+        inline: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<String> {
         let message = JupyterMessage::new(
             ExecuteRequest {
                 code,
@@ -572,6 +600,9 @@ impl RSession {
         );
         let request_id = message.header.msg_id.clone();
         self.send_request(message)?;
+        if inline {
+            self.inline_requests.insert(request_id.clone());
+        }
         self.pending_executions.push(PendingExecution {
             request_id: request_id.clone(),
             succeeded: None,
@@ -780,9 +811,17 @@ impl RSession {
                     PlotOpenData::default()
                 });
                 self.plot_comm_ids.push(open.comm_id.0.clone());
+                // Ark doesn't parent a plot's comm to the request that drew it, but
+                // it runs requests in order, so the oldest pending one is running.
+                // (`get_metadata` would say so too, but only once R is free.)
+                let request_id = self
+                    .pending_executions
+                    .first()
+                    .map(|execution| execution.request_id.clone());
                 cx.emit(SessionEvent::PlotOpened {
                     comm_id: open.comm_id.0.clone(),
                     pre_render: data.pre_render,
+                    request_id,
                 });
             }
             JupyterMessageContent::CommOpen(open) => {
@@ -2027,6 +2066,77 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_plots_are_tagged_with_the_execution_that_drew_them(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut harness = Harness::new(cx);
+        harness.finish_startup(cx);
+        harness.take_events();
+
+        let chunk = harness
+            .session
+            .update(cx, |session, cx| {
+                session.execute_inline("plot(1)".into(), cx)
+            })
+            .unwrap();
+        let chunk_request = harness.next_request();
+        let console = harness
+            .session
+            .update(cx, |session, cx| session.execute("plot(2)".into(), cx))
+            .unwrap();
+        let console_request = harness.next_request();
+        harness.session.read_with(cx, |session, _| {
+            assert!(session.is_inline(&chunk));
+            assert!(!session.is_inline(&console));
+        });
+
+        let open_plot = |harness: &Harness, comm_id: &str, cx: &mut VisualTestContext| {
+            harness.receive(
+                JupyterMessage::new(
+                    CommOpen {
+                        comm_id: CommId(comm_id.to_string()),
+                        target_name: PLOT_COMM_TARGET.to_string(),
+                        data: serde_json::Map::new(),
+                        target_module: None,
+                    },
+                    None,
+                ),
+                cx,
+            );
+            let events = harness.take_events();
+            events
+                .iter()
+                .find_map(|event| match event {
+                    SessionEvent::PlotOpened { request_id, .. } => Some(request_id.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no plot opened in {events:?}"))
+        };
+        let finish = |harness: &Harness, request: &JupyterMessage, cx: &mut VisualTestContext| {
+            harness.receive(
+                JupyterMessage::new(ExecuteReply::default(), Some(request)),
+                cx,
+            );
+            harness.receive(JupyterMessage::new(Status::idle(), Some(request)), cx);
+            harness.take_events();
+        };
+
+        // R runs requests in order, so a plot belongs to the oldest one still running.
+        assert_eq!(open_plot(&harness, "plot-1", cx), Some(chunk.clone()));
+        finish(&harness, &chunk_request, cx);
+        assert_eq!(open_plot(&harness, "plot-2", cx), Some(console));
+        finish(&harness, &console_request, cx);
+        assert_eq!(
+            open_plot(&harness, "plot-3", cx),
+            None,
+            "drawn outside any execution"
+        );
+        // Events about a finished chunk still know it was one.
+        harness
+            .session
+            .read_with(cx, |session, _| assert!(session.is_inline(&chunk)));
+    }
+
+    #[gpui::test]
     fn test_plot_comms(cx: &mut TestAppContext) {
         use crate::comms::{PlotRenderFormat, PlotSize};
 
@@ -2092,6 +2202,7 @@ mod tests {
             SessionEvent::PlotOpened {
                 comm_id,
                 pre_render: Some(opened),
+                ..
             },
             SessionEvent::PlotEvent {
                 event:

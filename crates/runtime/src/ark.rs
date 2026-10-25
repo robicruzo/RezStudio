@@ -1163,7 +1163,21 @@ mod integration_tests {
                     .unwrap(),
                 })
                 .await;
-            let (_, messages) = kernel.execute("plot(1:10)").await;
+            let (plot_request, messages) = kernel.execute("plot(1:10)").await;
+            // The session tags a plot with the execution still running when its
+            // comm opens, so the comm must open before that execution goes idle
+            // (both come on iopub, in order).
+            let opened = messages.iter().position(|(_, message)| {
+                matches!(&message.content, JupyterMessageContent::CommOpen(open) if open.target_name == crate::comms::PLOT_COMM_TARGET)
+            });
+            let idle = messages
+                .iter()
+                .position(|(_, message)| is_idle_for(message, &plot_request));
+            assert!(
+                opened.zip(idle).is_some_and(|(opened, idle)| opened < idle),
+                "{:#?}",
+                summarize(&messages)
+            );
             let plot_open = |messages: &[(&'static str, JupyterMessage)]| {
                 messages
                     .iter()
