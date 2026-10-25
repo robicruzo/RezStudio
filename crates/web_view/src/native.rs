@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc;
 use gpui::{Bounds, Pixels, Rgba, Window};
 use objc2::{MainThreadMarker, MainThreadOnly as _};
+use objc2_app_kit::NSView;
 use objc2_foundation::NSString;
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime};
 use std::path::PathBuf;
@@ -51,7 +52,17 @@ pub(crate) fn create(
     let navigation_events = events.clone();
     let new_window_events = events.clone();
     let title_events = events.clone();
-    let mut builder = WebViewBuilder::new();
+    let click_events = events.clone();
+    let mut builder = WebViewBuilder::new()
+        // GPUI doesn't see clicks on the page; the page says when it's clicked.
+        .with_initialization_script(
+            r#"document.addEventListener("mousedown", () => window.ipc.postMessage("clicked"), true);"#,
+        )
+        .with_ipc_handler(move |request| {
+            if request.body() == "clicked" {
+                click_events.unbounded_send(NativeEvent::Clicked).ok();
+            }
+        });
     if let Some(style) = style {
         builder = builder
             .with_initialization_script(page_style_script(&style.css)?)
@@ -106,7 +117,30 @@ impl NativeView for WryView {
     }
 
     fn set_visible(&self, visible: bool) -> Result<()> {
+        if !visible {
+            self.release_keyboard()?;
+        }
         Ok(self.0.set_visible(visible)?)
+    }
+
+    /// A clicked page keeps the window's keyboard input until something else
+    /// in AppKit takes it, and GPUI's own focus changes don't, so hand it
+    /// back to GPUI's view.
+    fn release_keyboard(&self) -> Result<()> {
+        let webview = self.0.webview();
+        let Some(window) = webview.window() else {
+            return Ok(());
+        };
+        let holds_keyboard = window.firstResponder().is_some_and(|responder| {
+            responder
+                .downcast_ref::<NSView>()
+                .is_some_and(|view| view.isDescendantOf(&webview))
+        });
+        if holds_keyboard {
+            let gpui_view = unsafe { webview.superview() };
+            window.makeFirstResponder(gpui_view.as_deref().map(|view| &**view));
+        }
+        Ok(())
     }
 
     fn load_url(&self, url: &str) -> Result<()> {

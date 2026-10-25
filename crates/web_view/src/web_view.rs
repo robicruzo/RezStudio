@@ -34,6 +34,8 @@ pub enum NativeEvent {
     Loaded(String),
     /// A link to somewhere the view doesn't show, for the browser.
     OpenExternally(String),
+    /// The page was clicked, which gives it the keyboard.
+    Clicked,
 }
 
 /// How a view's pages look, for pages whose owner styles them, as the Help
@@ -80,6 +82,9 @@ pub trait NativeView {
     fn reload(&self) -> Result<()>;
     /// Restyles the page shown and every page after it.
     fn set_page_style(&self, style: &PageStyle) -> Result<()>;
+    /// Gives keyboard input back to the window's GPUI view if the page has
+    /// it. Hiding the view does this too.
+    fn release_keyboard(&self) -> Result<()>;
 }
 
 /// Makes the native view for a window, which needs the window's handle,
@@ -98,6 +103,9 @@ pub type NativeFactory = Box<
 pub enum WebViewEvent {
     TitleChanged(String),
     Navigated(String),
+    /// The page was clicked and has the keyboard. Its owner should take
+    /// GPUI's focus, and call [`WebView::release_keyboard`] when it loses it.
+    Clicked,
 }
 
 pub struct WebView {
@@ -228,6 +236,14 @@ impl WebView {
         self.page_style = Some(style);
     }
 
+    /// Gives keyboard input back to GPUI, as when GPUI's focus moves off the
+    /// page's pane.
+    pub fn release_keyboard(&self) {
+        if let Some(native) = &self.native {
+            native.release_keyboard().log_err();
+        }
+    }
+
     /// Whether it may show; the owner calls this when its pane is shown or
     /// hidden, and when something would cover it.
     pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
@@ -298,6 +314,7 @@ impl WebView {
                 cx.emit(WebViewEvent::Navigated(url));
             }
             NativeEvent::OpenExternally(url) => cx.open_url(&url),
+            NativeEvent::Clicked => cx.emit(WebViewEvent::Clicked),
         }
         cx.notify();
     }
@@ -442,6 +459,10 @@ impl NativeView for FakeNative {
     }
     fn set_page_style(&self, style: &PageStyle) -> Result<()> {
         self.0.borrow_mut().push(format!("style {}", style.css));
+        Ok(())
+    }
+    fn release_keyboard(&self) -> Result<()> {
+        self.0.borrow_mut().push("release keyboard".into());
         Ok(())
     }
 }

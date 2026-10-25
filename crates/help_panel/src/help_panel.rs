@@ -190,6 +190,9 @@ pub struct HelpPanel {
     active: bool,
     /// Whether something drawn by GPUI would be under the web view.
     covered: bool,
+    /// GPUI's focus while the page has the keyboard, so the page can give
+    /// it back when focus moves on.
+    page_focus: FocusHandle,
     position: DockPosition,
     _lookup: Option<Task<()>>,
     _session_subscription: Option<Subscription>,
@@ -223,15 +226,20 @@ impl HelpPanel {
             editor.set_placeholder_text("Search help topics", window, cx);
             editor
         });
+        let page_focus = cx.focus_handle();
         let mut subscriptions = vec![
-            cx.subscribe(&web_view, |this, _, event, cx| {
-                if let WebViewEvent::Navigated(url) = event {
-                    this.navigated(url.clone(), cx);
-                }
+            cx.subscribe_in(
+                &web_view,
+                window,
+                |this, _, event, window, cx| match event {
+                    WebViewEvent::Navigated(url) => this.navigated(url.clone(), cx),
+                    WebViewEvent::Clicked => window.focus(&this.page_focus, cx),
+                    WebViewEvent::TitleChanged(_) => {}
+                },
+            ),
+            cx.on_blur(&page_focus, window, |this, _, cx| {
+                this.web_view.read(cx).release_keyboard();
             }),
-            // Pages follow the theme and fonts as they change.
-            cx.observe_global::<settings::SettingsStore>(|this, cx| this.restyle(cx)),
-            cx.observe_global::<theme::GlobalTheme>(|this, cx| this.restyle(cx)),
         ];
         if let Some(registry) = SessionRegistry::global(cx) {
             subscriptions.push(cx.subscribe_in(
@@ -271,13 +279,13 @@ impl HelpPanel {
             notice: None,
             active: false,
             covered: false,
+            page_focus,
             position: DockPosition::Right,
             _lookup: None,
             _session_subscription: None,
             _cover_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
-        this.restyle(cx);
         let existing = SessionRegistry::global(cx)
             .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
         if let Some(session) = existing {
@@ -286,6 +294,9 @@ impl HelpPanel {
         this
     }
 
+    /// Runs as the pane renders. Theme, setting and font size changes all
+    /// redraw every window, cached panes included, but the font size
+    /// adjustments of zooming in and out can't be observed directly.
     fn restyle(&mut self, cx: &mut Context<Self>) {
         let style = page_style::help_page_style(cx);
         self.web_view
@@ -496,6 +507,7 @@ impl HelpPanel {
 
 impl Render for HelpPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.restyle(cx);
         let running = self.is_running(cx);
         let has_page = self.history.current().is_some();
         v_flex()
@@ -551,6 +563,7 @@ impl Render for HelpPanel {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .track_focus(&self.page_focus)
                     .child(web_view(&self.web_view, cx))
                     .into_any_element()
             } else {
@@ -911,6 +924,26 @@ mod tests {
         assert_eq!(restyled.len(), 1, "{restyled:?}");
         assert!(restyled[0].contains("--vscode-font-size: 21px;"));
         assert!(restyled[0].contains("--vscode-editor-background: rgba("));
+        // Zooming the UI font doesn't change settings, but pages follow it too.
+        cx.update(|_, cx| theme_settings::adjust_ui_font_size(cx, |size| size + px(2.)));
+        cx.run_until_parked();
+        let restyled = style(take_calls(&harness.calls));
+        assert_eq!(restyled.len(), 1, "{restyled:?}");
+        assert!(restyled[0].contains("--vscode-font-size: 23px;"));
+
+        // A clicked page has the keyboard until GPUI's focus moves elsewhere.
+        let events = harness
+            .web_view
+            .read_with(cx, |web_view, _| web_view.events_for_test().unwrap());
+        events.unbounded_send(NativeEvent::Clicked).unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(|window, cx| { harness.panel.read(cx).page_focus.is_focused(window) }));
+        let topic = harness.panel.read_with(cx, |panel, _| panel.topic.clone());
+        topic.update_in(cx, |topic, window, cx| {
+            topic.focus_handle(cx).focus(window, cx)
+        });
+        cx.run_until_parked();
+        assert!(take_calls(&harness.calls).contains(&"release keyboard".to_string()));
 
         // The page hides while a modal is open over the workspace.
         harness.workspace.update_in(cx, |workspace, window, cx| {

@@ -814,12 +814,22 @@ Steps:
        highlighted examples.
      - The app's bundled fonts (IBM Plex Sans and Lilex) aren't visible to WebKit, which
        draws in its own process, so unless they're installed pages use the system's.
-     - On a theme or font change the pane restyles the page shown and adds a new page
+     - The pane rebuilds the style as it renders, and the web view ignores an unchanged
+       one. Theme, setting and font size changes all redraw every window, cached panes
+       included, but zooming the font size (cmd-= and cmd--) only changes values that
+       can't be observed. A changed style restyles the page shown and adds a new page
        script for later pages. `wry` only takes page scripts as the view is made, so
        this adds a `WKUserScript` to WebKit directly; the newest runs last and wins.
      - The view's background is the panel's, not WebKit's white, so nothing flashes
        white between pages. Views with no page style (the Viewer's) keep white, since
        htmlwidgets expect it.
+   - **Keyboard:** a clicked page is AppKit's first responder, and GPUI moving its own
+     focus doesn't change that, so keys kept going to the page, even while it was hidden
+     under the command palette.
+     - Hiding the view hands the keyboard back to GPUI's view if the page has it.
+     - The page reports clicks through `wry`'s message channel, and the pane then takes
+       GPUI's focus for the page's area. When that focus moves on (the palette, an editor,
+       the console), the pane hands the keyboard back.
    - **Toolbar:**
      - back and forward;
      - the help index, from `utils::help.start()` run silently through `evaluate_code`,
