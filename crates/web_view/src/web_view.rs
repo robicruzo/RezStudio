@@ -7,6 +7,8 @@
 //! zoomed item or another workspace would put GPUI content on top of it.
 //! Other platforms have no web view; pages open in the browser instead.
 
+// Serving files is for the macOS web view; tests cover it on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod files;
 #[cfg(target_os = "macos")]
 mod native;
