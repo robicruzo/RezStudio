@@ -1,11 +1,12 @@
 use crate::ark::{self, ArkLaunch, ArkProcess};
 use crate::comms::{
     self, CallMethodParams, DATA_EXPLORER_COMM_TARGET, DataExplorerEvent, DataExplorerOpenData,
-    EvalResult, EvaluateCodeParams, InstalledPackage, LSP_COMM_TARGET, LspCommMessage,
-    OutdatedPackage, PLOT_COMM_TARGET, PackageDetail, PlotEvent, PlotMetadata, PlotOpenData,
-    PlotRenderSettings, PlotResult, PromptStateParams, RPC_REPLY_MSG_TYPE, RPC_REQUEST_MSG_TYPE,
-    RenderParams, ServerStartData, UI_COMM_TARGET, UiBackendEvent, UiCommOpenData, UiFrontendEvent,
-    UiFrontendRequest, VARIABLES_COMM_TARGET, VariablesEvent,
+    EvalResult, EvaluateCodeParams, HELP_COMM_TARGET, HelpEvent, InstalledPackage, LSP_COMM_TARGET,
+    LspCommMessage, OutdatedPackage, PLOT_COMM_TARGET, PackageDetail, PlotEvent, PlotMetadata,
+    PlotOpenData, PlotRenderSettings, PlotResult, PromptStateParams, RPC_REPLY_MSG_TYPE,
+    RPC_REQUEST_MSG_TYPE, RenderParams, ServerStartData, ShowHelpKind, ShowHelpTopicParams,
+    UI_COMM_TARGET, UiBackendEvent, UiCommOpenData, UiFrontendEvent, UiFrontendRequest,
+    VARIABLES_COMM_TARGET, VariablesEvent,
 };
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
@@ -113,6 +114,26 @@ pub enum SessionEvent {
     PlotClosed {
         comm_id: String,
     },
+    /// A help page to show, as after `?topic`: a URL on Ark's help proxy.
+    ShowHelp {
+        url: String,
+        /// Whether the help should take focus.
+        focus: bool,
+    },
+    /// An HTML file to show, as an htmlwidget's, with its dependencies beside it.
+    ShowHtmlFile {
+        path: PathBuf,
+        title: String,
+        /// Where Ark suggests: `plot`, `viewer` or `editor`.
+        destination: String,
+        /// In pixels; 0 for no preference, -1 for as tall as possible.
+        height: i64,
+    },
+    /// A web page on this machine to show, as a Shiny app's. Other web
+    /// URLs open in the browser.
+    ShowUrl {
+        url: String,
+    },
 }
 
 /// The channels requests are sent on. Kept separate from the process so tests
@@ -146,6 +167,7 @@ pub struct RSession {
     ui_comm_id: Option<String>,
     lsp_comm_id: Option<String>,
     variables_comm_id: Option<String>,
+    help_comm_id: Option<String>,
     data_explorer_comm_ids: Vec<String>,
     plot_comm_ids: Vec<String>,
     /// Kept across restarts, so a new R draws plots at the pane's size too.
@@ -210,6 +232,7 @@ impl RSession {
             inline_requests: HashSet::default(),
             pending_replies: HashMap::default(),
             variables_comm_id: None,
+            help_comm_id: None,
             data_explorer_comm_ids: Vec::new(),
             plot_comm_ids: Vec::new(),
             plot_render_settings: None,
@@ -249,6 +272,11 @@ impl RSession {
 
     pub fn variables_comm_id(&self) -> Option<&str> {
         self.variables_comm_id.as_deref()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn help_comm_id(&self) -> Option<&str> {
+        self.help_comm_id.as_deref()
     }
 
     /// Sends a JSON-RPC request on one of Ark's comms and resolves to its
@@ -424,6 +452,24 @@ impl RSession {
         let reply = self.call_method("pkg_outdated", Vec::new(), OUTDATED_TIMEOUT, cx);
         cx.background_spawn(async move {
             json_list(reply.await?).context("unexpected reply to `pkg_outdated`")
+        })
+    }
+
+    /// Shows help for `topic`, which arrives as a [`SessionEvent::ShowHelp`].
+    /// Resolves to whether R found the topic.
+    pub fn show_help_topic(&mut self, topic: &str, cx: &mut Context<Self>) -> Task<Result<bool>> {
+        let Some(help_comm_id) = self.help_comm_id.clone() else {
+            return Task::ready(Err(anyhow::anyhow!("R isn't running")));
+        };
+        let params = match serde_json::to_value(ShowHelpTopicParams {
+            topic: topic.to_string(),
+        }) {
+            Ok(params) => params,
+            Err(error) => return Task::ready(Err(error.into())),
+        };
+        let reply = self.comm_request(&help_comm_id, "show_help_topic", params, CALL_TIMEOUT, cx);
+        cx.background_spawn(async move {
+            serde_json::from_value(reply.await?).context("unexpected reply to `show_help_topic`")
         })
     }
 
@@ -727,6 +773,19 @@ impl RSession {
             None,
         ))?;
         self.variables_comm_id = Some(variables_comm_id);
+
+        // Ark sends help pages over it once it's open.
+        let help_comm_id = uuid::Uuid::new_v4().to_string();
+        self.send_request(JupyterMessage::new(
+            CommOpen {
+                comm_id: CommId(help_comm_id.clone()),
+                target_name: HELP_COMM_TARGET.to_string(),
+                data: serde_json::Map::new(),
+                target_module: None,
+            },
+            None,
+        ))?;
+        self.help_comm_id = Some(help_comm_id);
         Ok(())
     }
 
@@ -849,6 +908,9 @@ impl RSession {
                 if self.variables_comm_id.as_deref() == Some(comm_id.0.as_str()) {
                     self.variables_comm_id = None;
                 }
+                if self.help_comm_id.as_deref() == Some(comm_id.0.as_str()) {
+                    self.help_comm_id = None;
+                }
                 if self.data_explorer_comm_ids.contains(&comm_id.0) {
                     self.data_explorer_comm_ids.retain(|id| *id != comm_id.0);
                     cx.emit(SessionEvent::DataExplorerClosed {
@@ -937,6 +999,21 @@ impl RSession {
             }
             return;
         }
+        if self.help_comm_id.as_deref() == Some(comm_id) {
+            match comms::parse_method::<HelpEvent>(data) {
+                Ok(HelpEvent::ShowHelp(params)) if params.kind == ShowHelpKind::Url => {
+                    cx.emit(SessionEvent::ShowHelp {
+                        url: params.content,
+                        focus: params.focus,
+                    })
+                }
+                Ok(HelpEvent::ShowHelp(params)) => {
+                    log::warn!("ignoring {:?} help, which Ark doesn't send", params.kind)
+                }
+                Err(error) => log::warn!("unexpected message on Ark's help comm: {error}"),
+            }
+            return;
+        }
         if self.ui_comm_id.as_deref() != Some(comm_id) {
             return;
         }
@@ -965,10 +1042,16 @@ impl RSession {
                 line: u32::try_from(params.line).unwrap_or(0),
                 column: u32::try_from(params.column).unwrap_or(0),
             }),
-            UiFrontendEvent::ShowUrl(params) => cx.open_url(&params.url),
-            UiFrontendEvent::ShowHtmlFile(params) => {
-                cx.open_with_system(&PathBuf::from(params.path));
+            UiFrontendEvent::ShowUrl(params) if comms::is_local_url(&params.url) => {
+                cx.emit(SessionEvent::ShowUrl { url: params.url })
             }
+            UiFrontendEvent::ShowUrl(params) => cx.open_url(&params.url),
+            UiFrontendEvent::ShowHtmlFile(params) => cx.emit(SessionEvent::ShowHtmlFile {
+                path: PathBuf::from(params.path),
+                title: params.title,
+                destination: params.destination,
+                height: params.height,
+            }),
             UiFrontendEvent::OpenWithSystem(params) => {
                 cx.open_with_system(&PathBuf::from(params.path));
             }
@@ -1121,6 +1204,7 @@ impl RSession {
         self.lsp_comm_id = None;
         self.lsp_port = None;
         self.variables_comm_id = None;
+        self.help_comm_id = None;
         self.pending_input_request = None;
         self.pending_replies.clear();
         self.pending_comm_requests.clear();
@@ -1428,6 +1512,7 @@ mod tests {
             let _frontend_ready = self.next_request();
             let lsp_open = self.next_request();
             let _variables_open = self.next_request();
+            let _help_open = self.next_request();
             self.receive(
                 JupyterMessage::new(kernel_info_reply(), Some(&kernel_info)),
                 cx,
@@ -2137,6 +2222,92 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_help_and_viewer_events(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut harness = Harness::new(cx);
+        let (ui_comm, _) = harness.finish_startup(cx);
+        harness.take_events();
+        let help_comm = CommId(
+            harness
+                .session
+                .read_with(cx, |session, _| session.help_comm_id().unwrap().to_string()),
+        );
+
+        // `?mean` reaches the frontend as a help URL on Ark's proxy.
+        harness.receive(
+            comm_message(
+                &help_comm,
+                json!({ "method": "show_help", "params": {
+                    "content": "http://127.0.0.1:4321/library/base/html/mean.html", "kind": "url", "focus": true
+                }}),
+            ),
+            cx,
+        );
+        assert!(matches!(
+            &harness.take_events()[..],
+            [SessionEvent::ShowHelp { url, focus: true }] if url.ends_with("/mean.html")
+        ));
+
+        let found = harness
+            .session
+            .update(cx, |session, cx| session.show_help_topic("lm", cx));
+        let request = harness.next_request();
+        let JupyterMessageContent::CommMsg(message) = &request.content else {
+            panic!("expected comm_msg");
+        };
+        assert_eq!(message.comm_id, help_comm);
+        assert_eq!(message.data["method"], "show_help_topic");
+        assert_eq!(message.data["params"], json!({ "topic": "lm" }));
+        harness.receive(
+            JupyterMessage::new(
+                CommMsg {
+                    comm_id: help_comm,
+                    data: json_object(&json!({ "method": "show_help_topic", "result": true }))
+                        .unwrap(),
+                },
+                Some(&request),
+            ),
+            cx,
+        );
+        assert!(cx.foreground_executor().block_test(found).unwrap());
+
+        // A Shiny app's local URL and an htmlwidget's file are for the Viewer;
+        // other web URLs go to the browser and aren't events.
+        for data in [
+            json!({ "method": "show_url", "params": { "url": "http://127.0.0.1:7654/" } }),
+            json!({ "method": "show_url", "params": { "url": "https://cran.r-project.org/" } }),
+            json!({ "method": "show_html_file", "params": {
+                "path": "/tmp/RtmpX/widget/index.html", "title": "plotly", "destination": "plot", "height": 400
+            }}),
+        ] {
+            harness.receive(comm_message(&ui_comm, data), cx);
+        }
+        let events = harness.take_events();
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    SessionEvent::ShowUrl { url },
+                    SessionEvent::ShowHtmlFile { path, title, destination, height: 400 },
+                ] if url == "http://127.0.0.1:7654/"
+                    && path == &PathBuf::from("/tmp/RtmpX/widget/index.html")
+                    && title == "plotly"
+                    && destination == "plot"
+            ),
+            "{events:?}"
+        );
+
+        // Without R, there's no help to ask for.
+        harness.session.update(cx, |session, cx| {
+            session.handle_exit("R exited.".into(), cx)
+        });
+        let stopped = harness
+            .session
+            .update(cx, |session, cx| session.show_help_topic("lm", cx));
+        assert!(cx.foreground_executor().block_test(stopped).is_err());
+    }
+
+    #[gpui::test]
     fn test_plot_comms(cx: &mut TestAppContext) {
         use crate::comms::{PlotRenderFormat, PlotSize};
 
@@ -2325,6 +2496,7 @@ mod tests {
                 "comm_open",
                 "frontend_ready",
                 "did_change_plots_render_settings",
+                "comm_open",
                 "comm_open",
                 "comm_open",
             ]

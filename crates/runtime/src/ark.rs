@@ -565,6 +565,26 @@ mod integration_tests {
                 == Some(&request.header.msg_id)
     }
 
+    /// A page's body, fetched over plain HTTP from a server on this machine.
+    fn http_get(url: &str) -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpStream;
+
+        let rest = url.strip_prefix("http://").unwrap();
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let mut stream = TcpStream::connect(authority).unwrap();
+        stream
+            .write_all(format!("GET /{path} HTTP/1.0\r\nHost: {authority}\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.") && response.contains(" 200 "),
+            "{response:.200}"
+        );
+        response
+    }
+
     /// A PNG's width and height, from its header.
     fn png_size(bytes: &[u8]) -> (u32, u32) {
         assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
@@ -1271,6 +1291,78 @@ mod integration_tests {
                 .await;
             let (_, messages) = kernel.execute("plot(2:3)").await;
             assert_ne!(plot_open(&messages).comm_id, plot.comm_id);
+
+            // Help pages come over the help comm, as URLs on Ark's help proxy.
+            let help_comm = CommId(uuid::Uuid::new_v4().to_string());
+            kernel
+                .send_shell(CommOpen {
+                    comm_id: help_comm.clone(),
+                    target_name: crate::comms::HELP_COMM_TARGET.to_string(),
+                    data: serde_json::Map::new(),
+                    target_module: None,
+                })
+                .await;
+            let help_event = |messages: &[(&'static str, JupyterMessage)]| {
+                messages
+                    .iter()
+                    .find_map(|(_, message)| match &message.content {
+                        JupyterMessageContent::CommMsg(comm) if comm.comm_id == help_comm => {
+                            parse_method::<crate::comms::HelpEvent>(serde_json::Value::Object(
+                                comm.data.clone(),
+                            ))
+                            .ok()
+                        }
+                        _ => None,
+                    })
+            };
+            let (_, messages) = kernel.execute("?mean").await;
+            let Some(crate::comms::HelpEvent::ShowHelp(help)) = help_event(&messages) else {
+                panic!("no help in {:#?}", summarize(&messages));
+            };
+            assert_eq!(help.kind, crate::comms::ShowHelpKind::Url);
+            assert!(
+                help.content.starts_with("http://127.0.0.1:"),
+                "{}",
+                help.content
+            );
+            let url = help.content.clone();
+            let page = std::thread::spawn(move || http_get(&url)).join().unwrap();
+            assert!(page.contains("Arithmetic Mean"), "{page:.300}");
+            let found = kernel
+                .comm_rpc(
+                    &help_comm,
+                    "show_help_topic",
+                    serde_json::json!({ "topic": "lm" }),
+                )
+                .await;
+            assert_eq!(found, serde_json::json!(true));
+
+            // R's viewer option (htmlwidgets use it) shows temporary HTML files,
+            // and `browseURL()` on a local address is for the Viewer too.
+            let ui_event = |messages: &[(&'static str, JupyterMessage)], method: &str| {
+                messages
+                    .iter()
+                    .find_map(|(_, message)| match &message.content {
+                        JupyterMessageContent::CommMsg(comm)
+                            if comm.comm_id == ui_comm && comm.data["method"] == method =>
+                        {
+                            Some(comm.data["params"].clone())
+                        }
+                        _ => None,
+                    })
+            };
+            let (_, messages) = kernel
+                .execute("page <- file.path(tempdir(), 'widget.html'); writeLines('<p>hi</p>', page); getOption('viewer')(page); normalizePath(page)")
+                .await;
+            let shown = ui_event(&messages, "show_html_file")
+                .unwrap_or_else(|| panic!("no show_html_file in {:#?}", summarize(&messages)));
+            let shown_path = shown["path"].as_str().unwrap_or_default().to_string();
+            assert!(shown_path.ends_with("widget.html"), "{shown}");
+            assert!(std::path::Path::new(&shown_path).exists(), "{shown}");
+            let (_, messages) = kernel.execute("browseURL('http://127.0.0.1:5678/')").await;
+            let shown = ui_event(&messages, "show_url")
+                .unwrap_or_else(|| panic!("no show_url in {:#?}", summarize(&messages)));
+            assert_eq!(shown["url"], "http://127.0.0.1:5678/");
 
             // Ark's functions for a Packages pane, through the UI comm.
             let call_method = |method: &str, params: serde_json::Value| serde_json::json!({ "method": method, "params": params });

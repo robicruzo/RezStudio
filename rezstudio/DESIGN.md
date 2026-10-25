@@ -740,15 +740,25 @@ Findings that shape the plan (Ark 0.1.252, and the crates in Zed's tree):
 
 Steps:
 
-1. **Runtime.**
-   - The session opens the help comm at startup, after the variables comm, and emits
-     `ShowHelp {url}`.
-   - `RSession::show_help_topic(topic)` asks the help comm to show a topic.
-   - `show_html_file` and `show_url` become session events instead of going to the
-     browser. Only web URLs that aren't local still go to the browser.
-   - The real-Ark test gains: `?mean` sends a help URL on the proxy's port that serves a
-     page; `show_help_topic("lm")` finds it; an htmlwidget sends `show_html_file` with a
-     file that exists.
+1. **Runtime.** *(Done.)*
+   - **Help comm:** the session opens it at startup, after the variables comm, so startup is
+     now six requests. Its `show_help` URL events become `SessionEvent::ShowHelp {url,
+     focus}`. Ark only sends `url` help; other kinds are logged and dropped.
+   - **Topics:** `RSession::show_help_topic(topic)` resolves to whether R found the topic;
+     the page arrives as a `ShowHelp`.
+   - **Viewer events:** `show_html_file` becomes `ShowHtmlFile {path, title, destination,
+     height}`. `show_url` for a local address (`127.0.0.1`, `localhost`, `::1` or
+     `0.0.0.0`, by `comms::is_local_url`) becomes `ShowUrl {url}`. Other web URLs still
+     open in the browser.
+   - **For now:** until the panes exist, `runtime::init` sends all three events to the
+     browser or the system opener, as before.
+   - **Real-Ark test:**
+     - `?mean` sends a URL on the help proxy, and fetching it over HTTP returns R's
+       "Arithmetic Mean" page;
+     - `show_help_topic("lm")` finds the topic;
+     - R's `viewer` option, which htmlwidgets use, sends `show_html_file` for a file in
+       the temp directory that exists;
+     - `browseURL('http://127.0.0.1:5678/')` sends `show_url`.
 2. **`web_view`.** A GPUI element hosting a `wry` web view:
    - **Placement:** sized and placed to the element's bounds every frame, and hidden in any
      frame it isn't painted.

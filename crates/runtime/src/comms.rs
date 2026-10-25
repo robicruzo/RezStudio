@@ -28,6 +28,7 @@ pub const LSP_COMM_TARGET: &str = "positron.lsp";
 pub const PLOT_COMM_TARGET: &str = "positron.plot";
 pub const VARIABLES_COMM_TARGET: &str = "positron.variables";
 pub const DATA_EXPLORER_COMM_TARGET: &str = "positron.dataExplorer";
+pub const HELP_COMM_TARGET: &str = "positron.help";
 
 /// Jupyter message types Ark uses on the stdin channel for requests it makes
 /// of the frontend while R waits for the answer.
@@ -654,6 +655,56 @@ pub enum DataExplorerEvent {
     ReturnColumnProfiles(ReturnColumnProfiles),
 }
 
+// Help comm (`positron.help`), from Ark 0.1.252's `help_comm.rs`. The
+// frontend opens it; Ark sends help pages to show over it.
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ShowHelpKind {
+    Html,
+    Markdown,
+    /// `content` is a URL on Ark's help proxy, the only kind Ark sends.
+    Url,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ShowHelpParams {
+    pub content: String,
+    pub kind: ShowHelpKind,
+    /// Whether the help should take focus, as after `?topic`.
+    pub focus: bool,
+}
+
+/// Events the backend sends on the help comm.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "method", content = "params")]
+pub enum HelpEvent {
+    #[serde(rename = "show_help")]
+    ShowHelp(ShowHelpParams),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ShowHelpTopicParams {
+    pub topic: String,
+}
+
+/// Whether `url` is a web address on this machine, as a Shiny app's is.
+pub fn is_local_url(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        // An IPv6 address, like `[::1]:8080`.
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0")
+}
+
 // UI comm requests that run R code: `call_method` runs `.ps.rpc.<method>`,
 // and `evaluate_code` runs a line silently. Both reply with JSON.
 
@@ -878,6 +929,43 @@ pub fn rpc_error(message: impl Into<String>) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_help_messages() {
+        let event: HelpEvent = parse_method(json!({
+            "method": "show_help",
+            "params": { "content": "http://127.0.0.1:5432/library/base/html/mean.html", "kind": "url", "focus": true }
+        }))
+        .unwrap();
+        assert_eq!(
+            event,
+            HelpEvent::ShowHelp(ShowHelpParams {
+                content: "http://127.0.0.1:5432/library/base/html/mean.html".into(),
+                kind: ShowHelpKind::Url,
+                focus: true,
+            })
+        );
+    }
+
+    #[test]
+    fn test_local_urls() {
+        for url in [
+            "http://127.0.0.1:7654/",
+            "http://localhost:3838/app?x=1",
+            "https://[::1]:8080/",
+            "http://0.0.0.0:8000",
+        ] {
+            assert!(is_local_url(url), "{url}");
+        }
+        for url in [
+            "https://cran.r-project.org/",
+            "http://127.0.0.1.example.com/",
+            "file:///tmp/x.html",
+            "http://user@localhost.evil/",
+        ] {
+            assert!(!is_local_url(url), "{url}");
+        }
+    }
 
     #[test]
     fn test_plot_messages() {

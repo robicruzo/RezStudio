@@ -619,7 +619,10 @@ impl ConsolePanel {
             | SessionEvent::DataExplorerClosed { .. }
             | SessionEvent::PlotOpened { .. }
             | SessionEvent::PlotEvent { .. }
-            | SessionEvent::PlotClosed { .. } => {}
+            | SessionEvent::PlotClosed { .. }
+            | SessionEvent::ShowHelp { .. }
+            | SessionEvent::ShowHtmlFile { .. }
+            | SessionEvent::ShowUrl { .. } => {}
         }
     }
 
@@ -1276,9 +1279,10 @@ mod tests {
                 panel.set_session(session.clone(), window, cx)
             });
 
-            // Startup: answer kernel_info so R is idle, and drop the comm opens.
+            // Startup: answer kernel_info so R is idle, and drop the rest: the UI
+            // comm, `frontend_ready`, and the LSP, variables and help comms.
             let kernel_info = requests.try_recv().unwrap();
-            for _ in 0..4 {
+            for _ in 0..5 {
                 requests.try_recv().unwrap();
             }
             let harness = Self {
