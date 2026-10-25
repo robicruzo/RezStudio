@@ -52,6 +52,8 @@ pub struct ChunkRunner {
     queue: VecDeque<QueuedRun>,
     /// The execution of the chunk running now.
     running: Option<String>,
+    /// The chunks' code as Ark's language server sees it, for completion.
+    completion_document: Option<r_console::completions::VirtualDocument>,
     _rescan: Option<Task<()>>,
     _session_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -93,6 +95,11 @@ impl ChunkRunner {
             lenses: Vec::new(),
             queue: VecDeque::new(),
             running: None,
+            completion_document: r_console::completions::VirtualDocument::new(&format!(
+                "chunks-{}",
+                editor.entity_id().as_u64()
+            ))
+            .log_err(),
             _rescan: None,
             _session_subscription: None,
             _subscriptions: subscriptions,
@@ -118,6 +125,19 @@ impl ChunkRunner {
             |this, _, event, window, cx| this.handle_session_event(event, window, cx),
         ));
         self.session = Some(session);
+    }
+
+    /// Ark's language server, while R is free to answer it.
+    pub fn completion_server(&self, cx: &App) -> Option<Arc<lsp::LanguageServer>> {
+        r_console::completions::ark_language_server(
+            &self.workspace.upgrade()?,
+            self.session.as_ref()?,
+            cx,
+        )
+    }
+
+    pub fn completion_document(&mut self) -> Option<&mut r_console::completions::VirtualDocument> {
+        self.completion_document.as_mut()
     }
 
     fn snapshot(&self, cx: &App) -> Option<MultiBufferSnapshot> {

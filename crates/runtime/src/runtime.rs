@@ -62,10 +62,14 @@ impl Global for GlobalSessionRegistry {}
 pub fn init(languages: Arc<LanguageRegistry>, cx: &mut App) {
     let registry = cx.new(|_| SessionRegistry::default());
     cx.set_global(GlobalSessionRegistry(registry));
-    languages.register_lsp_adapter(
-        LanguageName::new_static(R_LANGUAGE_NAME),
-        Arc::new(lsp::ArkLspAdapter),
-    );
+    let adapter = Arc::new(lsp::ArkLspAdapter);
+    languages.register_lsp_adapter(LanguageName::new_static(R_LANGUAGE_NAME), adapter.clone());
+    // So Ark's server runs while only R Markdown or Quarto files are open, for
+    // their chunks' completions. Ark reads every document as R; see
+    // `ArkLspAdapter::process_diagnostics`.
+    for language in lsp::R_DOCUMENT_LANGUAGES {
+        languages.register_lsp_adapter(LanguageName::new_static(language), adapter.clone());
+    }
     cx.observe_new(|workspace: &mut Workspace, window, cx| {
         let Some(window) = window else {
             return;

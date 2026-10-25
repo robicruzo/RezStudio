@@ -2,6 +2,7 @@
 //! them in the project's R session, with each chunk's output under it.
 
 pub mod chunks;
+mod completion;
 mod output;
 mod runner;
 
@@ -106,7 +107,16 @@ fn attach_runner(editor: Entity<Editor>, window: &mut Window, cx: &mut App) {
         };
         let runner = cx.new(|cx| ChunkRunner::new(&editor, &workspace, window, cx));
         editor.update(cx, |editor, _| {
-            editor.register_addon(ChunkRunnerAddon(runner))
+            let provider = completion::ChunkCompletionProvider {
+                runner: runner.downgrade(),
+                // The editor's default: the project's language servers, snippets
+                // and words.
+                fallback: editor.project().cloned().map(|project| {
+                    std::rc::Rc::new(project) as std::rc::Rc<dyn editor::CompletionProvider>
+                }),
+            };
+            editor.set_completion_provider(Some(std::rc::Rc::new(provider)));
+            editor.register_addon(ChunkRunnerAddon(runner));
         });
     });
 }
@@ -151,7 +161,7 @@ mod tests {
     use super::*;
     use crate::output::RunState;
     use futures::channel::mpsc;
-    use gpui::{TestAppContext, VisualContext as _, VisualTestContext};
+    use gpui::{Focusable as _, TestAppContext, VisualContext as _, VisualTestContext};
     use jupyter_protocol::{
         CommId, CommMsg, CommOpen, ExecuteReply, JupyterMessage, JupyterMessageContent,
         KernelInfoReply, ReplyStatus, Status, Stdio, StreamContent,
@@ -204,6 +214,14 @@ c <- 3
 
     impl Harness {
         async fn new(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
+            Self::new_with(cx, |_| {}).await
+        }
+
+        /// `register` adds language servers before the document opens.
+        async fn new_with(
+            cx: &mut TestAppContext,
+            register: impl FnOnce(&Arc<language::LanguageRegistry>),
+        ) -> (Self, &mut VisualTestContext) {
             cx.update(|cx| {
                 let settings = SettingsStore::test(cx);
                 cx.set_global(settings);
@@ -228,6 +246,8 @@ c <- 3
                     None,
                 )))
             });
+            let languages = project.read_with(cx, |project, _| project.languages().clone());
+            register(&languages);
             let window =
                 cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
             let workspace = window
@@ -568,6 +588,147 @@ c <- 3
                 .runner
                 .read_with(cx, |runner, _| runner.outputs_for_test().len()),
             1
+        );
+    }
+
+    #[gpui::test]
+    async fn test_chunk_completions_come_from_ark(cx: &mut TestAppContext) {
+        use futures::StreamExt as _;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::Mutex;
+
+        // What Ark saw of the hidden chunk document, last first.
+        let synced: Arc<Mutex<Vec<String>>> = Arc::default();
+        let fake_servers = Rc::new(RefCell::new(None));
+        let (harness, cx) = Harness::new_with(cx, {
+            let synced = synced.clone();
+            let fake_servers = fake_servers.clone();
+            move |languages| {
+                let servers = languages.register_fake_lsp(
+                    "R Markdown",
+                    language::FakeLspAdapter {
+                        name: "ark",
+                        capabilities: lsp::ServerCapabilities {
+                            completion_provider: Some(lsp::CompletionOptions::default()),
+                            ..Default::default()
+                        },
+                        initializer: Some(Box::new(move |server| {
+                            let opened = synced.clone();
+                            server
+                                .handle_notification::<lsp::notification::DidOpenTextDocument, _>(
+                                    move |params, _| {
+                                        if params
+                                            .text_document
+                                            .uri
+                                            .to_string()
+                                            .contains("rezstudio-chunks")
+                                        {
+                                            opened
+                                                .lock()
+                                                .unwrap()
+                                                .insert(0, params.text_document.text);
+                                        }
+                                    },
+                                );
+                            let changed = synced.clone();
+                            server
+                                .handle_notification::<lsp::notification::DidChangeTextDocument, _>(
+                                    move |params, _| {
+                                        if let Some(change) =
+                                            params.content_changes.into_iter().last()
+                                        {
+                                            changed.lock().unwrap().insert(0, change.text);
+                                        }
+                                    },
+                                );
+                            server.set_request_handler::<lsp::request::Completion, _, _>(
+                                |params, _| async move {
+                                    let hidden = params
+                                        .text_document_position
+                                        .text_document
+                                        .uri
+                                        .to_string()
+                                        .contains("rezstudio-chunks");
+                                    // Asked about the .Rmd itself, Ark offers R names in prose.
+                                    let label = if hidden { "mtcars" } else { "zznoise" };
+                                    Ok(Some(lsp::CompletionResponse::Array(vec![
+                                        lsp::CompletionItem {
+                                            label: label.into(),
+                                            ..Default::default()
+                                        },
+                                    ])))
+                                },
+                            );
+                        })),
+                        ..Default::default()
+                    },
+                );
+                *fake_servers.borrow_mut() = Some(servers);
+            }
+        })
+        .await;
+        let mut servers = fake_servers.borrow_mut().take().unwrap();
+        let _server = servers
+            .next()
+            .await
+            .expect("Ark's server starts for R Markdown");
+        cx.run_until_parked();
+
+        let complete = |at: Point, typed: &str, cx: &mut VisualTestContext| {
+            harness.editor.update_in(cx, |editor, window, cx| {
+                editor.focus_handle(cx).focus(window, cx);
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([at..at])
+                });
+                editor.insert(typed, window, cx);
+                editor.show_completions(&editor::actions::ShowCompletions, window, cx);
+            });
+            cx.run_until_parked();
+        };
+
+        // In a chunk: a new line under `x <- 1` (row 3).
+        complete(Point::new(3, 6), "\nmtc", cx);
+        assert!(
+            harness
+                .editor
+                .read_with(cx, |editor, _| editor.has_visible_completions_menu())
+        );
+        harness
+            .editor
+            .update_in(cx, |editor, window, cx| {
+                editor.confirm_completion(
+                    &editor::actions::ConfirmCompletion::default(),
+                    window,
+                    cx,
+                )
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        let line = harness.editor.update(cx, |editor, cx| {
+            editor
+                .text(cx)
+                .lines()
+                .nth(4)
+                .unwrap_or_default()
+                .to_string()
+        });
+        assert_eq!(line, "mtcars");
+        // Ark saw only the chunks' code, each line in its place.
+        let seen = synced.lock().unwrap().last().cloned().unwrap_or_default();
+        let seen_lines: Vec<&str> = seen.split('\n').collect();
+        assert_eq!(seen_lines.get(0), Some(&""), "prose is blank");
+        assert_eq!(seen_lines.get(3), Some(&"x <- 1"));
+        assert_eq!(seen_lines.get(4), Some(&"mtc"));
+        assert_eq!(seen_lines.get(8), Some(&""), "Python chunks are blank too");
+
+        // In prose, what Ark offers is left out.
+        complete(Point::new(0, 8), " zz", cx);
+        assert!(
+            !harness
+                .editor
+                .read_with(cx, |editor, _| editor.has_visible_completions_menu())
         );
     }
 

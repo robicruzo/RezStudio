@@ -2,7 +2,7 @@
 //! handles ANSI colors and `\r` progress bars the way RStudio's console does,
 //! and code is typed into an R editor below it.
 
-mod completions;
+pub mod completions;
 use anyhow::{Context as _, Result};
 use editor::actions::{MoveToEnd, Newline};
 use editor::{Editor, EditorElement, EditorStyle};
@@ -397,7 +397,7 @@ pub struct ConsolePanel {
     /// The input typed before browsing history, restored when browsing past the end.
     history_draft: String,
     last_state: Option<SessionState>,
-    console_document: Option<completions::ConsoleDocument>,
+    console_document: Option<completions::VirtualDocument>,
     _completeness_check: Option<Task<()>>,
     _session_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -494,8 +494,11 @@ impl ConsolePanel {
             history_index: None,
             history_draft: String::new(),
             last_state: None,
-            console_document: completions::ConsoleDocument::new(&workspace_id.as_u64().to_string())
-                .log_err(),
+            console_document: completions::VirtualDocument::new(&format!(
+                "console-{}",
+                workspace_id.as_u64()
+            ))
+            .log_err(),
             _completeness_check: None,
             _session_subscription: None,
             _subscriptions: subscriptions,
@@ -548,23 +551,7 @@ impl ConsolePanel {
         &self,
         cx: &App,
     ) -> Option<std::sync::Arc<lsp::LanguageServer>> {
-        let session = self.session.as_ref()?.read(cx);
-        if *session.state() != SessionState::Idle {
-            return None;
-        }
-        let root = session.project_root();
-        let workspace = self.workspace.upgrade()?;
-        let project = workspace.read(cx).project().read(cx);
-        let worktree_id = project
-            .worktrees(cx)
-            .find(|worktree| worktree.read(cx).abs_path().as_ref() == root.as_path())?
-            .read(cx)
-            .id();
-        let lsp_store = project.lsp_store().read(cx);
-        let (server_id, _) = lsp_store.language_server_statuses().find(|(_, status)| {
-            status.name == runtime::ARK_LANGUAGE_SERVER_NAME && status.worktree == Some(worktree_id)
-        })?;
-        lsp_store.language_server_for_id(server_id)
+        completions::ark_language_server(&self.workspace.upgrade()?, self.session.as_ref()?, cx)
     }
 
     /// Runs `code` in R and shows it in the console as if it had been typed,

@@ -19,9 +19,13 @@ editor.workspace = true
 gpui.workspace = true
 jupyter-protocol.workspace = true
 language.workspace = true
+lsp.workspace = true
 multi_buffer.workspace = true
+project.workspace = true
+r_console.workspace = true
 repl.workspace = true
 runtime.workspace = true
+text.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
@@ -32,6 +36,7 @@ futures.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 language = { workspace = true, features = ["test-support"] }
 languages.workspace = true
+lsp = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 runtime = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true

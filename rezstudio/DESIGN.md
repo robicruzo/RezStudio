@@ -654,17 +654,39 @@ Steps:
    - **Checked live:** a sample report run with Run All showed a `message()`, a printed
      data frame, a plot drawn inline at the chunk's 7:4 shape, an error, and the next chunk
      skipped. The console and Plots pane stayed out of it.
-4. **Completion in chunks.** Like the console:
-   - a hidden R document mirrors the file, with each chunk's code at its own line numbers
-     and everything else blank, kept in sync as you type;
-   - Ark's language server answers completions for it, shown in the editor when the cursor
-     is in an R chunk.
-5. **Tests.**
-   - **Unit tests:** chunk parsing (labels, options, unterminated and non-R chunks), running
-     a chunk and showing its outputs from scripted session events, rerun and clear, Run
-     Chunks Above and Run All stopping at an error, inline plots kept out of the Plots
-     pane, and the hidden document's line mapping.
-   - **Real-Ark test:** an inline execution's plot.
+4. **Completion in chunks.** *(Done.)* Like the console:
+   - **The hidden document:** an R document mirrors the file, with each R chunk's code on
+     its own line numbers and every other line blank, Python chunks included. Ark gets it
+     before each request as `rezstudio-chunks-<editor>.R`, and its edits apply to the
+     editor as they are.
+   - **Shared code:** the console's completion code is now a public API in
+     `r_console::completions`: `VirtualDocument`, `ark_language_server`,
+     `request_completions`, `resolve_completions` and `is_completion_trigger`. Both use it.
+   - **Starting Ark's server:** the adapter is also registered for R Markdown and Quarto,
+     so Zed starts Ark's server when only such files are open. Ark ignores a document's
+     language ID and reads every document as R, so the adapter's `process_diagnostics`
+     drops what it reports for `.Rmd`, `.rmd`, `.Rmarkdown`, `.rmarkdown` and `.qmd`
+     files.
+   - **The editor:** gets a completion provider that wraps the default one, the project.
+     Inside R chunk code it asks Ark through the hidden document. Elsewhere it uses the
+     default, minus what Ark offers there: Ark sees the whole file as R, so prose would
+     get R names.
+   - **Checked live:** with only an `.Rmd` open, typing `summary(mtc` in a chunk offered
+     `mtcars {datasets}` first, and the prose showed no false errors. A test checks the
+     prose filter by failing without it.
+5. **Tests.** *(Done.)*
+   - **Unit tests:**
+     - chunk parsing: labels, options, Quarto lines, unterminated, indented and non-R
+       chunks;
+     - running a chunk from scripted session events, a selection, rerunning and clearing;
+     - Run Chunks Above, and Run All stopping at an error;
+     - inline plots drawn at the output's width and shape, and kept out of the Plots pane
+       and console;
+     - run lines following edits, and the shortcuts reaching the runner;
+     - the hidden document's line mapping, completions from a fake Ark in a chunk, and
+       prose left alone;
+     - R Markdown diagnostics dropped.
+   - **Real-Ark test:** the plot ordering that chunk tagging relies on.
 
 Done when: opening an `.Rmd` or `.qmd` file highlights R in its chunks. Cmd+Shift+Enter
 runs a chunk and shows its printed output, a data frame, an error, and a plot sized to the

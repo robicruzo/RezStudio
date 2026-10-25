@@ -6,7 +6,7 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use gpui::AsyncApp;
 use language::{LspAdapter, LspAdapterDelegate, LspInstaller, Toolchain};
-use lsp::{LanguageServerBinary, LanguageServerName};
+use lsp::{LanguageServerBinary, LanguageServerId, LanguageServerName};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -167,11 +167,32 @@ impl LspInstaller for ArkLspAdapter {
     }
 }
 
+/// Documents with R chunks, which Ark's server also runs for.
+pub const R_DOCUMENT_LANGUAGES: [&str; 2] = ["R Markdown", "Quarto"];
+
+/// Their file types, whose diagnostics are dropped.
+const R_DOCUMENT_EXTENSIONS: [&str; 5] = ["Rmd", "rmd", "Rmarkdown", "rmarkdown", "qmd"];
+
 #[async_trait(?Send)]
 impl LspAdapter for ArkLspAdapter {
     fn name(&self) -> LanguageServerName {
         ARK_LANGUAGE_SERVER_NAME
     }
+
+    /// Ark reads an R Markdown or Quarto document as R, so its prose would be
+    /// full of syntax errors.
+    fn process_diagnostics(&self, params: &mut lsp::PublishDiagnosticsParams, _: LanguageServerId) {
+        if is_r_document(&params.uri) {
+            params.diagnostics.clear();
+        }
+    }
+}
+
+fn is_r_document(uri: &lsp::Uri) -> bool {
+    let path = uri.path().to_string();
+    R_DOCUMENT_EXTENSIONS
+        .iter()
+        .any(|extension| path.ends_with(&format!(".{extension}")))
 }
 
 #[cfg(test)]
@@ -179,6 +200,28 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn test_r_documents_lose_their_diagnostics() {
+        let params = |path: &str| lsp::PublishDiagnosticsParams {
+            uri: lsp::Uri::from_file_path(path).unwrap(),
+            diagnostics: vec![lsp::Diagnostic::new_simple(
+                Default::default(),
+                "unexpected".into(),
+            )],
+            version: None,
+        };
+        let adapter = ArkLspAdapter;
+        for (path, kept) in [
+            ("/project/report.Rmd", 0),
+            ("/project/paper.qmd", 0),
+            ("/project/analysis.R", 1),
+        ] {
+            let mut params = params(path);
+            adapter.process_diagnostics(&mut params, LanguageServerId(0));
+            assert_eq!(params.diagnostics.len(), kept, "{path}");
+        }
+    }
 
     #[test]
     fn test_bridge_copies_both_ways_until_server_closes() {
