@@ -29,15 +29,20 @@ util.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # On macOS wry always uses WKWebView; its default features are Linux's GTK backend.
 wry = { version = "0.57", default-features = false }
-# For adding page scripts after the view is made, and for keyboard focus,
-# which wry doesn't do.
+# For adding page scripts after the view is made, keyboard focus and
+# snapshots, which wry doesn't do.
+block2.workspace = true
 objc2.workspace = true
-objc2-app-kit.workspace = true
+objc2-app-kit = { workspace = true, features = ["NSBitmapImageRep", "NSImageRep"] }
 objc2-foundation.workspace = true
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "block2",
+    "objc2-app-kit",
     "std",
+    "WKSnapshotConfiguration",
     "WKUserContentController",
     "WKUserScript",
+    "WKWebView",
 ] }
 
 [dev-dependencies]

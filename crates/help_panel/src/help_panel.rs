@@ -188,8 +188,6 @@ pub struct HelpPanel {
     notice: Option<String>,
     /// Whether the pane is the one shown in its dock.
     active: bool,
-    /// Whether something drawn by GPUI would be under the web view.
-    covered: bool,
     /// GPUI's focus while the page has the keyboard, so the page can give
     /// it back when focus moves on.
     page_focus: FocusHandle,
@@ -263,8 +261,8 @@ impl HelpPanel {
                 window,
                 cx,
                 |this, covered, cx| {
-                    this.covered = covered;
-                    this.update_shown(cx);
+                    this.web_view
+                        .update(cx, |web_view, cx| web_view.set_covered(covered, cx));
                 },
             );
         });
@@ -278,7 +276,6 @@ impl HelpPanel {
             topic,
             notice: None,
             active: false,
-            covered: false,
             page_focus,
             position: DockPosition::Right,
             _lookup: None,
@@ -393,7 +390,7 @@ impl HelpPanel {
     }
 
     fn update_shown(&mut self, cx: &mut Context<Self>) {
-        let shown = self.active && !self.covered && self.history.current().is_some();
+        let shown = self.active && self.history.current().is_some();
         self.web_view
             .update(cx, |web_view, cx| web_view.set_shown(shown, cx));
     }
@@ -945,12 +942,14 @@ mod tests {
         cx.run_until_parked();
         assert!(take_calls(&harness.calls).contains(&"release keyboard".to_string()));
 
-        // The page hides while a modal is open over the workspace.
+        // Under a modal, the page moves out of sight and a snapshot shows instead.
         harness.workspace.update_in(cx, |workspace, window, cx| {
             workspace.toggle_modal(window, cx, |_, cx| Dialog(cx.focus_handle()))
         });
         cx.run_until_parked();
-        assert_eq!(harness.loads(), ["visible false"]);
+        let calls = take_calls(&harness.calls);
+        assert!(calls.contains(&"snapshot".to_string()), "{calls:?}");
+        assert!(!calls.contains(&"visible false".to_string()), "{calls:?}");
     }
 
     #[gpui::test]

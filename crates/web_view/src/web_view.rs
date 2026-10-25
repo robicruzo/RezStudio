@@ -15,8 +15,8 @@ use anyhow::Result;
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{
-    App, Bounds, Context, Entity, EntityId, EventEmitter, Pixels, Rgba, Subscription, Task, Window,
-    canvas,
+    App, Bounds, Context, Entity, EntityId, EventEmitter, Image, ImageFormat, ImageSource,
+    ObjectFit, Pixels, RenderImage, Rgba, Subscription, Task, Window, canvas, img, point,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,8 @@ pub enum NativeEvent {
     OpenExternally(String),
     /// The page was clicked, which gives it the keyboard.
     Clicked,
+    /// A PNG of the page as it's drawn, from [`NativeView::snapshot`].
+    Snapshot(Vec<u8>),
 }
 
 /// How a view's pages look, for pages whose owner styles them, as the Help
@@ -85,6 +87,9 @@ pub trait NativeView {
     /// Gives keyboard input back to the window's GPUI view if the page has
     /// it. Hiding the view does this too.
     fn release_keyboard(&self) -> Result<()>;
+    /// Asks for a picture of the page, which arrives as a
+    /// [`NativeEvent::Snapshot`].
+    fn snapshot(&self) -> Result<()>;
 }
 
 /// Makes the native view for a window, which needs the window's handle,
@@ -121,13 +126,21 @@ pub struct WebView {
     title: Option<String>,
     /// The folder `rezfile://` URLs may read from: the shown file's.
     file_root: Arc<Mutex<Option<PathBuf>>>,
-    /// Whether the owner lets it show: its pane is visible and nothing covers it.
+    /// Whether the owner lets it show: its pane is visible.
     shown: bool,
+    /// Whether GPUI content is drawn over its place, as a modal is. The page
+    /// then moves out of sight, where WebKit still draws it, and a snapshot
+    /// of it shows in its place, under the modal.
+    covered: bool,
+    snapshot: Option<Arc<RenderImage>>,
     page_style: Option<PageStyle>,
+    /// The element's bounds, and where the native view was last put.
     bounds: Option<Bounds<Pixels>>,
+    native_bounds: Option<Bounds<Pixels>>,
     native_visible: Option<bool>,
     events: Option<mpsc::UnboundedSender<NativeEvent>>,
     _events_task: Option<Task<()>>,
+    _decode_snapshot: Option<Task<()>>,
 }
 
 impl EventEmitter<WebViewEvent> for WebView {}
@@ -165,11 +178,15 @@ impl WebView {
             title: None,
             file_root: Arc::default(),
             shown: false,
+            covered: false,
+            snapshot: None,
             page_style: None,
             bounds: None,
+            native_bounds: None,
             native_visible: None,
             events: Some(events_tx),
             _events_task: Some(events_task),
+            _decode_snapshot: None,
         }
     }
 
@@ -234,6 +251,8 @@ impl WebView {
             native.set_page_style(&style).log_err();
         }
         self.page_style = Some(style);
+        // As when previewing themes under the theme picker.
+        self.request_snapshot();
     }
 
     /// Gives keyboard input back to GPUI, as when GPUI's focus moves off the
@@ -245,10 +264,59 @@ impl WebView {
     }
 
     /// Whether it may show; the owner calls this when its pane is shown or
-    /// hidden, and when something would cover it.
+    /// hidden.
     pub fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         self.shown = shown;
         self.apply(cx);
+        self.request_snapshot();
+    }
+
+    /// Whether GPUI content is drawn over the view's place, as
+    /// [`watch_cover`] reports.
+    pub fn set_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
+        if self.covered == covered {
+            return;
+        }
+        self.covered = covered;
+        if covered {
+            // Out of sight, the page would still take the keys meant for the modal.
+            self.release_keyboard();
+        } else if let Some(snapshot) = self.snapshot.take() {
+            cx.drop_image(snapshot, None);
+        }
+        self.apply(cx);
+        self.request_snapshot();
+        cx.notify();
+    }
+
+    fn request_snapshot(&self) {
+        if self.covered
+            && self.shown
+            && let Some(native) = &self.native
+        {
+            native.snapshot().log_err();
+        }
+    }
+
+    fn show_snapshot(&mut self, png: Vec<u8>, cx: &mut Context<Self>) {
+        let svg_renderer = cx.svg_renderer();
+        let decode = cx.background_spawn(async move {
+            Image::from_bytes(ImageFormat::Png, png).to_image_data(svg_renderer)
+        });
+        self._decode_snapshot = Some(cx.spawn(async move |this, cx| {
+            let decoded = decode.await;
+            this.update(cx, |this, cx| match decoded {
+                Ok(snapshot) if this.covered => {
+                    if let Some(previous) = this.snapshot.replace(snapshot) {
+                        cx.drop_image(previous, None);
+                    }
+                    cx.notify();
+                }
+                Ok(snapshot) => cx.drop_image(snapshot, None),
+                Err(error) => log::error!("couldn't decode a snapshot of the page: {error:#}"),
+            })
+            .log_err();
+        }));
     }
 
     /// Called as the element paints: moves the view to `bounds`, making it
@@ -272,24 +340,31 @@ impl WebView {
                     cx.notify();
                 }
             }
-            self.bounds = None;
+            self.native_bounds = None;
             self.native_visible = None;
         }
-        if self.bounds != Some(bounds) {
-            self.bounds = Some(bounds);
-            if let Some(native) = &self.native {
-                native.set_bounds(bounds).log_err();
-            }
-        }
+        self.bounds = Some(bounds);
         self.apply(cx);
     }
 
-    /// Brings the native view in line: visible only when shown and placed,
-    /// and loading the page asked for.
+    /// Brings the native view in line: at the element's bounds, or out of
+    /// sight while covered; visible only when shown and placed; and loading
+    /// the page asked for.
     fn apply(&mut self, _cx: &mut Context<Self>) {
         let Some(native) = &self.native else {
             return;
         };
+        if let Some(bounds) = self.bounds {
+            let target = if self.covered {
+                out_of_sight(bounds)
+            } else {
+                bounds
+            };
+            if self.native_bounds != Some(target) {
+                native.set_bounds(target).log_err();
+                self.native_bounds = Some(target);
+            }
+        }
         let visible = self.shown && self.bounds.is_some();
         if self.native_visible != Some(visible) {
             native.set_visible(visible).log_err();
@@ -312,9 +387,11 @@ impl WebView {
             NativeEvent::Loaded(url) => {
                 self.current_url = Some(url.clone());
                 cx.emit(WebViewEvent::Navigated(url));
+                self.request_snapshot();
             }
             NativeEvent::OpenExternally(url) => cx.open_url(&url),
             NativeEvent::Clicked => cx.emit(WebViewEvent::Clicked),
+            NativeEvent::Snapshot(png) => self.show_snapshot(png, cx),
         }
         cx.notify();
     }
@@ -335,6 +412,15 @@ impl Drop for WebView {
     }
 }
 
+/// Just left of the window, where the view isn't seen or clicked but is
+/// still in the window, so WebKit keeps drawing the page.
+fn out_of_sight(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds {
+        origin: point(-(bounds.size.width + px(100.)), bounds.origin.y),
+        size: bounds.size,
+    }
+}
+
 /// The element a web view fills, placing the native view at its bounds.
 pub fn web_view(view: &Entity<WebView>, cx: &App) -> AnyElement {
     if let Some(reason) = view.read(cx).unavailable.clone() {
@@ -347,10 +433,21 @@ pub fn web_view(view: &Entity<WebView>, cx: &App) -> AnyElement {
             .child(Label::new(reason).color(Color::Muted))
             .into_any_element();
     }
+    let snapshot = view
+        .read(cx)
+        .covered
+        .then(|| view.read(cx).snapshot.clone())
+        .flatten();
     let view = view.clone();
     div()
         .relative()
         .size_full()
+        .children(snapshot.map(|snapshot| {
+            img(ImageSource::Render(snapshot))
+                .absolute()
+                .size_full()
+                .object_fit(ObjectFit::Fill)
+        }))
         .child(
             canvas(
                 |_, _, _| (),
@@ -465,6 +562,10 @@ impl NativeView for FakeNative {
         self.0.borrow_mut().push("release keyboard".into());
         Ok(())
     }
+    fn snapshot(&self) -> Result<()> {
+        self.0.borrow_mut().push("snapshot".into());
+        Ok(())
+    }
 }
 
 /// Makes [`FakeNative`]s that record into `calls`, after a "create" line.
@@ -509,6 +610,73 @@ mod tests {
             let settings = settings::SettingsStore::test(cx);
             cx.set_global(settings);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+    }
+
+    /// A 1×1 PNG, as a snapshot.
+    const PNG: [u8; 70] = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 96, 112, 57, 243, 31,
+        0, 3, 104, 2, 16, 101, 195, 134, 222, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    #[gpui::test]
+    fn test_covered_page_shows_a_snapshot(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let calls: Rc<RefCell<Vec<String>>> = Rc::default();
+        let factory = fake_factory(calls.clone());
+        let (host, cx) = cx.add_window_view(|_, cx| Host {
+            view: cx.new(|cx| WebView::with_factory(Some(factory), cx)),
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.run_until_parked();
+        let view = host.read_with(cx, |host, _| host.view.clone());
+        view.update(cx, |view, cx| view.set_shown(true, cx));
+        take_calls(&calls);
+
+        // Covered, the page moves out of sight, still drawn, and is pictured.
+        view.update(cx, |view, cx| view.set_covered(true, cx));
+        let covered_calls = take_calls(&calls);
+        assert_eq!(
+            covered_calls,
+            ["release keyboard", "bounds 800x600", "snapshot"]
+        );
+        let native_bounds = view.read_with(cx, |view, _| view.native_bounds.unwrap());
+        assert!(native_bounds.right() <= px(0.), "{native_bounds:?}");
+
+        let events = view.read_with(cx, |view, _| view.events_for_test().unwrap());
+        events
+            .unbounded_send(NativeEvent::Snapshot(PNG.to_vec()))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.snapshot.is_some()));
+
+        // A restyle or a new page while covered is pictured again.
+        view.update(cx, |view, cx| {
+            view.set_page_style(
+                PageStyle {
+                    css: "body { color: blue }".into(),
+                    background: gpui::rgba(0x000000ff),
+                },
+                cx,
+            )
+        });
+        events
+            .unbounded_send(NativeEvent::Loaded("rezfile://localhost/a.html".into()))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            take_calls(&calls),
+            ["style body { color: blue }", "snapshot", "snapshot"]
+        );
+
+        // Uncovered, the page comes back and the picture goes.
+        view.update(cx, |view, cx| view.set_covered(false, cx));
+        cx.run_until_parked();
+        assert_eq!(take_calls(&calls), ["bounds 800x600"]);
+        view.read_with(cx, |view, _| {
+            assert!(view.snapshot.is_none());
+            assert_eq!(view.native_bounds, view.bounds);
         });
     }
 

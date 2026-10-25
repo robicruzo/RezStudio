@@ -6,16 +6,20 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc;
 use gpui::{Bounds, Pixels, Rgba, Window};
 use objc2::{MainThreadMarker, MainThreadOnly as _};
-use objc2_app_kit::NSView;
-use objc2_foundation::NSString;
+use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSView};
+use objc2_foundation::{NSDictionary, NSError, NSString};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::Response;
 use wry::{NewWindowResponse, PageLoadEvent, RGBA, Rect, WebViewBuilder, WebViewExtMacOS as _};
 
-struct WryView(wry::WebView);
+struct WryView {
+    view: wry::WebView,
+    events: mpsc::UnboundedSender<NativeEvent>,
+}
 
 fn rect(bounds: Bounds<Pixels>) -> Rect {
     Rect {
@@ -53,6 +57,7 @@ pub(crate) fn create(
     let new_window_events = events.clone();
     let title_events = events.clone();
     let click_events = events.clone();
+    let page_load_events = events.clone();
     let mut builder = WebViewBuilder::new()
         // GPUI doesn't see clicks on the page; the page says when it's clicked.
         .with_initialization_script(
@@ -103,31 +108,75 @@ pub(crate) fn create(
         })
         .with_on_page_load_handler(move |event, url| {
             if matches!(event, PageLoadEvent::Finished) {
-                events.unbounded_send(NativeEvent::Loaded(url)).ok();
+                page_load_events
+                    .unbounded_send(NativeEvent::Loaded(url))
+                    .ok();
             }
         })
         .build_as_child(window)
         .context("couldn't make a WKWebView")?;
-    Ok(Box::new(WryView(view)))
+    Ok(Box::new(WryView { view, events }))
+}
+
+fn png_bytes(image: &NSImage) -> Result<Vec<u8>> {
+    let tiff = image
+        .TIFFRepresentation()
+        .context("the snapshot has no data")?;
+    let bitmap = NSBitmapImageRep::imageRepWithData(&tiff).context("unreadable snapshot")?;
+    let png = unsafe {
+        bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+    }
+    .context("couldn't encode the snapshot")?;
+    Ok(png.to_vec())
 }
 
 impl NativeView for WryView {
     fn set_bounds(&self, bounds: Bounds<Pixels>) -> Result<()> {
-        Ok(self.0.set_bounds(rect(bounds))?)
+        Ok(self.view.set_bounds(rect(bounds))?)
     }
 
     fn set_visible(&self, visible: bool) -> Result<()> {
         if !visible {
             self.release_keyboard()?;
         }
-        Ok(self.0.set_visible(visible)?)
+        Ok(self.view.set_visible(visible)?)
+    }
+
+    fn snapshot(&self) -> Result<()> {
+        let events = RefCell::new(Some(self.events.clone()));
+        let handler = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            let Some(events) = events.borrow_mut().take() else {
+                return;
+            };
+            // Safety: WebKit passes an image or an error, each valid for the call.
+            let result = match (unsafe { image.as_ref() }, unsafe { error.as_ref() }) {
+                (Some(image), _) => png_bytes(image),
+                (None, Some(error)) => Err(anyhow::anyhow!(
+                    "WebKit couldn't take a snapshot: {}",
+                    error.localizedDescription()
+                )),
+                (None, None) => Err(anyhow::anyhow!("WebKit took no snapshot")),
+            };
+            match result {
+                Ok(png) => {
+                    events.unbounded_send(NativeEvent::Snapshot(png)).ok();
+                }
+                Err(error) => log::error!("{error:#}"),
+            }
+        });
+        unsafe {
+            self.view
+                .webview()
+                .takeSnapshotWithConfiguration_completionHandler(None, &handler)
+        };
+        Ok(())
     }
 
     /// A clicked page keeps the window's keyboard input until something else
     /// in AppKit takes it, and GPUI's own focus changes don't, so hand it
     /// back to GPUI's view.
     fn release_keyboard(&self) -> Result<()> {
-        let webview = self.0.webview();
+        let webview = self.view.webview();
         let Some(window) = webview.window() else {
             return Ok(());
         };
@@ -144,15 +193,15 @@ impl NativeView for WryView {
     }
 
     fn load_url(&self, url: &str) -> Result<()> {
-        Ok(self.0.load_url(url)?)
+        Ok(self.view.load_url(url)?)
     }
 
     fn evaluate_script(&self, script: &str) -> Result<()> {
-        Ok(self.0.evaluate_script(script)?)
+        Ok(self.view.evaluate_script(script)?)
     }
 
     fn reload(&self) -> Result<()> {
-        Ok(self.0.reload()?)
+        Ok(self.view.reload()?)
     }
 
     fn set_page_style(&self, style: &PageStyle) -> Result<()> {
@@ -169,8 +218,8 @@ impl NativeView for WryView {
                 true,
             )
         };
-        unsafe { self.0.manager().addUserScript(&user_script) };
-        self.0.evaluate_script(&script)?;
-        Ok(self.0.set_background_color(rgba(style.background))?)
+        unsafe { self.view.manager().addUserScript(&user_script) };
+        self.view.evaluate_script(&script)?;
+        Ok(self.view.set_background_color(rgba(style.background))?)
     }
 }

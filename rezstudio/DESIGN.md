@@ -774,6 +774,22 @@ Steps:
      workspace now exposes through `modal_layer()`), another item zoomed over the
      workspace, or another workspace active in the window. Panels also get `set_active`
      when their dock closes or another tab shows. Dropping a view hides it at once.
+   - **Under a modal:** rather than going blank, a covered view shows a snapshot of its
+     page, drawn by GPUI, so the modal draws over it. The theme picker's previews then
+     show on help pages too.
+     - `set_covered(true)` moves the native view just left of the window. There nobody
+       sees or clicks it, but it's still in the window, so WebKit keeps drawing it. It
+       also hands the keyboard back to GPUI, since the page would otherwise keep it.
+     - WebKit's `takeSnapshotWithConfiguration` gives an `NSImage`, which is encoded as
+       PNG and decoded into an image for GPUI to draw at the element's bounds.
+     - A restyle or a page load while covered takes a new snapshot, so previewing themes
+       under the theme picker shows each one. Uncovering puts the page back and drops
+       the image.
+     - Checked live with a throwaway window: a page restyled from red to blue while out
+       of sight snapshotted blue, and the window showed the snapshot in the page's
+       place.
+     - Snapshots don't scroll or take clicks, and the first one arrives a frame or two
+       after the modal opens.
    - **Local files:** `load_file` serves the file through a `rezfile://` scheme rooted at
      its folder, since WebKit won't let a page loaded from `file://` read files beside it.
      Paths are percent-encoded; anything outside the folder or with `..` gets a 403.
