@@ -137,8 +137,11 @@ impl WebView {
         self.unavailable.is_none()
     }
 
+    /// Loads `url`, even if it was the last one loaded: links may have led
+    /// elsewhere since.
     pub fn load_url(&mut self, url: impl Into<String>, cx: &mut Context<Self>) {
         self.url = Some(url.into());
+        self.loaded = None;
         self.title = None;
         self.current_url = None;
         self.apply(cx);
@@ -349,6 +352,53 @@ pub fn watch_cover<T: 'static>(
     subscriptions
 }
 
+/// A native view that records what it's told, one line per call, for tests.
+#[cfg(any(test, feature = "test-support"))]
+pub struct FakeNative(pub std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl NativeView for FakeNative {
+    fn set_bounds(&self, bounds: Bounds<Pixels>) -> Result<()> {
+        self.0.borrow_mut().push(format!(
+            "bounds {}x{}",
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height)
+        ));
+        Ok(())
+    }
+    fn set_visible(&self, visible: bool) -> Result<()> {
+        self.0.borrow_mut().push(format!("visible {visible}"));
+        Ok(())
+    }
+    fn load_url(&self, url: &str) -> Result<()> {
+        self.0.borrow_mut().push(format!("load {url}"));
+        Ok(())
+    }
+    fn evaluate_script(&self, script: &str) -> Result<()> {
+        self.0.borrow_mut().push(format!("script {script}"));
+        Ok(())
+    }
+    fn reload(&self) -> Result<()> {
+        self.0.borrow_mut().push("reload".into());
+        Ok(())
+    }
+}
+
+/// Makes [`FakeNative`]s that record into `calls`, after a "create" line.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fake_factory(calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>) -> NativeFactory {
+    Box::new(move |_, _, _, _| {
+        calls.borrow_mut().push("create".into());
+        Ok(Box::new(FakeNative(calls.clone())))
+    })
+}
+
+/// The calls recorded since the last take.
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_calls(calls: &std::rc::Rc<std::cell::RefCell<Vec<String>>>) -> Vec<String> {
+    std::mem::take(&mut *calls.borrow_mut())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,35 +408,6 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    struct FakeNative(Rc<RefCell<Vec<String>>>);
-
-    impl NativeView for FakeNative {
-        fn set_bounds(&self, bounds: Bounds<Pixels>) -> Result<()> {
-            self.0.borrow_mut().push(format!(
-                "bounds {}x{}",
-                f32::from(bounds.size.width),
-                f32::from(bounds.size.height)
-            ));
-            Ok(())
-        }
-        fn set_visible(&self, visible: bool) -> Result<()> {
-            self.0.borrow_mut().push(format!("visible {visible}"));
-            Ok(())
-        }
-        fn load_url(&self, url: &str) -> Result<()> {
-            self.0.borrow_mut().push(format!("load {url}"));
-            Ok(())
-        }
-        fn evaluate_script(&self, script: &str) -> Result<()> {
-            self.0.borrow_mut().push(format!("script {script}"));
-            Ok(())
-        }
-        fn reload(&self) -> Result<()> {
-            self.0.borrow_mut().push("reload".into());
-            Ok(())
-        }
-    }
-
     struct Host {
         view: Entity<WebView>,
     }
@@ -395,17 +416,6 @@ mod tests {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().size_full().child(web_view(&self.view, cx))
         }
-    }
-
-    fn fake_factory(calls: Rc<RefCell<Vec<String>>>) -> NativeFactory {
-        Box::new(move |_, _, _, _| {
-            calls.borrow_mut().push("create".into());
-            Ok(Box::new(FakeNative(calls.clone())))
-        })
-    }
-
-    fn take(calls: &Rc<RefCell<Vec<String>>>) -> Vec<String> {
-        std::mem::take(&mut *calls.borrow_mut())
     }
 
     fn init_theme(cx: &mut TestAppContext) {
@@ -427,12 +437,12 @@ mod tests {
         cx.run_until_parked();
         // Made on its first paint, hidden until its owner says it may show.
         assert_eq!(
-            take(&calls),
+            take_calls(&calls),
             ["create", "bounds 1920x1080", "visible false"]
         );
         cx.simulate_resize(size(px(800.), px(600.)));
         cx.run_until_parked();
-        assert_eq!(take(&calls), ["bounds 800x600"]);
+        assert_eq!(take_calls(&calls), ["bounds 800x600"]);
 
         let view = host.read_with(cx, |host, _| host.view.clone());
         view.update(cx, |view, cx| {
@@ -440,7 +450,7 @@ mod tests {
         });
         view.update(cx, |view, cx| view.set_shown(true, cx));
         assert_eq!(
-            take(&calls),
+            take_calls(&calls),
             [
                 "load http://127.0.0.1:4321/doc/html/index.html",
                 "visible true"
@@ -450,7 +460,7 @@ mod tests {
         // It follows the element as it's laid out again.
         cx.simulate_resize(size(px(640.), px(480.)));
         cx.run_until_parked();
-        assert_eq!(take(&calls), ["bounds 640x480"]);
+        assert_eq!(take_calls(&calls), ["bounds 640x480"]);
 
         view.update(cx, |view, cx| view.set_shown(false, cx));
         view.read_with(cx, |view, _| {
@@ -458,7 +468,7 @@ mod tests {
             view.reload();
         });
         assert_eq!(
-            take(&calls),
+            take_calls(&calls),
             ["visible false", "script history.back()", "reload"]
         );
 
@@ -486,7 +496,7 @@ mod tests {
             view.load_file(Path::new("/tmp/Rtmp/viewhtml/index.html"), cx)
         });
         assert_eq!(
-            take(&calls),
+            take_calls(&calls),
             ["load rezfile://localhost/tmp/Rtmp/viewhtml/index.html"]
         );
         let root = view.read_with(cx, |view, _| view.file_root.lock().unwrap().clone());
@@ -504,7 +514,7 @@ mod tests {
             cx.simulate_resize(size(px(640.), px(height)));
             cx.run_until_parked();
         }
-        assert!(take(&calls).contains(&"visible false".to_string()));
+        assert!(take_calls(&calls).contains(&"visible false".to_string()));
     }
 
     #[gpui::test]

@@ -6,8 +6,10 @@ mod completion;
 mod output;
 mod runner;
 
+pub use completion::chunk_document;
+
 use editor::{Addon, Editor};
-use gpui::{App, AppContext as _, Context, Entity, Window, actions};
+use gpui::{App, AppContext as _, Context, Entity, Task, Window, actions};
 use language::{BufferEvent, Point};
 use runner::ChunkRunner;
 use workspace::Workspace;
@@ -119,6 +121,23 @@ fn attach_runner(editor: Entity<Editor>, window: &mut Window, cx: &mut App) {
             editor.register_addon(ChunkRunnerAddon(runner));
         });
     });
+}
+
+/// Asks Ark for the help topic at the cursor, when `editor` shows an R
+/// Markdown or Quarto document and the cursor is in an R chunk's code.
+pub fn help_topic_at_cursor(
+    editor: &Entity<Editor>,
+    cx: &mut App,
+) -> Option<Task<anyhow::Result<Option<String>>>> {
+    let runner = editor.read(cx).addon::<ChunkRunnerAddon>()?.0.clone();
+    let (snapshot, position) = r_console::completions::cursor_position(editor, cx)?;
+    let text = snapshot.text();
+    let chunks = chunks::parse_chunks(&text);
+    if !completion::in_r_code(&chunks, position.row) {
+        return None;
+    }
+    let document = chunk_document(&text, &chunks);
+    Some(runner.update(cx, |runner, cx| runner.help_topic(document, position, cx)))
 }
 
 /// Where the cursor is in the active editor.
@@ -642,6 +661,16 @@ c <- 3
                                         }
                                     },
                                 );
+                            server.set_request_handler::<HelpTopicRequest, _, _>(
+                                |params, _| async move {
+                                    let uri = params["textDocument"]["uri"].to_string();
+                                    let position = &params["position"];
+                                    let topic = (uri.contains("rezstudio-chunks")
+                                        && position == &json!({ "line": 4, "character": 2 }))
+                                        .then(|| json!({ "topic": "mtcars" }));
+                                    Ok(topic)
+                                },
+                            );
                             server.set_request_handler::<lsp::request::Completion, _, _>(
                                 |params, _| async move {
                                     let hidden = params
@@ -730,6 +759,31 @@ c <- 3
                 .editor
                 .read_with(cx, |editor, _| editor.has_visible_completions_menu())
         );
+
+        // F1's topic comes from the hidden document too, and only in R code.
+        let topic_at = |at: Point, cx: &mut VisualTestContext| {
+            harness.editor.update_in(cx, |editor, window, cx| {
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([at..at])
+                });
+            });
+            cx.update(|_, cx| help_topic_at_cursor(&harness.editor, cx))
+        };
+        let topic = topic_at(Point::new(4, 2), cx).expect("the cursor is in a chunk");
+        cx.run_until_parked();
+        assert_eq!(topic.await.unwrap().as_deref(), Some("mtcars"));
+        assert!(
+            topic_at(Point::new(0, 2), cx).is_none(),
+            "prose has no topic"
+        );
+    }
+
+    enum HelpTopicRequest {}
+
+    impl lsp::request::Request for HelpTopicRequest {
+        type Params = serde_json::Value;
+        type Result = Option<serde_json::Value>;
+        const METHOD: &'static str = "positron/textDocument/helpTopic";
     }
 
     #[gpui::test]

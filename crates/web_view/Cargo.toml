@@ -12,6 +12,9 @@ workspace = true
 path = "src/web_view.rs"
 doctest = false
 
+[features]
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 futures.workspace = true

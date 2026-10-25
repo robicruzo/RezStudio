@@ -191,6 +191,7 @@ members = [
     "crates/vim",
     "crates/vim_mode_setting",
     "crates/watch",
+    "crates/help_panel",
     "crates/web_view",
     "crates/which_key",
     "crates/windows_resources",
@@ -305,6 +306,7 @@ gpui_wgpu = { path = "crates/gpui_wgpu" }
 gpui_windows = { path = "crates/gpui_windows", default-features = false }
 grammars = { path = "crates/grammars" }
 hang_telemetry = { path = "crates/hang_telemetry" }
+help_panel = { path = "crates/help_panel" }
 html_to_markdown = { path = "crates/html_to_markdown" }
 http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }

@@ -36,7 +36,7 @@ pub fn chunk_document(text: &str, chunks: &[Chunk]) -> String {
 }
 
 /// Whether `row` is a line of code in an R chunk.
-fn in_r_code(chunks: &[Chunk], row: u32) -> bool {
+pub(crate) fn in_r_code(chunks: &[Chunk], row: u32) -> bool {
     chunks
         .iter()
         .any(|chunk| chunk.is_r() && chunk.code_rows.contains(&row))

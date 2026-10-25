@@ -716,6 +716,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let plots_panel = plots_panel::PlotsPanel::load(workspace_handle.clone(), cx.clone());
         let packages_panel =
             packages_panel::PackagesPanel::load(workspace_handle.clone(), cx.clone());
+        let help_panel = help_panel::HelpPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -743,6 +744,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(environment_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(plots_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(packages_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(help_panel, workspace_handle.clone(), cx.clone()),
         );
 
         workspace_handle.update(cx, |workspace, cx| {
@@ -5822,6 +5824,7 @@ mod tests {
                 "git_panel",
                 "git_picker",
                 "go_to_line",
+                "help_panel",
                 "highlights_tree_view",
                 "icon_theme_selector",
                 "image_viewer",

@@ -554,6 +554,47 @@ impl ConsolePanel {
         completions::ark_language_server(&self.workspace.upgrade()?, self.session.as_ref()?, cx)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn input_for_test(&self) -> Entity<Editor> {
+        self.input.clone()
+    }
+
+    /// Asks Ark for the help topic at the input's cursor, when the input has
+    /// focus.
+    pub fn help_topic_at_cursor(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<Option<String>>>> {
+        if !self.input.focus_handle(cx).is_focused(window) {
+            return None;
+        }
+        Some(self.request_help_topic(cx))
+    }
+
+    fn request_help_topic(&mut self, cx: &mut Context<Self>) -> Task<Result<Option<String>>> {
+        let (Some(workspace), Some(session)) = (self.workspace.upgrade(), self.session.clone())
+        else {
+            return Task::ready(Err(anyhow::anyhow!("R isn't running.")));
+        };
+        let server = match completions::help_server(&workspace, &session, cx) {
+            Ok(server) => server,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let Some((snapshot, position)) = completions::cursor_position(&self.input, cx) else {
+            return Task::ready(Ok(None));
+        };
+        let Some(document) = self.console_document.as_mut() else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "couldn't make a document for the console"
+            )));
+        };
+        if let Err(error) = document.sync(&server, snapshot.text()) {
+            return Task::ready(Err(error));
+        }
+        completions::request_help_topic(server, document.uri().clone(), position, cx)
+    }
+
     /// Runs `code` in R and shows it in the console as if it had been typed,
     /// for code sent from the editor.
     pub fn execute(&mut self, code: &str, cx: &mut Context<Self>) -> Result<()> {

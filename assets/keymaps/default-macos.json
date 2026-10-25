@@ -1142,6 +1142,14 @@
     },
   },
   {
+    // RStudio's F1: R's help for the function or object under the cursor. It
+    // does nothing outside R code.
+    "context": "Editor",
+    "bindings": {
+      "f1": "help_panel::ShowHelpAtCursor",
+    },
+  },
+  {
     "context": "PlotZoomWindow",
     "bindings": {
       "escape": "plots_panel::CloseZoomWindow",

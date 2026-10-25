@@ -140,6 +140,38 @@ impl ChunkRunner {
         self.completion_document.as_mut()
     }
 
+    /// Asks Ark for the help topic at `position` in the chunks' code, after
+    /// showing it `document`, from [`crate::chunk_document`].
+    pub fn help_topic(
+        &mut self,
+        document: String,
+        position: text::PointUtf16,
+        cx: &mut Context<Self>,
+    ) -> Task<anyhow::Result<Option<String>>> {
+        let (Some(workspace), Some(session)) = (self.workspace.upgrade(), self.session.clone())
+        else {
+            return Task::ready(Err(anyhow::anyhow!("R isn't running.")));
+        };
+        let server = match r_console::completions::help_server(&workspace, &session, cx) {
+            Ok(server) => server,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let Some(virtual_document) = self.completion_document.as_mut() else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "couldn't make a document for the chunks"
+            )));
+        };
+        if let Err(error) = virtual_document.sync(&server, document) {
+            return Task::ready(Err(error));
+        }
+        r_console::completions::request_help_topic(
+            server,
+            virtual_document.uri().clone(),
+            position,
+            cx,
+        )
+    }
+
     fn snapshot(&self, cx: &App) -> Option<MultiBufferSnapshot> {
         let editor = self.editor.upgrade()?;
         Some(editor.read(cx).buffer().read(cx).snapshot(cx))

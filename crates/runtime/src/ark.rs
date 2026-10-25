@@ -1337,6 +1337,53 @@ mod integration_tests {
                 .await;
             assert_eq!(found, serde_json::json!(true));
 
+            // The Help pane's Home runs `help.start()` silently, through the UI
+            // comm, and the index arrives as a help page like any other. The
+            // event can come before or after the reply, so wait for both.
+            let mut request = JupyterMessage::new(
+                jupyter_protocol::CommMsg {
+                    comm_id: ui_comm.clone(),
+                    data: serde_json::Map::new(),
+                },
+                None,
+            );
+            if let (JupyterMessageContent::CommMsg(comm), serde_json::Value::Object(data)) = (
+                &mut request.content,
+                crate::comms::rpc_request_data(
+                    &request.header.msg_id,
+                    "evaluate_code",
+                    serde_json::json!({ "code": "utils::help.start()" }),
+                ),
+            ) {
+                comm.data = data;
+            }
+            kernel
+                .connections
+                .shell
+                .send(request.clone())
+                .await
+                .unwrap();
+            let mut replied = false;
+            let mut index_url = None;
+            kernel
+                .read_until(|_, message| {
+                    replied |=
+                        message.header.msg_type == "comm_msg" && is_child_of(message, &request);
+                    // The page `show_help_topic` found above may come first.
+                    if let Some(crate::comms::HelpEvent::ShowHelp(help)) =
+                        help_event(&[("iopub", message.clone())])
+                        && help.content.ends_with("/doc/html/index.html")
+                    {
+                        index_url = Some(help.content);
+                    }
+                    replied && index_url.is_some()
+                })
+                .await;
+            let index = std::thread::spawn(move || http_get(&index_url.unwrap_or_default()))
+                .join()
+                .unwrap();
+            assert!(index.contains("Packages"), "{index:.300}");
+
             // R's viewer option (htmlwidgets use it) shows temporary HTML files,
             // and `browseURL()` on a local address is for the Viewer too.
             let ui_event = |messages: &[(&'static str, JupyterMessage)], method: &str| {

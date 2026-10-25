@@ -200,11 +200,11 @@ fn start_session(
         .detach();
 }
 
-/// Help pages, HTML files and local web apps open in the browser until the
-/// Help and Viewer panes show them (M6 steps 3 and 4).
+/// HTML files and local web apps open in the browser until the Viewer pane
+/// shows them (M6 step 4). Help pages go to the Help pane.
 fn open_pages_in_browser(session: &Entity<RSession>, cx: &mut App) {
     cx.subscribe(session, |_, event, cx| match event {
-        SessionEvent::ShowHelp { url, .. } | SessionEvent::ShowUrl { url } => cx.open_url(url),
+        SessionEvent::ShowUrl { url } => cx.open_url(url),
         SessionEvent::ShowHtmlFile { path, .. } => cx.open_with_system(path),
         _ => {}
     })

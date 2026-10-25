@@ -1,18 +1,20 @@
-//! Completions from the project's Ark language server for R code that isn't
-//! an R file: the console input, and R Markdown chunks.
+//! Completions and help topics from the project's Ark language server, for
+//! R code that isn't an R file (the console input, and R Markdown chunks)
+//! and, for help topics, R files too.
 //!
 //! Zed never syncs such code to Ark, so it's shown to Ark as a document that
 //! exists only in the server, brought up to date before each request. Ark
 //! only serves one client, so this reuses the connection Zed already has
 //! instead of opening another.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use editor::{CompletionProvider, Editor};
 use gpui::{AppContext as _, Context, Entity, Task, WeakEntity, Window};
 use language::{Buffer, CodeLabel, ToOffset as _, ToPointUtf16 as _};
 use lsp::{LanguageServer, LanguageServerId};
 use project::lsp_store::CompletionDocumentation;
 use project::{Completion, CompletionResponse, CompletionSource};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -112,6 +114,88 @@ pub fn ark_language_server(
         status.name == runtime::ARK_LANGUAGE_SERVER_NAME && status.worktree == Some(worktree_id)
     })?;
     lsp_store.language_server_for_id(server_id)
+}
+
+/// Ark's language server for looking up help topics. Like completions, the
+/// lookup waits for R, and so does showing the page it finds.
+pub fn help_server(
+    workspace: &Entity<Workspace>,
+    session: &Entity<RSession>,
+    cx: &gpui::App,
+) -> Result<Arc<LanguageServer>> {
+    match session.read(cx).state() {
+        SessionState::Idle => {}
+        SessionState::Busy => anyhow::bail!("R is busy. Try again once it's done."),
+        _ => anyhow::bail!("R isn't running."),
+    }
+    ark_language_server(workspace, session, cx).context("Ark's language server isn't running yet.")
+}
+
+/// The newest cursor in an editor of one buffer, and that buffer as it is.
+pub fn cursor_position(
+    editor: &Entity<Editor>,
+    cx: &mut gpui::App,
+) -> Option<(language::BufferSnapshot, PointUtf16)> {
+    editor.update(cx, |editor, cx| {
+        let buffer = editor.buffer().read(cx).as_singleton()?;
+        let display_snapshot = editor.display_snapshot(cx);
+        let head = editor
+            .selections
+            .newest::<language::Point>(&display_snapshot)
+            .head();
+        let snapshot = buffer.read(cx).snapshot();
+        let position = snapshot.point_to_point_utf16(head);
+        Some((snapshot, position))
+    })
+}
+
+/// Ark's request for the help topic at a position: the function or object
+/// there, with its `pkg::` if written.
+enum HelpTopicRequest {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HelpTopicParams {
+    text_document: lsp::VersionedTextDocumentIdentifier,
+    position: lsp::Position,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HelpTopicResponse {
+    topic: String,
+}
+
+impl lsp::request::Request for HelpTopicRequest {
+    type Params = HelpTopicParams;
+    type Result = Option<HelpTopicResponse>;
+    const METHOD: &'static str = "positron/textDocument/helpTopic";
+}
+
+/// Asks Ark for the help topic at `position` in the document at `uri`, which
+/// must be open on `server`. Resolves to `None` when nothing there has help.
+pub fn request_help_topic(
+    server: Arc<LanguageServer>,
+    uri: lsp::Uri,
+    position: PointUtf16,
+    cx: &gpui::App,
+) -> Task<Result<Option<String>>> {
+    let params = HelpTopicParams {
+        // Ark reads the document as it last heard it, whatever the version.
+        text_document: lsp::VersionedTextDocumentIdentifier { uri, version: 0 },
+        position: lsp::Position {
+            line: position.row,
+            character: position.column,
+        },
+    };
+    cx.background_spawn(async move {
+        let response = server
+            .request::<HelpTopicRequest>(params, REQUEST_TIMEOUT)
+            .await
+            .into_response()?;
+        Ok(response
+            .map(|response| response.topic)
+            .filter(|topic| !topic.is_empty()))
+    })
 }
 
 /// Asks Ark for completions at `buffer_position` in `snapshot`, after showing

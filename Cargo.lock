@@ -5676,6 +5676,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "help_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "jupyter-protocol",
+ "language",
+ "languages",
+ "lsp",
+ "menu",
+ "project",
+ "r_console",
+ "r_markdown",
+ "runtime",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "tree-sitter-r",
+ "ui",
+ "util",
+ "web_view",
+ "workspace",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11301,6 +11329,7 @@ dependencies = [
  "paths",
  "project",
  "runtime",
+ "serde",
  "serde_json",
  "settings",
  "terminal",
@@ -18364,6 +18393,7 @@ dependencies = [
  "gpui_platform",
  "gpui_tokio",
  "hang_telemetry",
+ "help_panel",
  "http_client",
  "image",
  "image_viewer",

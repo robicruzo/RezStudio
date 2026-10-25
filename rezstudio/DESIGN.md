@@ -787,13 +787,46 @@ Steps:
      it at exactly the element's bounds (the page measured 668×608 for a 668×608
      element), the right way up, with its `lib/` stylesheet and script loaded through
      `rezfile://`.
-3. **`help_panel`.** A right-dock Help pane showing Ark's help pages:
-   - **Toolbar:** back, forward and home (the R help index), a topic search box (Enter runs
-     `show_help_topic`, and a miss says so), and open in browser.
-   - **Showing help:** `?topic` and help links show in the pane and bring it to the front;
-     `focus` moves focus to it.
-   - **F1:** in R editors, chunks and the console it asks Ark for the topic under the
-     cursor, then shows it.
+3. **`help_panel`.** *(Done.)* A right-dock Help pane showing Ark's help pages.
+   - **Showing help:** a `ShowHelp` page loads in the pane and brings it to the front.
+     Ark's `focus` asks for no more than that, as in Positron: keyboard focus stays where
+     it was, so typing at the console carries on. Builds without a web view open pages in
+     the browser. The runtime no longer sends help to the browser itself.
+   - **History:** the pane keeps its own list of pages, not WebKit's, so back and
+     forward know when they can go.
+     - A link followed in a page adds a page after the current one, dropping any
+       forward of it.
+     - A page the pane asked for (new help, back, forward) takes the URL it ends up at,
+       after any redirect, in place of its own entry.
+     - `WebView::load_url` now always loads, even the URL it loaded last, since links may
+       have led away from it.
+     - When R stops, the pages go, as that R's help server served them.
+   - **Toolbar:**
+     - back and forward;
+     - the help index, from `utils::help.start()` run silently through `evaluate_code`,
+       which reaches the pane through `browseURL` like any page;
+     - a topic box, where Enter runs `show_help_topic`, and a miss says "No help found
+       for `x`." under the toolbar;
+     - open in browser.
+   - **F1:** `help_panel::ShowHelpAtCursor`, bound to F1 in editors on macOS (on Linux
+     F1 opens the command palette). Outside R code it does nothing.
+     - It asks Ark's `positron/textDocument/helpTopic`, which only parses the document,
+       ignoring its version, and handles `pkg::fn` and `obj$member`.
+     - For an R file it asks about the file itself, which Zed keeps open on Ark. For a
+       chunk it asks about the hidden chunk document (M5), and for the console input,
+       the console's hidden document (M4).
+     - It then runs `show_help_topic`. Nothing at the cursor does nothing. A miss, or R
+       being busy, says so in the pane and opens it. Notices stay in the pane, since a
+       toast at the bottom right would be under the web view.
+     - The lookup runs once the action handler returns, since finding Ark's server reads
+       the workspace.
+   - **Tests:**
+     - **Pane:** pages from Ark, links, back and forward, a redirect, hiding under a
+       modal, topic search hits and misses, and F1 in an R file and the console against a
+       fake Ark server.
+     - **Chunks:** F1 is checked in R Markdown's completion test.
+     - **Real Ark:** `help.start()` through `evaluate_code` sends the index, which loads
+       over HTTP.
 4. **`viewer_panel`.** A right-dock Viewer pane:
    - **What it shows:** htmlwidgets from `show_html_file`, and local web apps from
      `show_url`. Each one brings the pane to the front.
