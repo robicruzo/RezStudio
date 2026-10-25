@@ -1,7 +1,8 @@
 use crate::ark::{self, ArkLaunch, ArkProcess};
 use crate::comms::{
     self, DATA_EXPLORER_COMM_TARGET, DataExplorerEvent, DataExplorerOpenData, LSP_COMM_TARGET,
-    LspCommMessage, PLOT_COMM_TARGET, PromptStateParams, RPC_REPLY_MSG_TYPE, RPC_REQUEST_MSG_TYPE,
+    LspCommMessage, PLOT_COMM_TARGET, PlotEvent, PlotMetadata, PlotOpenData, PlotRenderSettings,
+    PlotResult, PromptStateParams, RPC_REPLY_MSG_TYPE, RPC_REQUEST_MSG_TYPE, RenderParams,
     ServerStartData, UI_COMM_TARGET, UiBackendEvent, UiCommOpenData, UiFrontendEvent,
     UiFrontendRequest, VARIABLES_COMM_TARGET, VariablesEvent,
 };
@@ -26,6 +27,8 @@ use util::ResultExt as _;
 /// Ark's default console width before the console pane reports its own.
 const DEFAULT_CONSOLE_WIDTH: i32 = 80;
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(3);
+/// Redrawing a complex plot, such as a large ggplot2 scatter, can take a while.
+const PLOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionState {
@@ -87,6 +90,21 @@ pub enum SessionEvent {
     DataExplorerClosed {
         comm_id: String,
     },
+    /// R drew a new plot. `pre_render` is drawn at the last size given to
+    /// [`RSession::set_plot_render_settings`].
+    PlotOpened {
+        comm_id: String,
+        pre_render: Option<PlotResult>,
+    },
+    PlotEvent {
+        comm_id: String,
+        event: PlotEvent,
+    },
+    /// The plot's comm is gone, because Ark closed it or R stopped, so it
+    /// can't be drawn again.
+    PlotClosed {
+        comm_id: String,
+    },
 }
 
 /// The channels requests are sent on. Kept separate from the process so tests
@@ -121,6 +139,9 @@ pub struct RSession {
     lsp_comm_id: Option<String>,
     variables_comm_id: Option<String>,
     data_explorer_comm_ids: Vec<String>,
+    plot_comm_ids: Vec<String>,
+    /// Kept across restarts, so a new R draws plots at the pane's size too.
+    plot_render_settings: Option<PlotRenderSettings>,
     /// Comm RPCs sent and not yet answered, by request message id.
     pending_comm_requests: HashMap<String, oneshot::Sender<Result<serde_json::Value>>>,
     lsp_port: Option<u16>,
@@ -177,6 +198,8 @@ impl RSession {
             pending_replies: HashMap::default(),
             variables_comm_id: None,
             data_explorer_comm_ids: Vec::new(),
+            plot_comm_ids: Vec::new(),
+            plot_render_settings: None,
             pending_comm_requests: HashMap::default(),
             pending_input_request: None,
             _launch_task: None,
@@ -268,13 +291,76 @@ impl RSession {
         })
     }
 
-    /// Closes a comm Ark opened, such as a data explorer whose tab closed.
+    /// Closes a comm Ark opened, such as a data explorer whose tab closed or a
+    /// plot that was deleted; Ark then frees what it held for it.
     pub fn close_comm(&mut self, comm_id: &str) -> Result<()> {
         self.data_explorer_comm_ids.retain(|id| id != comm_id);
+        self.plot_comm_ids.retain(|id| id != comm_id);
         self.send_request(JupyterMessage::new(
             CommClose {
                 comm_id: CommId(comm_id.to_string()),
                 data: serde_json::Map::new(),
+            },
+            None,
+        ))
+    }
+
+    /// Draws a plot again, at any size and in any format.
+    pub fn render_plot(
+        &mut self,
+        comm_id: &str,
+        params: RenderParams,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PlotResult>> {
+        let params = match serde_json::to_value(params) {
+            Ok(params) => params,
+            Err(error) => return Task::ready(Err(error.into())),
+        };
+        let reply = self.comm_request(comm_id, "render", params, PLOT_REQUEST_TIMEOUT, cx);
+        cx.background_spawn(async move {
+            serde_json::from_value(reply.await?).context("unexpected reply to `render`")
+        })
+    }
+
+    pub fn plot_metadata(
+        &mut self,
+        comm_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<PlotMetadata>> {
+        let reply = self.comm_request(
+            comm_id,
+            "get_metadata",
+            serde_json::Value::Null,
+            PLOT_REQUEST_TIMEOUT,
+            cx,
+        );
+        cx.background_spawn(async move {
+            serde_json::from_value(reply.await?).context("unexpected reply to `get_metadata`")
+        })
+    }
+
+    /// Tells Ark the size to draw new plots at, as when the Plots pane is
+    /// resized. Remembered while R isn't running and sent once it starts.
+    pub fn set_plot_render_settings(&mut self, settings: PlotRenderSettings) -> Result<()> {
+        if self.plot_render_settings == Some(settings) {
+            return Ok(());
+        }
+        self.plot_render_settings = Some(settings);
+        match self.ui_comm_id.clone() {
+            Some(ui_comm_id) => self.send_plot_render_settings(ui_comm_id, settings),
+            None => Ok(()),
+        }
+    }
+
+    fn send_plot_render_settings(
+        &mut self,
+        ui_comm_id: String,
+        settings: PlotRenderSettings,
+    ) -> Result<()> {
+        self.send_request(JupyterMessage::new(
+            CommMsg {
+                comm_id: CommId(ui_comm_id),
+                data: json_object(&UiBackendEvent::DidChangePlotsRenderSettings { settings })?,
             },
             None,
         ))
@@ -499,6 +585,9 @@ impl RSession {
             },
             None,
         ))?;
+        if let Some(settings) = self.plot_render_settings {
+            self.send_plot_render_settings(ui_comm_id.clone(), settings)?;
+        }
         self.ui_comm_id = Some(ui_comm_id);
 
         let lsp_comm_id = uuid::Uuid::new_v4().to_string();
@@ -602,11 +691,22 @@ impl RSession {
                     title,
                 });
             }
+            JupyterMessageContent::CommOpen(open) if open.target_name == PLOT_COMM_TARGET => {
+                let data = serde_json::from_value::<PlotOpenData>(serde_json::Value::Object(
+                    open.data.clone(),
+                ))
+                .unwrap_or_else(|error| {
+                    log::warn!("unexpected data opening a plot comm: {error}");
+                    PlotOpenData::default()
+                });
+                self.plot_comm_ids.push(open.comm_id.0.clone());
+                cx.emit(SessionEvent::PlotOpened {
+                    comm_id: open.comm_id.0.clone(),
+                    pre_render: data.pre_render,
+                });
+            }
             JupyterMessageContent::CommOpen(open) => {
-                // Plots are shown once the Plots pane exists; until then they are dropped.
-                if open.target_name != PLOT_COMM_TARGET {
-                    log::debug!("ignoring comm opened by Ark: {}", open.target_name);
-                }
+                log::debug!("ignoring comm opened by Ark: {}", open.target_name);
             }
             JupyterMessageContent::CommMsg(comm_message) => {
                 if let Some(parent_id) = &parent_id
@@ -633,6 +733,12 @@ impl RSession {
                 if self.data_explorer_comm_ids.contains(&comm_id.0) {
                     self.data_explorer_comm_ids.retain(|id| *id != comm_id.0);
                     cx.emit(SessionEvent::DataExplorerClosed {
+                        comm_id: comm_id.0.clone(),
+                    });
+                }
+                if self.plot_comm_ids.contains(&comm_id.0) {
+                    self.plot_comm_ids.retain(|id| *id != comm_id.0);
+                    cx.emit(SessionEvent::PlotClosed {
                         comm_id: comm_id.0.clone(),
                     });
                 }
@@ -699,6 +805,16 @@ impl RSession {
                     event,
                 }),
                 Err(error) => log::warn!("unexpected message on a data explorer comm: {error}"),
+            }
+            return;
+        }
+        if self.plot_comm_ids.iter().any(|id| id == comm_id) {
+            match comms::parse_method::<PlotEvent>(data) {
+                Ok(event) => cx.emit(SessionEvent::PlotEvent {
+                    comm_id: comm_id.to_string(),
+                    event,
+                }),
+                Err(error) => log::warn!("unexpected message on a plot comm: {error}"),
             }
             return;
         }
@@ -897,6 +1013,9 @@ impl RSession {
         }
         for comm_id in std::mem::take(&mut self.data_explorer_comm_ids) {
             cx.emit(SessionEvent::DataExplorerClosed { comm_id });
+        }
+        for comm_id in std::mem::take(&mut self.plot_comm_ids) {
+            cx.emit(SessionEvent::PlotClosed { comm_id });
         }
     }
 
@@ -1411,7 +1530,7 @@ mod tests {
             ),
             cx,
         );
-        // Messages on comms the session didn't open, such as plots, are ignored.
+        // Messages on comms that were never opened are ignored.
         harness.receive(
             comm_message(
                 &CommId("plot".into()),
@@ -1663,6 +1782,200 @@ mod tests {
             &harness.take_events()[..],
             [SessionEvent::Variables(VariablesEvent::Refresh(refresh))] if refresh.version == 1
         ));
+    }
+
+    #[gpui::test]
+    fn test_plot_comms(cx: &mut TestAppContext) {
+        use crate::comms::{PlotRenderFormat, PlotSize};
+
+        let cx = cx.add_empty_window();
+        let mut harness = Harness::new(cx);
+        let (ui_comm, _) = harness.finish_startup(cx);
+        harness.take_events();
+
+        // The pane's size reaches Ark as a UI comm event, and only when it changes.
+        let settings = PlotRenderSettings {
+            size: PlotSize {
+                width: 500,
+                height: 300,
+            },
+            pixel_ratio: 2.0,
+            format: PlotRenderFormat::Png,
+        };
+        let settings_event = json!({
+            "method": "did_change_plots_render_settings",
+            "params": { "settings": {
+                "size": { "width": 500, "height": 300 }, "pixel_ratio": 2.0, "format": "png"
+            }}
+        });
+        harness
+            .session
+            .update(cx, |session, _| session.set_plot_render_settings(settings))
+            .unwrap();
+        let request = harness.next_request();
+        assert!(matches!(
+            &request.content,
+            JupyterMessageContent::CommMsg(message)
+                if message.comm_id == ui_comm && serde_json::Value::Object(message.data.clone()) == settings_event
+        ));
+        harness
+            .session
+            .update(cx, |session, _| session.set_plot_render_settings(settings))
+            .unwrap();
+        assert!(harness.requests.try_recv().is_err());
+
+        let plot = CommId("plot-1".to_string());
+        let pre_render = json!({ "data": "aGVsbG8", "mime_type": "image/png", "settings": null });
+        harness.receive(
+            JupyterMessage::new(
+                CommOpen {
+                    comm_id: plot.clone(),
+                    target_name: PLOT_COMM_TARGET.to_string(),
+                    data: json_object(&json!({ "pre_render": pre_render })).unwrap(),
+                    target_module: None,
+                },
+                None,
+            ),
+            cx,
+        );
+        harness.receive(
+            comm_message(
+                &plot,
+                json!({ "method": "update", "params": { "pre_render": pre_render } }),
+            ),
+            cx,
+        );
+        let events = harness.take_events();
+        let [
+            SessionEvent::PlotOpened {
+                comm_id,
+                pre_render: Some(opened),
+            },
+            SessionEvent::PlotEvent {
+                event:
+                    PlotEvent::Update {
+                        pre_render: Some(_),
+                    },
+                ..
+            },
+        ] = &events[..]
+        else {
+            panic!("unexpected events {events:?}");
+        };
+        assert_eq!(comm_id, "plot-1");
+        assert_eq!(opened.decode().unwrap(), b"hello");
+
+        let render = harness.session.update(cx, |session, cx| {
+            session.render_plot(
+                "plot-1",
+                RenderParams {
+                    size: Some(PlotSize {
+                        width: 800,
+                        height: 600,
+                    }),
+                    pixel_ratio: 2.0,
+                    format: PlotRenderFormat::Svg,
+                },
+                cx,
+            )
+        });
+        let request = harness.next_request();
+        let JupyterMessageContent::CommMsg(message) = &request.content else {
+            panic!("expected comm_msg");
+        };
+        assert_eq!(message.data["method"], "render");
+        assert_eq!(
+            message.data["params"],
+            json!({ "size": { "width": 800, "height": 600 }, "pixel_ratio": 2.0, "format": "svg" })
+        );
+        harness.receive(
+            JupyterMessage::new(
+                CommMsg {
+                    comm_id: plot.clone(),
+                    data: json_object(&json!({ "method": "render", "result": {
+                        "data": "PHN2Zz4", "mime_type": "image/svg+xml", "settings": null
+                    }}))
+                    .unwrap(),
+                },
+                Some(&request),
+            ),
+            cx,
+        );
+        let rendered = cx.foreground_executor().block_test(render).unwrap();
+        assert_eq!(rendered.mime_type, "image/svg+xml");
+        assert_eq!(rendered.decode().unwrap(), b"<svg>");
+
+        // Deleting a plot closes its comm; Ark's later messages on it are ignored.
+        harness
+            .session
+            .update(cx, |session, _| session.close_comm("plot-1"))
+            .unwrap();
+        assert!(matches!(
+            &harness.next_request().content,
+            JupyterMessageContent::CommClose(close) if close.comm_id == plot
+        ));
+        harness.receive(
+            comm_message(&plot, json!({ "method": "show", "params": {} })),
+            cx,
+        );
+        assert!(harness.take_events().is_empty());
+
+        // Plots still open when R stops are reported closed, and a new R is
+        // told the pane's size as soon as the UI comm opens.
+        harness.receive(
+            JupyterMessage::new(
+                CommOpen {
+                    comm_id: CommId("plot-2".to_string()),
+                    target_name: PLOT_COMM_TARGET.to_string(),
+                    data: serde_json::Map::new(),
+                    target_module: None,
+                },
+                None,
+            ),
+            cx,
+        );
+        harness.session.update(cx, |session, cx| {
+            session.handle_exit("R exited.".into(), cx)
+        });
+        let events = harness.take_events();
+        assert!(matches!(
+            &events[0],
+            SessionEvent::PlotOpened {
+                pre_render: None,
+                ..
+            }
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SessionEvent::PlotClosed { comm_id } if comm_id == "plot-2"
+        )));
+
+        let (requests_tx, requests) = mpsc::channel(100);
+        let (stdin_tx, _stdin) = mpsc::channel(100);
+        harness.requests = requests;
+        harness.session.update(cx, |session, cx| {
+            session.connect_for_test(requests_tx, stdin_tx, cx)
+        });
+        let methods: Vec<String> = std::iter::from_fn(|| harness.requests.try_recv().ok())
+            .map(|request| match &request.content {
+                JupyterMessageContent::CommMsg(message) => message.data["method"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                other => other.message_type().to_string(),
+            })
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "kernel_info_request",
+                "comm_open",
+                "frontend_ready",
+                "did_change_plots_render_settings",
+                "comm_open",
+                "comm_open",
+            ]
+        );
     }
 
     #[gpui::test]

@@ -326,11 +326,21 @@ Findings that shape the plan (Ark 0.1.252, `plot_comm.rs` and `graphics_device.r
 
 Steps:
 
-1. **Runtime plot comm.** Port the plot comm types. New session events: a plot opened (comm id,
-   pre-render), updated, asked to be shown, and closed (including when R stops). A method to send
-   `did_change_plots_render_settings` on the UI comm. The real-Ark test gains: `plot(1:10)`
-   opens a comm with a PNG pre-render; `render` at 800×600 and pixel ratio 2 returns a
-   1600×1200 PNG; SVG and PDF render; `lines()` sends `update`; closing the comm frees the plot.
+1. **Runtime plot comm.** *(Done.)* Port the plot comm types. New session events: a plot opened
+   (comm id, pre-render), updated, asked to be shown, and closed (including when R stops).
+   `RSession::render_plot` and `plot_metadata` wrap the RPCs. `set_plot_render_settings`
+   sends `did_change_plots_render_settings` on the UI comm, only when the settings change. The
+   session keeps them and sends them again after `frontend_ready` when R restarts. The
+   real-Ark test checks that:
+   - `plot(1:10)` opens a comm whose pre-render is 1000×600 after asking for 500×300 at 2x;
+   - `render` at 800×600 and 2x returns a 1600×1200 PNG, in about 35 ms;
+   - SVG and PDF render;
+   - `get_metadata` returns the code;
+   - `lines()` sends `update` with a new pre-render;
+   - after a plot's comm closes, the next plot gets a new one.
+
+   `parse_method` now keeps an empty `params` for methods that take parameters, such as
+   `show`, and drops it only for methods without any.
 2. **`plots_panel`.** A right-dock Plots pane. It shows the current plot fitted to the pane,
    using the pre-render at once and then a render at the pane's exact size and scale. Resizing
    re-renders after a short pause and sends the new settings to Ark. Back/forward arrows with

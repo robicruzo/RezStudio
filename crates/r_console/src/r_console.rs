@@ -624,7 +624,10 @@ impl ConsolePanel {
             | SessionEvent::Variables(_)
             | SessionEvent::DataExplorerOpened { .. }
             | SessionEvent::DataExplorerEvent { .. }
-            | SessionEvent::DataExplorerClosed { .. } => {}
+            | SessionEvent::DataExplorerClosed { .. }
+            | SessionEvent::PlotOpened { .. }
+            | SessionEvent::PlotEvent { .. }
+            | SessionEvent::PlotClosed { .. } => {}
         }
     }
 

@@ -554,6 +554,15 @@ mod integration_tests {
                 == Some(&request.header.msg_id)
     }
 
+    /// A PNG's width and height, from its header.
+    fn png_size(bytes: &[u8]) -> (u32, u32) {
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+        let read = |start: usize| {
+            u32::from_be_bytes(bytes.get(start..start + 4).unwrap().try_into().unwrap())
+        };
+        (read(16), read(20))
+    }
+
     fn is_child_of(message: &JupyterMessage, request: &JupyterMessage) -> bool {
         message.parent_header.as_ref().map(|header| &header.msg_id) == Some(&request.header.msg_id)
     }
@@ -1120,6 +1129,123 @@ mod integration_tests {
                     .null_count
                     .is_some_and(|count| count > 0)
             );
+
+            // Each new plot gets a comm with a PNG drawn at the size the
+            // frontend last asked for, and can be redrawn at any size.
+            let settings = crate::comms::PlotRenderSettings {
+                size: crate::comms::PlotSize {
+                    width: 500,
+                    height: 300,
+                },
+                pixel_ratio: 2.0,
+                format: crate::comms::PlotRenderFormat::Png,
+            };
+            kernel
+                .send_shell(jupyter_protocol::CommMsg {
+                    comm_id: ui_comm.clone(),
+                    data: serde_json::from_value(
+                        serde_json::to_value(
+                            crate::comms::UiBackendEvent::DidChangePlotsRenderSettings { settings },
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                })
+                .await;
+            let (_, messages) = kernel.execute("plot(1:10)").await;
+            let plot_open = |messages: &[(&'static str, JupyterMessage)]| {
+                messages
+                    .iter()
+                    .find_map(|(_, message)| match &message.content {
+                        JupyterMessageContent::CommOpen(open)
+                            if open.target_name == crate::comms::PLOT_COMM_TARGET =>
+                        {
+                            Some(open.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("no plot comm in {:#?}", summarize(messages)))
+            };
+            let plot = plot_open(&messages);
+            let open_data: crate::comms::PlotOpenData =
+                serde_json::from_value(serde_json::Value::Object(plot.data.clone())).unwrap();
+            let pre_render = open_data.pre_render.expect("a new plot comes drawn");
+            assert_eq!(pre_render.mime_type, "image/png");
+            assert_eq!(png_size(&pre_render.decode().unwrap()), (1000, 600));
+
+            let render = |width: i64, height: i64, format: &str| {
+                serde_json::json!({
+                    "size": { "width": width, "height": height },
+                    "pixel_ratio": 2.0,
+                    "format": format,
+                })
+            };
+            let render_started = Instant::now();
+            let png: crate::comms::PlotResult = serde_json::from_value(
+                kernel
+                    .comm_rpc(&plot.comm_id, "render", render(800, 600, "png"))
+                    .await,
+            )
+            .unwrap();
+            let render_time = render_started.elapsed();
+            assert_eq!(png_size(&png.decode().unwrap()), (1600, 1200));
+            eprintln!("plots: an 800×600 render at 2x in {render_time:?}");
+            let svg: crate::comms::PlotResult = serde_json::from_value(
+                kernel
+                    .comm_rpc(&plot.comm_id, "render", render(800, 600, "svg"))
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(svg.mime_type, "image/svg+xml");
+            let svg_text = String::from_utf8(svg.decode().unwrap()).unwrap();
+            assert!(svg_text.contains("<svg"), "{svg_text:.200}");
+            let pdf: crate::comms::PlotResult = serde_json::from_value(
+                kernel
+                    .comm_rpc(&plot.comm_id, "render", render(800, 600, "pdf"))
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(pdf.mime_type, "application/pdf");
+            assert!(pdf.decode().unwrap().starts_with(b"%PDF"));
+            let metadata: crate::comms::PlotMetadata = serde_json::from_value(
+                kernel
+                    .comm_rpc(&plot.comm_id, "get_metadata", serde_json::Value::Null)
+                    .await,
+            )
+            .unwrap();
+            assert!(!metadata.name.is_empty(), "{metadata:?}");
+            assert_eq!(metadata.code, "plot(1:10)");
+
+            // Drawing on the same plot updates it rather than opening another.
+            let (_, messages) = kernel.execute("lines(10:1)").await;
+            let update = messages
+                .iter()
+                .find_map(|(_, message)| match &message.content {
+                    JupyterMessageContent::CommMsg(comm) if comm.comm_id == plot.comm_id => {
+                        parse_method::<crate::comms::PlotEvent>(serde_json::Value::Object(
+                            comm.data.clone(),
+                        ))
+                        .ok()
+                    }
+                    _ => None,
+                });
+            let Some(crate::comms::PlotEvent::Update {
+                pre_render: Some(updated),
+            }) = update
+            else {
+                panic!("expected an update in {:#?}", summarize(&messages));
+            };
+            assert_eq!(png_size(&updated.decode().unwrap()), (1000, 600));
+
+            // Closing a plot's comm frees it; the next plot gets a new comm.
+            kernel
+                .send_shell(jupyter_protocol::CommClose {
+                    comm_id: plot.comm_id.clone(),
+                    data: serde_json::Map::new(),
+                })
+                .await;
+            let (_, messages) = kernel.execute("plot(2:3)").await;
+            assert_ne!(plot_open(&messages).comm_id, plot.comm_id);
 
             kernel
                 .connections

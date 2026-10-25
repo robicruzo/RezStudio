@@ -11885,6 +11885,7 @@ dependencies = [
  "anyhow",
  "async-dispatcher",
  "async-trait",
+ "base64",
  "collections",
  "futures 0.3.34",
  "gpui",

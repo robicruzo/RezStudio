@@ -60,6 +60,9 @@ pub enum LspCommMessage {
 pub enum UiBackendEvent {
     #[serde(rename = "frontend_ready")]
     FrontendReady { start_type: String },
+    /// The size new plots should be drawn at, so they arrive ready to show.
+    #[serde(rename = "did_change_plots_render_settings")]
+    DidChangePlotsRenderSettings { settings: PlotRenderSettings },
 }
 
 /// Events the backend sends to the frontend on the UI comm.
@@ -276,14 +279,21 @@ pub fn parse_method<T: serde::de::DeserializeOwned>(message: Value) -> serde_jso
     if let Some(method) = message.remove("method") {
         normalized.insert("method".to_string(), method);
     }
-    match message.remove("params") {
-        None | Some(Value::Null) => {}
-        Some(Value::Object(params)) if params.is_empty() => {}
-        Some(params) => {
-            normalized.insert("params".to_string(), params);
-        }
+    let params = match message.remove("params") {
+        None | Some(Value::Null) => None,
+        Some(params) => Some(params),
+    };
+    let without_params = normalized.clone();
+    let Some(params) = params else {
+        return serde_json::from_value(Value::Object(without_params));
+    };
+    let params_are_empty = params.as_object().is_some_and(|params| params.is_empty());
+    normalized.insert("params".to_string(), params);
+    match serde_json::from_value(Value::Object(normalized)) {
+        // A method without parameters rejects even empty ones.
+        Err(_) if params_are_empty => serde_json::from_value(Value::Object(without_params)),
+        result => result,
     }
-    serde_json::from_value(Value::Object(normalized))
 }
 
 // Variables comm (`positron.variables`), from Ark 0.1.252's `variables_comm.rs`.
@@ -644,6 +654,116 @@ pub enum DataExplorerEvent {
     ReturnColumnProfiles(ReturnColumnProfiles),
 }
 
+// Plot comm (`positron.plot`), from Ark 0.1.252's `plot_comm.rs`. Ark opens
+// one per plot.
+
+/// A size in logical pixels; `pixel_ratio` scales it to device pixels.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlotSize {
+    pub width: i64,
+    pub height: i64,
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PlotRenderFormat {
+    Png,
+    Jpeg,
+    Svg,
+    Pdf,
+    Tiff,
+}
+
+impl PlotRenderFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Svg => "svg",
+            Self::Pdf => "pdf",
+            Self::Tiff => "tiff",
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlotRenderSettings {
+    pub size: PlotSize,
+    pub pixel_ratio: f64,
+    pub format: PlotRenderFormat,
+}
+
+/// A rendered plot.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlotResult {
+    /// The image, base64-encoded. Ark leaves out the `=` padding.
+    pub data: String,
+    pub mime_type: String,
+    pub settings: Option<PlotRenderSettings>,
+}
+
+impl PlotResult {
+    pub fn decode(&self) -> anyhow::Result<Vec<u8>> {
+        use base64::Engine as _;
+        let engine = base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new()
+                .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+        );
+        engine
+            .decode(self.data.trim())
+            .map_err(|error| anyhow::anyhow!("Ark sent a plot that isn't valid base64: {error}"))
+    }
+}
+
+/// Data sent with the `comm_open` Ark makes for a new plot.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PlotOpenData {
+    /// The plot drawn at the last size the frontend asked for.
+    #[serde(default)]
+    pub pre_render: Option<PlotResult>,
+}
+
+/// Parameters for `render`.
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RenderParams {
+    /// Without a size, Ark uses the plot's intrinsic size, which most plots lack.
+    pub size: Option<PlotSize>,
+    pub pixel_ratio: f64,
+    pub format: PlotRenderFormat,
+}
+
+/// The reply to `get_metadata`. Only the fields RezStudio uses are listed.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PlotMetadata {
+    /// A human-readable name such as `ggplot2 1`.
+    pub name: String,
+    /// What drew it, such as `ggplot2` or `base`.
+    pub kind: String,
+    /// The code that drew it.
+    #[serde(default)]
+    pub code: String,
+}
+
+/// Events the backend sends on a plot comm. Each may carry a fresh render at
+/// the last size the frontend asked for.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "method", content = "params")]
+pub enum PlotEvent {
+    /// More was drawn on the plot, as by `lines()` after `plot()`.
+    #[serde(rename = "update")]
+    Update {
+        #[serde(default)]
+        pre_render: Option<PlotResult>,
+    },
+    /// R asks for the plot to be brought to the front.
+    #[serde(rename = "show")]
+    Show {
+        #[serde(default)]
+        pre_render: Option<PlotResult>,
+    },
+}
+
 /// The data of a comm RPC request: JSON-RPC's `id` must equal the Jupyter
 /// message id, which is how Ark tells a request from an event. Pass `Null`
 /// for methods without parameters, which Ark rejects if `params` is present.
@@ -687,6 +807,74 @@ pub fn rpc_error(message: impl Into<String>) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_plot_messages() {
+        // "hello" in base64 is "aGVsbG8=", which Ark sends without the padding.
+        let pre_render = json!({
+            "data": "aGVsbG8",
+            "mime_type": "image/png",
+            "settings": { "size": { "width": 640, "height": 400 }, "pixel_ratio": 1.0, "format": "png" }
+        });
+        let open: PlotOpenData =
+            serde_json::from_value(json!({ "pre_render": pre_render })).unwrap();
+        let result = open.pre_render.unwrap();
+        assert_eq!(result.decode().unwrap(), b"hello");
+        assert_eq!(
+            result.settings.map(|settings| settings.size),
+            Some(PlotSize {
+                width: 640,
+                height: 400
+            })
+        );
+        let padded = PlotResult {
+            data: "aGVsbG8=".into(),
+            ..result
+        };
+        assert_eq!(padded.decode().unwrap(), b"hello");
+        assert_eq!(
+            serde_json::from_value::<PlotOpenData>(json!({})).unwrap(),
+            PlotOpenData::default()
+        );
+
+        let event: PlotEvent =
+            parse_method(json!({ "method": "update", "params": { "pre_render": null } })).unwrap();
+        assert_eq!(event, PlotEvent::Update { pre_render: None });
+        let event: PlotEvent = parse_method(json!({ "method": "show", "params": {} })).unwrap();
+        assert_eq!(event, PlotEvent::Show { pre_render: None });
+
+        assert_eq!(
+            serde_json::to_value(UiBackendEvent::DidChangePlotsRenderSettings {
+                settings: PlotRenderSettings {
+                    size: PlotSize {
+                        width: 500,
+                        height: 300
+                    },
+                    pixel_ratio: 2.0,
+                    format: PlotRenderFormat::Png,
+                },
+            })
+            .unwrap(),
+            json!({
+                "method": "did_change_plots_render_settings",
+                "params": { "settings": {
+                    "size": { "width": 500, "height": 300 }, "pixel_ratio": 2.0, "format": "png"
+                }}
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(RenderParams {
+                size: Some(PlotSize {
+                    width: 800,
+                    height: 600
+                }),
+                pixel_ratio: 2.0,
+                format: PlotRenderFormat::Svg,
+            })
+            .unwrap(),
+            json!({ "size": { "width": 800, "height": 600 }, "pixel_ratio": 2.0, "format": "svg" })
+        );
+    }
 
     #[test]
     fn test_parses_frontend_events() {
