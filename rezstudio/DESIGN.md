@@ -130,7 +130,7 @@ packages and addins that call `rstudioapi` keep working.
 | M1 | `runtime` + `console` for R *(done)* | Ark bundled; R discovered; Cmd+Enter / Cmd+Shift+S run code; interrupt and restart work; rich output in the console; Ark LSP completions in the editor and console. |
 | M2 | Environment + data viewer *(done)* | Live variables; `View(df)` opens the paged grid on a 10M-row frame without lag. |
 | M3 | Plots *(done)* | Plot history, resize re-render, export. |
-| M4 | Packages + search | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
+| M4 | Packages + search *(done)* | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
 | M5 | Rmd/Quarto inline chunks | Chunk execution with inline output. |
 | M6 | Help + Viewer | WKWebView embedded; help, htmlwidgets, Shiny. |
 | M7 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
@@ -409,7 +409,7 @@ saved PNG, SVG and PDF files open in Preview; a copied plot pastes into another 
 zoom window redraws as it's resized. All met: checked by hand, including dragging the dock,
 save, copy and zoom, with CI green on every job.
 
-### M4 plan
+### M4 plan (done)
 
 Decisions:
 - The Packages pane goes in the right dock beside Environment and Plots, one shown at a
@@ -521,17 +521,33 @@ Steps:
    - **Checked live:** the installed list with update badges and "Update All (28)" appeared.
      "ggpl" showed the 5 installed matches, then available ones from CRAN, Bioconductor
      and other universes. `library(tidyverse)` in the console ticked ggplot2's box.
-4. **Tests.** Unit tests drive the pane with scripted comm replies: the installed list,
-   attached state, filtering, the install command chosen for CRAN, Bioconductor, an
-   r-universe package and renv, update badges, and refresh after executions. The index has
-   unit tests for parsing, ranking and a stale or broken cache, plus a timing check on the
-   full-size index.
+4. **Tests.** *(Done.)* Unit tests drive the pane with scripted comm replies:
+   - the installed list, its attached state and updates;
+   - refreshing after executions, and not while hidden;
+   - details;
+   - R stopping;
+   - filtering and search;
+   - the exact code for attach, detach, install (CRAN, Bioconductor, r-universe), update
+     all and remove (after asking);
+   - renv's install and remove.
+
+   The index has tests for:
+   - downloading, storing and reloading;
+   - where packages install from;
+   - a failed, too-small or broken download;
+   - ranking;
+   - search speed on a full-size index;
+   - an ignored live download.
+
+   The real-Ark test covers `pkg_list`, `pkg_detail` and `evaluate_code`.
 
 Done when: the installed list matches `installed.packages()`, and the checkbox follows
 `library()` and `detach()`. Typing "ggpl" with the network off lists ggplot2 and its
 relatives at once. Installing from search runs in the console and the list updates
 afterwards. Outdated packages are marked and update from the pane. In an renv project,
-Install uses renv.
+Install uses renv. Met with CI green on every job. Checked by hand: the checkbox, Install
+from search, details and Update. Search reads only the copy on disk, so it works offline,
+and renv's commands are covered by tests; neither was tried by hand.
 
 ## Risks
 
