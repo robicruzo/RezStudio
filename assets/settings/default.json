@@ -1403,7 +1403,9 @@
   //      "soft_wrap": "editor_width",
   // 3. Soft wrap lines at the preferred line length or the editor width (whichever is smaller).
   //      "soft_wrap": "bounded",
-  "soft_wrap": "none",
+  // RezStudio wraps at the editor's width, so code stays readable when the
+  // panes beside the editor are widened.
+  "soft_wrap": "editor_width",
   // How to indent soft-wrapped continuation lines.
   //   "none"      - start at column 0
   //   "same"      - match original line's indentation (default)

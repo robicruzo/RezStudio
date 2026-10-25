@@ -106,6 +106,11 @@ languages without language-specific code paths beyond formatting.
   environment/history top-right, files/plots/packages/help/viewer bottom-right). Zed's docks
   show one panel at a time, switched from the status bar, so this needs the dock changes M7
   plans.
+- `assets/settings`: lines soft-wrap at the editor's width by default (Zed's default is not
+  to wrap), so code stays readable when the panes beside the editor are widened. Users can
+  turn it off with `"soft_wrap": "none"`, globally or per language. Tests keep Zed's default,
+  as `settings::test_settings` does for AI and telemetry, since Zed's editor and search tests
+  assume lines don't wrap.
 - `assets/keymaps`: RStudio-style default keymap (Cmd+Enter, Cmd+Shift+Enter, Cmd+Shift+S,
   Cmd+Shift+M for the pipe, Opt+- for `<-`, Cmd+Opt+I for a new chunk, Ctrl+1/2 to focus the
   source or console). Zed's keymap remains available as an alternative.
