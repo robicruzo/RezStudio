@@ -355,6 +355,15 @@ Steps:
    - **Freeing images:** replaced and removed images are freed with `App::drop_image`, since
      the GPU atlas keeps them otherwise.
    - **Ordering:** renders are numbered, so one that finishes late can't replace a newer one.
+   - **Settled sizes only:** plots are drawn only at a size the pane has settled on, never
+     at the size of the moment. Zed animates dock resizes, and a render or decode that
+     finished mid-drag used to start another at whatever width the dock had right then.
+     That's how a fast drag asked R for a plot 65 px wide.
+   - **Minimum size:** below 120 px, R fails with "invalid graphics state", so the pane
+     shows the last image scaled instead.
+   - **Errors:** a failed render keeps the last image and shows one line over the plot,
+     with the full text in a tooltip. Showing R's whole error and backtrace above the plot
+     used to shrink the plot area to 0 px tall, which stopped all redraws.
    - **Checked live:** `plot()` and a ggplot2 plot drawn after startup appear at once. The
      first arrives at Ark's 640×400 default and is redrawn to fit; the second arrives already
      fitted.

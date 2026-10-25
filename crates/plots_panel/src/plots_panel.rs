@@ -40,8 +40,9 @@ actions!(
 const PANEL_KEY: &str = "PlotsPanel";
 /// Dragging the dock's edge resizes it every frame; R redraws once it settles.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(150);
-/// Smaller than this, R can't fit a plot's margins.
-const MIN_PLOT_SIZE: i64 = 32;
+/// Smaller than this, R often can't fit a plot's margins and fails with
+/// "figure margins too large" or "invalid graphics state".
+const MIN_PLOT_SIZE: i64 = 120;
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -63,8 +64,11 @@ pub struct PlotsPanel {
     workspace_id: EntityId,
     session: Option<Entity<RSession>>,
     history: PlotHistory<PlotImage>,
-    /// The plot area's size in logical pixels and the screen's scale, once laid out.
+    /// The plot area's size in logical pixels and the screen's scale, as last laid out.
     viewport: Option<(PlotSize, f32)>,
+    /// The viewport once it stopped changing. Plots are only drawn at this
+    /// size: mid-drag sizes are passing, and very narrow ones make R fail.
+    settled_viewport: Option<(PlotSize, f32)>,
     focus_handle: FocusHandle,
     position: DockPosition,
     /// The last failure, shown under the toolbar.
@@ -110,6 +114,7 @@ impl PlotsPanel {
             session: None,
             history: PlotHistory::default(),
             viewport: None,
+            settled_viewport: None,
             focus_handle: cx.focus_handle(),
             position: DockPosition::Right,
             error: None,
@@ -206,7 +211,7 @@ impl PlotsPanel {
 
     /// The settings that draw a plot to fill the pane exactly.
     fn desired_settings(&self) -> Option<PlotRenderSettings> {
-        let (size, scale) = self.viewport?;
+        let (size, scale) = self.settled_viewport?;
         (size.width >= MIN_PLOT_SIZE && size.height >= MIN_PLOT_SIZE).then_some(
             PlotRenderSettings {
                 size,
@@ -239,6 +244,7 @@ impl PlotsPanel {
     }
 
     fn apply_viewport(&mut self, cx: &mut Context<Self>) {
+        self.settled_viewport = self.viewport;
         self.send_render_settings(cx);
         self.ensure_render(cx);
     }
@@ -288,7 +294,7 @@ impl PlotsPanel {
                 Ok(result) => this.accept_render(comm_id, result, Some(settings), cx),
                 Err(error) => {
                     this.finish_pending(&comm_id, Some(settings));
-                    this.error = Some(format!("{error:#}"));
+                    this.error = Some(describe_error(&error));
                     cx.notify();
                 }
             })
@@ -342,7 +348,7 @@ impl PlotsPanel {
                         }
                         this.error = None;
                     }
-                    Err(error) => this.error = Some(format!("{error:#}")),
+                    Err(error) => this.error = Some(describe_error(&error)),
                 }
                 this.ensure_render(cx);
                 cx.notify();
@@ -494,6 +500,21 @@ impl PlotsPanel {
     }
 }
 
+/// One line for the pane: Ark's errors carry R's message, wrapped in Ark's
+/// own context and followed by R and Rust backtraces.
+fn describe_error(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    let first_line = message.lines().next().unwrap_or_default().trim();
+    let message = first_line
+        .strip_prefix("Failed to process positron.plot request: ")
+        .unwrap_or(first_line);
+    let message = match message.strip_prefix("Error evaluating '") {
+        Some(rest) => rest.split_once("': ").map_or(message, |(_, reason)| reason),
+        None => message,
+    };
+    format!("R couldn't draw the plot: {message}")
+}
+
 impl Render for PlotsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
@@ -517,12 +538,6 @@ impl Render for PlotsPanel {
             .size_full()
             .bg(cx.theme().colors().panel_background)
             .child(self.render_toolbar(cx))
-            .children(self.error.clone().map(|error| {
-                div()
-                    .px_2()
-                    .py_1()
-                    .child(Label::new(error).size(LabelSize::Small).color(Color::Error))
-            }))
             .child(
                 div()
                     .relative()
@@ -548,6 +563,29 @@ impl Render for PlotsPanel {
                                 .size_full()
                                 .object_fit(ObjectFit::Contain),
                         )
+                    }))
+                    // Over the plot rather than above it, so an error never
+                    // changes the size plots are drawn at.
+                    .children(self.error.clone().map(|error| {
+                        div()
+                            .id("plot-error")
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .right_0()
+                            .px_2()
+                            .py_1()
+                            .bg(cx.theme().colors().panel_background)
+                            .border_t_1()
+                            .border_color(cx.theme().colors().border_variant)
+                            .tooltip(Tooltip::text(error.clone()))
+                            .child(
+                                Label::new(error)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Error)
+                                    .single_line()
+                                    .truncate(),
+                            )
                     }))
                     .children(placeholder.map(|text| {
                         div()
@@ -827,6 +865,25 @@ mod tests {
             );
         }
 
+        fn reply(&self, request: &JupyterMessage, data: Value, cx: &mut VisualTestContext) {
+            let Value::Object(data) = data else {
+                panic!("reply data must be an object");
+            };
+            let JupyterMessageContent::CommMsg(comm) = &request.content else {
+                panic!("expected a comm request");
+            };
+            self.receive(
+                JupyterMessage::new(
+                    CommMsg {
+                        comm_id: comm.comm_id.clone(),
+                        data,
+                    },
+                    Some(request),
+                ),
+                cx,
+            );
+        }
+
         /// The settings that fill the pane as it's laid out now.
         fn drawn_at(&self, cx: &mut VisualTestContext) -> Value {
             let settings = self
@@ -995,6 +1052,95 @@ mod tests {
             "the pane measured its new width"
         );
         harness.answer_render("plot-1", cx);
+        assert!(harness.requests().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_dragging_the_dock_edge_redraws(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        harness.resize(800., cx);
+        harness.open_plot("plot-1", ark_default(), cx);
+        harness.answer_render("plot-1", cx);
+        let width = harness.drawn_at(cx)["size"]["width"].as_f64().unwrap() as f32;
+
+        // Drag the dock's left edge 100 pixels further left.
+        let edge = gpui::point(px(1200. - width - 1.), px(400.));
+        cx.simulate_mouse_down(edge, gpui::MouseButton::Left, Default::default());
+        for step in 1..=10 {
+            cx.simulate_mouse_move(
+                gpui::point(edge.x - px(10. * step as f32), edge.y),
+                gpui::MouseButton::Left,
+                Default::default(),
+            );
+        }
+        cx.simulate_mouse_up(
+            gpui::point(edge.x - px(100.), edge.y),
+            gpui::MouseButton::Left,
+            Default::default(),
+        );
+        cx.run_until_parked();
+        harness.settle(cx);
+        let new_width = harness.drawn_at(cx)["size"]["width"].as_f64().unwrap() as f32;
+        assert!(
+            (new_width - width - 100.).abs() <= 2.,
+            "the pane is {new_width} wide after dragging from {width}"
+        );
+        harness.answer_render("plot-1", cx);
+        assert!(harness.requests().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_draws_only_settled_sizes_and_survives_failures(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        harness.open_plot("plot-1", ark_default(), cx);
+        let first_size = harness.drawn_at(cx);
+        let (render, message) = harness.drain().pop().expect("a render");
+        assert_eq!(render.method, "render");
+
+        // A render that lands mid-resize doesn't start another at a passing size.
+        harness.resize(700., cx);
+        harness.reply(
+            &message,
+            json!({ "method": "render", "result": pre_render(first_size) }),
+            cx,
+        );
+        assert!(
+            harness.requests().is_empty(),
+            "nothing drawn until resizing stops"
+        );
+        harness.settle(cx);
+        harness.answer_render("plot-1", cx);
+
+        // When R can't draw at a size, the last image stays and one line says why,
+        // over the plot so the pane's size doesn't change.
+        harness.resize(650., cx);
+        harness.settle(cx);
+        let viewport = harness.panel.read_with(cx, |panel, _| panel.viewport);
+        let (_, message) = harness.drain().pop().expect("a render");
+        harness.reply(
+            &message,
+            json!({ "error": { "code": -32603, "message": "Failed to process positron.plot request: Error evaluating 'value[[3L]](cond)': invalid graphics state\n\nR backtrace:\n0. tryCatchOne(expr, names, parentenv, handlers[[1L]])" } }),
+            cx,
+        );
+        harness.panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel.error.as_deref(),
+                Some("R couldn't draw the plot: invalid graphics state")
+            );
+            assert!(panel.history.current().unwrap().image.is_some());
+            assert_eq!(panel.viewport, viewport);
+        });
+        harness.resize(600., cx);
+        harness.settle(cx);
+        harness.answer_render("plot-1", cx);
+        assert_eq!(
+            harness.panel.read_with(cx, |panel, _| panel.error.clone()),
+            None
+        );
+
+        // Too small to draw: the last image is shown scaled instead.
+        harness.resize(150., cx);
+        harness.settle(cx);
         assert!(harness.requests().is_empty());
     }
 
