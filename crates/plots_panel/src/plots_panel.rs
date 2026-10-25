@@ -971,6 +971,34 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_resizing_the_dock_redraws(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        harness.open_plot("plot-1", ark_default(), cx);
+        harness.answer_render("plot-1", cx);
+        let before = harness.drawn_at(cx);
+
+        harness.workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_panel_size_state::<PlotsPanel>(
+                workspace::dock::PanelSizeState {
+                    size: Some(px(520.)),
+                    flex: None,
+                },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        harness.settle(cx);
+        assert_ne!(
+            harness.drawn_at(cx),
+            before,
+            "the pane measured its new width"
+        );
+        harness.answer_render("plot-1", cx);
+        assert!(harness.requests().is_empty());
+    }
+
+    #[gpui::test]
     async fn test_plots_outlive_r(cx: &mut TestAppContext) {
         let (mut harness, cx) = Harness::new(cx).await;
         harness.open_plot("plot-1", ark_default(), cx);
