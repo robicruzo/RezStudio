@@ -129,7 +129,7 @@ packages and addins that call `rstudioapi` keep working.
 | M0 | Fork surgery and rebrand | AI/collab/cloud crates gone, `client`/`telemetry` stubbed, app renamed, builds green on Linux CI and macOS CI. |
 | M1 | `runtime` + `console` for R *(done)* | Ark bundled; R discovered; Cmd+Enter / Cmd+Shift+S run code; interrupt and restart work; rich output in the console; Ark LSP completions in the editor and console. |
 | M2 | Environment + data viewer *(done)* | Live variables; `View(df)` opens the paged grid on a 10M-row frame without lag. |
-| M3 | Plots | Plot history, resize re-render, export. |
+| M3 | Plots *(done)* | Plot history, resize re-render, export. |
 | M4 | Packages + search | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
 | M5 | Rmd/Quarto inline chunks | Chunk execution with inline output. |
 | M6 | Help + Viewer | WKWebView embedded; help, htmlwidgets, Shiny. |
@@ -295,7 +295,7 @@ Done when: assignments in the console appear in the Environment pane immediately
 expand, and `View()` of a 10M-row data frame opens and scrolls without visible lag. All met:
 checked by hand down to the 10,000,000th row, with CI green on every job.
 
-### M3 plan
+### M3 plan (done)
 
 Decisions: the Plots pane goes in the right dock beside Environment, one shown at a time like
 RStudio's tabs; a new plot brings Plots to the front, opening the dock if needed, without
@@ -390,14 +390,24 @@ Steps:
    - **Checked live:** Copy put the plot's PNG on the macOS clipboard. The zoom window opened.
      While the main window was in macOS full screen, its bounds looked odd, which is worth
      checking by hand.
-4. **Tests.** Unit tests drive the pane with scripted plot comms: history, navigation, delete,
-   resize renders (only the latest kept), updates, `show`, R stopping, and export writing the
-   decoded file.
+4. **Tests.** *(Done.)* Unit tests drive the pane with scripted plot comms:
+   - history, navigation, remove and clear;
+   - opening without taking focus;
+   - window, dock and mouse-drag resizes, drawing only the size it settles at;
+   - renders that land mid-resize;
+   - failed renders and the minimum size;
+   - updates, `show` and R stopping;
+   - copy, the save dialog and the saved file, and the SVG hint;
+   - the zoom window.
+
+   The real-Ark test (macOS CI, with svglite installed) covers pre-renders at the pane's size,
+   PNG/SVG/PDF renders, metadata, updates, and closing a plot.
 
 Done when: `plot(1:10)` and a ggplot2 plot appear in Plots straight away and sharp on a Retina
 screen; resizing the dock redraws them at the new size; the arrows step through history;
 saved PNG, SVG and PDF files open in Preview; a copied plot pastes into another app; and the
-zoom window redraws as it's resized.
+zoom window redraws as it's resized. All met: checked by hand, including dragging the dock,
+save, copy and zoom, with CI green on every job.
 
 ## Risks
 
