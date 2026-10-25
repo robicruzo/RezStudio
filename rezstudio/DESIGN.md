@@ -699,6 +699,91 @@ All met, with CI green on every job:
 - **Checked live:** highlighting and `mtc` offering `mtcars`.
 - **Not tried by hand:** Quarto (`.qmd`), which shares R Markdown's code and has tests.
 
+### M6 plan
+
+Decisions:
+- Help and Viewer join the right dock as two more tabs, next to Environment, Plots and
+  Packages.
+- Shiny apps and other `http://127.0.0.1` / `localhost` URLs open in the Viewer, with a
+  button to pop out to the browser. Other web URLs still go to the browser.
+- Every htmlwidget, plot-like or not, shows in the Viewer. Plots keeps R's own plots.
+- F1 opens help for the symbol under the cursor in R files, R Markdown chunks and the
+  console.
+
+Findings that shape the plan (Ark 0.1.252, and the crates in Zed's tree):
+
+- **Help:** comes over a `positron.help` comm that the frontend opens.
+  - `?topic`, `help()` and help links reach R's `browseURL`, which Ark turns into a
+    `show_help` event: `{content, kind: "url", focus}`. The URL is on Ark's help proxy at
+    `http://127.0.0.1:<port>/`, which rewrites R's help server pages.
+  - The `show_help_topic {topic}` request looks a topic up, returning whether it found
+    one.
+- **Topic at a position:** Ark's language server answers
+  `positron/textDocument/helpTopic` with `{textDocument: {uri, version}, position}` and
+  returns `{topic}` or null, handling `pkg::fn`. For chunks and the console, it's asked
+  about their hidden documents (M4 and M5).
+- **Viewer:** fed by UI comm events.
+  - `show_html_file {path, title, destination, height}` comes from htmlwidgets, whose HTML
+    is in R's temp directory with its `*_files/` dependencies beside it. `destination` is
+    `plot`, `viewer` or `editor`. `height` is in pixels, 0 means no preference and -1 as
+    tall as possible.
+  - `show_url {url}` comes from `browseURL` with an `http(s)` URL, which is how
+    `shiny::runApp()` opens its app.
+  - RezStudio currently sends both to the system browser.
+- **Web view:** `wry` (Tauri's web view crate, MIT/Apache) makes a WKWebView a child of a
+  window from a `raw-window-handle`, which GPUI's `Window` provides. `set_bounds` places
+  it, and custom protocols can serve local files. It builds on the `objc2` 0.6 family
+  already in the tree.
+- **Overlap:** a native view draws over GPUI's Metal layer. Whatever GPUI paints in its
+  rectangle is hidden: menus, tooltips, the command palette, modals. It also has to be
+  hidden whenever its pane isn't painted.
+
+Steps:
+
+1. **Runtime.**
+   - The session opens the help comm at startup, after the variables comm, and emits
+     `ShowHelp {url}`.
+   - `RSession::show_help_topic(topic)` asks the help comm to show a topic.
+   - `show_html_file` and `show_url` become session events instead of going to the
+     browser. Only web URLs that aren't local still go to the browser.
+   - The real-Ark test gains: `?mean` sends a help URL on the proxy's port that serves a
+     page; `show_help_topic("lm")` finds it; an htmlwidget sends `show_html_file` with a
+     file that exists.
+2. **`web_view`.** A GPUI element hosting a `wry` web view:
+   - **Placement:** sized and placed to the element's bounds every frame, and hidden in any
+     frame it isn't painted.
+   - **Overlap:** hidden while a modal is open, so it can't cover the command palette or a
+     dialog.
+   - **Local files:** served through a custom protocol scoped to the file's directory, so
+     htmlwidget dependencies load.
+   - **Navigation:** back, forward, reload, and the current URL and title for the pane's
+     toolbar. Links to other sites open in the browser.
+3. **`help_panel`.** A right-dock Help pane showing Ark's help pages:
+   - **Toolbar:** back, forward and home (the R help index), a topic search box (Enter runs
+     `show_help_topic`, and a miss says so), and open in browser.
+   - **Showing help:** `?topic` and help links show in the pane and bring it to the front;
+     `focus` moves focus to it.
+   - **F1:** in R editors, chunks and the console it asks Ark for the topic under the
+     cursor, then shows it.
+4. **`viewer_panel`.** A right-dock Viewer pane:
+   - **What it shows:** htmlwidgets from `show_html_file`, and local web apps from
+     `show_url`. Each one brings the pane to the front.
+   - **Toolbar:** a history of what was shown (back and forward, like Plots), reload, stop
+     for an app (interrupts R, as Shiny's console does), open in browser, and clear.
+   - **Sizing:** a widget's `height` is honoured as a minimum.
+5. **Tests.**
+   - **Unit tests:** the help comm and viewer events in the session; the Help pane's
+     history, topic search and F1 from scripted replies; the Viewer's history and what
+     opens where; and the web view element's hide-when-not-painted logic, with the web
+     view itself behind a trait so tests don't need WebKit.
+   - **Real-Ark test:** the step 1 checks.
+
+Done when: `?mean` shows R's help for `mean` in the Help pane, links in it work, and back
+and forward step through pages. F1 on `lm` in an R file, a chunk and the console opens its
+help. `plotly::plot_ly(mtcars, x = ~wt, y = ~mpg)` shows an interactive plot in the
+Viewer. `shiny::runApp()` on an example app runs it in the Viewer, and Stop ends it. Menus
+and the command palette are never hidden behind the web view.
+
 ## Risks
 
 - **Ark's comm protocol is Positron-driven and may change.** Mitigation: bundle a pinned Ark
