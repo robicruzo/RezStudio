@@ -421,44 +421,49 @@ fn out_of_sight(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
     }
 }
 
-/// The element a web view fills, placing the native view at its bounds.
-pub fn web_view(view: &Entity<WebView>, cx: &App) -> AnyElement {
-    if let Some(reason) = view.read(cx).unavailable.clone() {
-        return div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p_4()
-            .child(Label::new(reason).color(Color::Muted))
-            .into_any_element();
-    }
-    let snapshot = view
-        .read(cx)
-        .covered
-        .then(|| view.read(cx).snapshot.clone())
-        .flatten();
-    let view = view.clone();
-    div()
-        .relative()
-        .size_full()
-        .children(snapshot.map(|snapshot| {
-            img(ImageSource::Render(snapshot))
-                .absolute()
+/// A web view renders as the area its page fills, placing the native view
+/// at its bounds. It's a view of its own so that what changes it, such as a
+/// snapshot arriving, redraws it inside a cached pane.
+impl Render for WebView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(reason) = self.unavailable.clone() {
+            return div()
                 .size_full()
-                .object_fit(ObjectFit::Fill)
-        }))
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, cx| {
-                    view.update(cx, |view, cx| view.place(bounds, window, cx));
-                },
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .child(Label::new(reason).color(Color::Muted))
+                .into_any_element();
+        }
+        let snapshot = self.covered.then(|| self.snapshot.clone()).flatten();
+        let view = cx.entity();
+        div()
+            .relative()
+            .size_full()
+            .children(snapshot.map(|snapshot| {
+                div()
+                    .debug_selector(|| "web-view-snapshot".into())
+                    .absolute()
+                    .size_full()
+                    .child(
+                        img(ImageSource::Render(snapshot))
+                            .size_full()
+                            .object_fit(ObjectFit::Fill),
+                    )
+            }))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        view.update(cx, |view, cx| view.place(bounds, window, cx));
+                    },
+                )
+                .absolute()
+                .size_full(),
             )
-            .absolute()
-            .size_full(),
-        )
-        .into_any_element()
+            .into_any_element()
+    }
 }
 
 /// Calls `on_change` with whether GPUI content would be drawn over a native
@@ -600,8 +605,8 @@ mod tests {
     }
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(web_view(&self.view, cx))
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.view.clone())
         }
     }
 
@@ -678,6 +683,49 @@ mod tests {
             assert!(view.snapshot.is_none());
             assert_eq!(view.native_bounds, view.bounds);
         });
+    }
+
+    /// A pane in a dock, which redraws only when something it shows changes.
+    struct CachedPane {
+        host: Entity<Host>,
+    }
+
+    impl Render for CachedPane {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                gpui::AnyView::from(self.host.clone())
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn test_snapshot_draws_inside_a_cached_pane(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let factory = fake_factory(Rc::default());
+        let (pane, cx) = cx.add_window_view(|_, cx| {
+            let view = cx.new(|cx| WebView::with_factory(Some(factory), cx));
+            CachedPane {
+                host: cx.new(|_| Host { view }),
+            }
+        });
+        cx.run_until_parked();
+        let view = pane.read_with(cx, |pane, cx| pane.host.read(cx).view.clone());
+        view.update(cx, |view, cx| {
+            view.set_shown(true, cx);
+            view.set_covered(true, cx);
+        });
+        let events = view.read_with(cx, |view, _| view.events_for_test().unwrap());
+        events
+            .unbounded_send(NativeEvent::Snapshot(PNG.to_vec()))
+            .unwrap();
+        cx.run_until_parked();
+        // Nothing else changed, yet the snapshot is drawn in the page's place.
+        assert!(cx.debug_bounds("web-view-snapshot").is_some());
+
+        view.update(cx, |view, cx| view.set_covered(false, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("web-view-snapshot").is_none());
     }
 
     #[gpui::test]

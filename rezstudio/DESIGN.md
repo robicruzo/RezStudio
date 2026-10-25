@@ -790,6 +790,11 @@ Steps:
        place.
      - Snapshots don't scroll or take clicks, and the first one arrives a frame or two
        after the modal opens.
+     - `WebView` is a view of its own, rendered as a child of its pane. As plain state the
+       pane read while rendering, a snapshot arriving didn't redraw the docked pane, which
+       GPUI caches. So the pane stayed blank under the picker, and a theme preview showed
+       for a moment before the next snapshot freed the image the cached drawing still
+       used. A test draws the view inside a cached pane to keep this so.
    - **Local files:** `load_file` serves the file through a `rezfile://` scheme rooted at
      its folder, since WebKit won't let a page loaded from `file://` read files beside it.
      Paths are percent-encoded; anything outside the folder or with `..` gets a 403.

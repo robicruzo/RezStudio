@@ -15,7 +15,7 @@ use r_console::completions::{cursor_position, help_server, request_help_topic};
 use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
-use web_view::{WebView, WebViewEvent, watch_cover, web_view};
+use web_view::{WebView, WebViewEvent, watch_cover};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
@@ -561,7 +561,7 @@ impl Render for HelpPanel {
                     .flex_1()
                     .min_h_0()
                     .track_focus(&self.page_focus)
-                    .child(web_view(&self.web_view, cx))
+                    .child(self.web_view.clone())
                     .into_any_element()
             } else {
                 div()
