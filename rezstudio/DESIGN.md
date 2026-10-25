@@ -409,6 +409,82 @@ saved PNG, SVG and PDF files open in Preview; a copied plot pastes into another 
 zoom window redraws as it's resized. All met: checked by hand, including dragging the dock,
 save, copy and zoom, with CI green on every job.
 
+### M4 plan
+
+Decisions:
+- The Packages pane goes in the right dock beside Environment and Plots, one shown at a
+  time.
+- In a project with an active renv library, Install and Remove use `renv::install()` and
+  `renv::remove()`, and the pane shows an renv badge.
+- Search uses an offline index of CRAN, Bioconductor and R-universe, refreshed daily in the
+  background.
+- M4 includes updates: installed packages with a newer version are marked, with Update and
+  Update All.
+- Install, Remove, Update, and attaching or detaching all run in the console, so their
+  output is visible.
+
+Findings that shape the plan (Ark 0.1.252's `packages_pane.R` and `ui_comm.rs`, and the
+indexes' public APIs):
+
+- **R functions for the pane:** Ark already has them, reached through the UI comm's
+  `call_method` RPC (`{method, params}`), which runs `.ps.rpc.<method>` in R and returns
+  JSON:
+  - `pkg_list` gives installed packages (name, version, whether attached, description,
+    URL). It takes under 50 ms on a library of 250 packages, so it can rerun after every
+    execution.
+  - `pkg_detail(name)` gives the title, maintainer, license and repository.
+  - `pkg_outdated` gives packages with a newer version in the session's repositories. It
+    asks those repositories, so it needs the network.
+  - `evaluate_code` runs a line silently and returns its JSON value, for checking whether
+    renv is active (`RENV_PROJECT`).
+- **Ark's own search** (`pkg_search`) asks `pak` or `available.packages()` on every query.
+  That needs the network and is too slow per keystroke, so search uses our own index.
+- **The index:** r-universe's `api/search?q=` with an empty query lists every indexed
+  package, about 31,500, most used first, in pages of `limit`/`skip`. It covers CRAN
+  (universe `cran`, down to obscure packages), Bioconductor (`bioc`) and other universes.
+  Each record has the name, title, description, universe, reverse-dependency count and
+  stars. There's no version, and the `fields` filter is ignored, so a full listing is
+  about 36 MB of JSON, much less gzipped.
+- **Where a package installs from:** CRAN's `src/contrib/PACKAGES.gz` (2 MB) lists every
+  CRAN package and version. A package in it installs with `install.packages()`. One whose
+  universe is `bioc` installs with `BiocManager::install()`. Any other comes from its
+  universe, `https://<universe>.r-universe.dev`, ahead of the session's repositories.
+- **Running code from the pane:** `ConsolePanel::run_from_editor` runs code in the console
+  as Cmd+Enter does, showing the code and its output.
+
+Steps:
+
+1. **Runtime calls.** `RSession::call_method` and `evaluate_code` on the UI comm, and typed
+   replies for `pkg_list`, `pkg_detail` and `pkg_outdated`. The real-Ark test gains:
+   `pkg_list` includes `stats` as attached and `tools` as not; after `library(tools)` it's
+   attached; `pkg_detail("stats")` has a title; `evaluate_code` returns a value; an unknown
+   method returns an error.
+2. **`package_index`.** Downloads the r-universe listing and CRAN's `PACKAGES` in the
+   background, at most daily, and keeps a compact copy in RezStudio's data directory. A
+   failed refresh keeps the last copy. Search is fuzzy on the name, with matches in the
+   title and description after, ranked by how widely each package is used. Each keystroke
+   searches all 31,500 packages in under 10 ms, off the main thread.
+3. **`packages_panel`.** A right-dock Packages pane:
+   - **Filter box:** filters the installed list as you type, and shows matching packages
+     that aren't installed from the index below it.
+   - **Rows:** an attached checkbox, the name, the version, an update badge and the title.
+   - **Actions:** Install (from search), Remove, Update, Update All and Refresh.
+   - **Refresh:** after every execution while the pane is visible, and after its own
+     actions finish.
+   - **renv:** a badge and renv's install and remove in renv projects.
+   - **Detail:** `pkg_detail` on hover or expand.
+4. **Tests.** Unit tests drive the pane with scripted comm replies: the installed list,
+   attached state, filtering, the install command chosen for CRAN, Bioconductor, an
+   r-universe package and renv, update badges, and refresh after executions. The index has
+   unit tests for parsing, ranking and a stale or broken cache, plus a timing check on the
+   full-size index.
+
+Done when: the installed list matches `installed.packages()`, and the checkbox follows
+`library()` and `detach()`. Typing "ggpl" with the network off lists ggplot2 and its
+relatives at once. Installing from search runs in the console and the list updates
+afterwards. Outdated packages are marked and update from the pane. In an renv project,
+Install uses renv.
+
 ## Risks
 
 - **Ark's comm protocol is Positron-driven and may change.** Mitigation: bundle a pinned Ark
