@@ -145,6 +145,7 @@ outline_panel.workspace = true
 r_console.workspace = true
 variables_panel.workspace = true
 plots_panel.workspace = true
+packages_panel.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 picker.workspace = true

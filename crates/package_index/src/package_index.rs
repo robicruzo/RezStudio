@@ -89,7 +89,7 @@ pub fn init(cx: &mut App) {
     let path = paths::data_dir().join("package-index.json");
     let http_client = cx.http_client();
     let index = cx.new(|cx| PackageIndex::new(path, http_client, cx));
-    cx.set_global(GlobalPackageIndex(index));
+    PackageIndex::set_global(index, cx);
 }
 
 pub struct PackageIndex {
@@ -103,6 +103,24 @@ pub struct PackageIndex {
 }
 
 impl PackageIndex {
+    pub fn set_global(index: Entity<Self>, cx: &mut App) {
+        cx.set_global(GlobalPackageIndex(index));
+    }
+
+    /// An index of `packages` that never downloads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(packages: Vec<IndexedPackage>, http_client: Arc<dyn HttpClient>) -> Self {
+        Self {
+            path: PathBuf::new(),
+            http_client,
+            entries: Arc::new(packages.into_iter().map(Entry::new).collect()),
+            fetched_at: Some(SystemTime::now()),
+            status: IndexStatus::Ready,
+            download: None,
+            _schedule: Task::ready(()),
+        }
+    }
+
     pub fn global(cx: &App) -> Option<Entity<Self>> {
         cx.try_global::<GlobalPackageIndex>()
             .map(|global| global.0.clone())

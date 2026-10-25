@@ -490,15 +490,37 @@ Steps:
    - **Checked live:** an ignored test downloads the real index and searches it. "ggpl"
      finds ggplot2 first, "bayesian regression" finds brms, BART and rstanarm, and "sf"
      finds sf. The app starts the index in step 3, with the pane.
-3. **`packages_panel`.** A right-dock Packages pane:
-   - **Filter box:** filters the installed list as you type, and shows matching packages
-     that aren't installed from the index below it.
-   - **Rows:** an attached checkbox, the name, the version, an update badge and the title.
-   - **Actions:** Install (from search), Remove, Update, Update All and Refresh.
-   - **Refresh:** after every execution while the pane is visible, and after its own
-     actions finish.
-   - **renv:** a badge and renv's install and remove in renv projects.
-   - **Detail:** `pkg_detail` on hover or expand.
+3. **`packages_panel`.** *(Done.)* A right-dock Packages pane:
+   - **Filter box:** filters the installed list by name or description as you type, and
+     lists matching packages that aren't installed from the index below it, with where each
+     comes from (CRAN, Bioconductor or `<universe>.r-universe.dev`).
+   - **Rows:** an attached checkbox, the name, the version with an update badge
+     (`→ 3.7.0`) and the description. Clicking a row expands its details: title,
+     maintainer, license, where it's from, published date and a website link.
+   - **Actions:** Install (on hover, in search results), Remove (asks first), Update, Update
+     All (in the toolbar, with the count) and Refresh. Refresh lists again, checks for
+     updates, and retries a failed index download.
+   - **Running actions:** the R code goes through `ConsolePanel::run_from_editor` and the
+     console comes forward, so the code and its output are visible. Without a console
+     panel, the session runs it directly.
+   - **Install commands:**
+     - CRAN: `install.packages()`;
+     - Bioconductor: BiocManager, installing BiocManager first if needed;
+     - another universe: `install.packages(repos = c("https://<universe>.r-universe.dev",
+       getOption("repos")))`.
+
+     In an renv project they become `renv::install()`, with `bioc::` for Bioconductor, and
+     Remove and Update use `renv::remove()` and `renv::update()`.
+   - **Refresh:** the list is fetched when the pane is shown, and again whenever R goes
+     idle after running code, which catches `library()`, installs and removals from the
+     console. A hidden pane asks R nothing and catches up when shown.
+   - **Updates:** checked once per session, after updates run from the pane, and on
+     Refresh, since `pkg_outdated` needs the network.
+   - **Search index:** `packages_panel::init` starts it, so it downloads on the first
+     launch. Until then the pane says it's downloading.
+   - **Checked live:** the installed list with update badges and "Update All (28)" appeared.
+     "ggpl" showed the 5 installed matches, then available ones from CRAN, Bioconductor
+     and other universes. `library(tidyverse)` in the console ticked ggplot2's box.
 4. **Tests.** Unit tests drive the pane with scripted comm replies: the installed list,
    attached state, filtering, the install command chosen for CRAN, Bioconductor, an
    r-universe package and renv, update badges, and refresh after executions. The index has

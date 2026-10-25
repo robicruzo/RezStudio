@@ -12,6 +12,9 @@ workspace = true
 path = "src/package_index.rs"
 doctest = false
 
+[features]
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 async-compression.workspace = true

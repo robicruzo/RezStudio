@@ -686,6 +686,7 @@ fn main() {
         r_console::init(cx);
         variables_panel::init(cx);
         plots_panel::init(cx);
+        packages_panel::init(cx);
         data_explorer::init(cx);
         recent_projects::init(cx);
         dev_container::init(cx);

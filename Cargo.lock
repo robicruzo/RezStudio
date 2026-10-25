@@ -9321,6 +9321,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "packages_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "http_client",
+ "jupyter-protocol",
+ "languages",
+ "package_index",
+ "project",
+ "r_console",
+ "runtime",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18015,6 +18040,7 @@ dependencies = [
  "onboarding",
  "outline",
  "outline_panel",
+ "packages_panel",
  "parking_lot",
  "paths",
  "picker",
