@@ -549,6 +549,87 @@ Install uses renv. Met with CI green on every job. Checked by hand: the checkbox
 from search, details and Update. Search reads only the copy on disk, so it works offline,
 and renv's commands are covered by tests; neither was tried by hand.
 
+### M5 plan
+
+Decisions:
+- Plots from a chunk appear only under it, sized to the editor; the Plots pane doesn't take
+  them.
+- Outputs last while the file is open and clear when it closes.
+- Chunks run with RStudio's shortcuts:
+  - Cmd+Shift+Enter: the chunk under the cursor;
+  - Cmd+Alt+P: every chunk above;
+  - Cmd+Alt+R: all chunks.
+
+  Each chunk's ```` ```{r} ```` line also has a run button.
+- R code in chunks gets completion from Ark's language server.
+
+Findings that shape the plan (Zed's `repl` and Markdown grammar, and Ark 0.1.252):
+
+- **Highlighting:** Zed's Markdown grammar already reads R Markdown fences. For
+  ```` ```{r} ```` and ```` ```{r, echo=FALSE} ````, the info string's `language` node is
+  `r`, so the Markdown injection picks the R language with no grammar changes. Zed doesn't
+  know the `.Rmd` and `.qmd` extensions yet (an M1 test asserts it).
+- **Rendering outputs:** Zed's REPL shows outputs under code with an editor block
+  (`BlockPlacement::Below`) holding an `ExecutionView`. That view renders plain Jupyter
+  messages: streams with ANSI colors, `display_data` (text, tables, images, HTML as
+  text), errors with tracebacks, and `clear_output`. `RSession` already emits those per
+  execution, as `SessionEvent::Output` with the request id. `ExecutionView` is private to
+  the `repl` crate, so it gets exported. The REPL's own kernels and sessions aren't used,
+  since chunks must run in the console's R session.
+- **Plots:** with the UI comm open, Ark sends plots as `positron.plot` comms, not
+  `display_data`. A plot comm's parent header isn't the execute request. But
+  `get_metadata`'s `execution_id` is the request's message id (checked against real Ark),
+  and executions run in order. So a plot opened while an execution is the oldest pending
+  one belongs to it. The session can tag each `PlotOpened` with that request without
+  waiting for R, which a `get_metadata` round trip would do mid-execution.
+- **Plot size:** Ark's execute request has a `positron` extension (`output_width_px`,
+  `output_pixel_ratio`, Quarto's `fig-width`/`fig-height`) that sizes the first render.
+  `jupyter-protocol`'s `ExecuteRequest` has no such field, so chunk plots are redrawn at
+  the editor's width with `render` instead (about 30 ms). Quarto's `fig-width` can use
+  the extension later.
+
+Steps:
+
+1. **File types and chunks.**
+   - `.Rmd`, `.Rmarkdown` and `.qmd` open as R Markdown or Quarto, using the Markdown
+     grammar, so prose is Markdown and chunks are R.
+   - A chunk parser finds each fenced chunk with its language, label and options
+     (`{r label, echo=FALSE}` and Quarto's `#|` lines), and the code between the fences.
+     Only R chunks run; other languages are skipped.
+2. **Runtime.**
+   - `RSession::execute_inline(code)` runs code without the console echoing it.
+   - `PlotOpened` carries the request it came from, which says whether that was an inline
+     execution.
+   - The Plots pane leaves inline executions' plots alone, and the console ignores their
+     output.
+   - The real-Ark test checks that a plot drawn by an inline execution is tagged with it.
+3. **`r_markdown` (chunk execution).** In R Markdown and Quarto editors:
+   - **Actions:** Run Chunk, Run Chunks Above, Run All Chunks, Clear Outputs.
+   - **Output block:** each run puts an output block under the chunk's closing fence:
+     `ExecutionView` for text, tables and errors, and the chunk's plots redrawn at the
+     editor's width.
+   - **Rerunning** replaces a chunk's output, and editing keeps outputs attached to their
+     chunks.
+   - **Run button:** on each chunk's opening line.
+   - **Queueing:** chunks queued behind running code show that they're waiting, and an
+     error stops the rest of a Run All, as in RStudio.
+4. **Completion in chunks.** Like the console:
+   - a hidden R document mirrors the file, with each chunk's code at its own line numbers
+     and everything else blank, kept in sync as you type;
+   - Ark's language server answers completions for it, shown in the editor when the cursor
+     is in an R chunk.
+5. **Tests.**
+   - **Unit tests:** chunk parsing (labels, options, unterminated and non-R chunks), running
+     a chunk and showing its outputs from scripted session events, rerun and clear, Run
+     Chunks Above and Run All stopping at an error, inline plots kept out of the Plots
+     pane, and the hidden document's line mapping.
+   - **Real-Ark test:** an inline execution's plot.
+
+Done when: opening an `.Rmd` or `.qmd` file highlights R in its chunks. Cmd+Shift+Enter
+runs a chunk and shows its printed output, a data frame, an error, and a plot sized to the
+editor under it. Run Chunks Above and Run All work. Rerunning replaces the output. Chunk
+plots stay out of the Plots pane. Typing `mtc` in a chunk offers `mtcars`.
+
 ## Risks
 
 - **Ark's comm protocol is Positron-driven and may change.** Mitigation: bundle a pinned Ark
