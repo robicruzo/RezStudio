@@ -467,11 +467,29 @@ Steps:
      - `pkg_detail("stats")` has a title, and `pkg_detail` of a missing package is `null`;
      - `evaluate_code` returns a value;
      - an unknown method returns Ark's "No such method" error.
-2. **`package_index`.** Downloads the r-universe listing and CRAN's `PACKAGES` in the
-   background, at most daily, and keeps a compact copy in RezStudio's data directory. A
-   failed refresh keeps the last copy. Search is fuzzy on the name, with matches in the
-   title and description after, ranked by how widely each package is used. Each keystroke
-   searches all 31,500 packages in under 10 ms, off the main thread.
+2. **`package_index`.** *(Done.)* Downloads the r-universe listing and CRAN's `PACKAGES` in
+   the background, at most daily, and keeps a copy in RezStudio's data directory
+   (`package-index.json`). It checks hourly whether the copy is due, and retries then after
+   a failure.
+   - **Download:** about 32,000 packages in 5 to 15 s, in pages of 5,000, gzipped. Zed's
+     HTTP client doesn't decompress, so the crate decodes gzip itself.
+   - **Copy on disk:** 15 MB, with descriptions cut to 500 characters. It's written to a
+     `.partial` file and renamed, so a crash never leaves a broken copy.
+   - **Failures:**
+     - a failed download keeps the last copy;
+     - a listing under 10,000 packages counts as a failure;
+     - a broken copy is ignored and replaced.
+   - **Ranking:** exact name, name prefix, name contains, then letters in order (for typos
+     and abbreviations, closest first), then every word in the title, then in the
+     description. Within each, the most used wins.
+   - **Names ignore punctuation,** so "data table" finds `data.table` first.
+   - **Where it installs from:** a package on CRAN (in `PACKAGES`) installs from CRAN, one
+     in `bioc` from Bioconductor, and anything else from its universe.
+   - **Speed:** searching all 32,000 packages takes 3 to 5 ms per keystroke in a release
+     build, off the main thread.
+   - **Checked live:** an ignored test downloads the real index and searches it. "ggpl"
+     finds ggplot2 first, "bayesian regression" finds brms, BART and rstanarm, and "sf"
+     finds sf. The app starts the index in step 3, with the pane.
 3. **`packages_panel`.** A right-dock Packages pane:
    - **Filter box:** filters the installed list as you type, and shows matching packages
      that aren't installed from the index below it.

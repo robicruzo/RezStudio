@@ -9302,6 +9302,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
+name = "package_index"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "collections",
+ "futures 0.3.34",
+ "gpui",
+ "http_client",
+ "log",
+ "paths",
+ "reqwest_client",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "util",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
