@@ -10201,6 +10201,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "plots_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.34",
+ "gpui",
+ "jupyter-protocol",
+ "languages",
+ "project",
+ "runtime",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "plotters"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -17977,6 +17997,7 @@ dependencies = [
  "paths",
  "picker",
  "pkg-config",
+ "plots_panel",
  "pretty_assertions",
  "profiling",
  "project",

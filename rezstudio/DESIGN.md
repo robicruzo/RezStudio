@@ -341,12 +341,23 @@ Steps:
 
    `parse_method` now keeps an empty `params` for methods that take parameters, such as
    `show`, and drops it only for methods without any.
-2. **`plots_panel`.** A right-dock Plots pane. It shows the current plot fitted to the pane,
-   using the pre-render at once and then a render at the pane's exact size and scale. Resizing
-   re-renders after a short pause and sends the new settings to Ark. Back/forward arrows with
-   "3 / 7", delete (closes the comm) and clear all (with confirmation). A new plot, or `show`,
-   makes it current and brings the pane to the front. Plots from a stopped R stay as images,
-   marked as no longer live.
+2. **`plots_panel`.** *(Done.)* A right-dock Plots pane. It shows the current plot fitted to
+   the pane, using the pre-render at once and then a render at the pane's exact size and scale.
+   Resizing re-renders 150 ms after it stops and sends the new settings to Ark. Back/forward
+   arrows with "3 / 7", remove (closes the comm) and clear all (with confirmation). A new plot,
+   or `show`, makes it current and brings the pane to the front without taking focus, through
+   `Workspace::open_panel`; that's deferred, because activating the panel updates it. Plots
+   from a stopped R stay as images, marked "Not live".
+   - **Measuring:** the pane measures its plot area with a `canvas` that updates the view
+     while painting.
+   - **Decoding:** PNGs are decoded in the background into a `RenderImage` and shown with
+     `ImageSource::Render`, so swapping images never shows a blank frame.
+   - **Freeing images:** replaced and removed images are freed with `App::drop_image`, since
+     the GPU atlas keeps them otherwise.
+   - **Ordering:** renders are numbered, so one that finishes late can't replace a newer one.
+   - **Checked live:** `plot()` and a ggplot2 plot drawn after startup appear at once. The
+     first arrives at Ark's 640×400 default and is redrawn to fit; the second arrives already
+     fitted.
 3. **Export, copy and zoom.** Save opens a small dialog for format (PNG/SVG/PDF), width and
    height (defaulting to the pane's size), then a save dialog, and writes R's render. Copy puts
    a PNG at the pane's size and scale on the clipboard. Zoom opens the plot in its own window,

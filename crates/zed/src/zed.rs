@@ -713,6 +713,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let r_console_panel = r_console::ConsolePanel::load(workspace_handle.clone(), cx.clone());
         let environment_panel =
             variables_panel::EnvironmentPanel::load(workspace_handle.clone(), cx.clone());
+        let plots_panel = plots_panel::PlotsPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -738,6 +739,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(r_console_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(environment_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(plots_panel, workspace_handle.clone(), cx.clone()),
         );
 
         workspace_handle.update(cx, |workspace, cx| {
@@ -5838,6 +5840,7 @@ mod tests {
                 "outline_panel",
                 "pane",
                 "picker",
+                "plots_panel",
                 "project_panel",
                 "project_search",
                 "project_symbols",
