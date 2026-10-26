@@ -1,5 +1,6 @@
 //! The Environment pane: the R session's variables, live, like RStudio's.
 
+mod import_dataset;
 mod memory;
 mod search_path;
 mod tree;
@@ -11,6 +12,7 @@ use gpui::{
     Focusable, PathPromptOptions, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window,
     actions, px, uniform_list,
 };
+use import_dataset::{ImportDataset, Source};
 use memory::{MemorySampler, MemoryUsage, format_memory};
 use r_console::ConsolePanel;
 use runtime::comms::{InspectedVariable, VariablesEvent};
@@ -415,6 +417,51 @@ impl EnvironmentPanel {
         .detach();
     }
 
+    fn import_dataset(&mut self, source: Source, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let panel = cx.weak_entity();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, move |window, cx| {
+                    ImportDataset::new(source, panel, session, window, cx)
+                })
+            })
+            .log_err();
+    }
+
+    fn render_import_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let panel = cx.weak_entity();
+        PopoverMenu::new("import-dataset-menu")
+            .trigger_with_tooltip(
+                Button::new("import-dataset-trigger", "Import Dataset")
+                    .label_size(LabelSize::Small)
+                    .end_icon(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .disabled(self.session.is_none()),
+                Tooltip::text("Import a Dataset from a File"),
+            )
+            .anchor(Anchor::TopLeft)
+            .menu(move |window, cx| {
+                let panel = panel.clone();
+                Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                    for source in Source::ALL {
+                        let panel = panel.clone();
+                        menu = menu.entry(source.menu_label(), None, move |window, cx| {
+                            panel
+                                .update(cx, |panel, cx| panel.import_dataset(source, window, cx))
+                                .log_err();
+                        });
+                    }
+                    menu
+                }))
+            })
+    }
+
     fn render_memory_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let memory = self.memory?;
         let panel = cx.weak_entity();
@@ -787,13 +834,17 @@ impl EnvironmentPanel {
     }
 }
 
-/// `path` as an R string, with the home folder written `~` as RStudio does.
-fn r_path(path: &Path) -> String {
-    let text = match path.strip_prefix(util::paths::home_dir()) {
+/// `path` with the home folder written `~`, as RStudio writes paths in R code.
+fn display_path(path: &Path) -> String {
+    match path.strip_prefix(util::paths::home_dir()) {
         Ok(relative) => format!("~/{}", relative.to_string_lossy()),
         Err(_) => path.to_string_lossy().into_owned(),
-    };
-    runtime::r_string(&text)
+    }
+}
+
+/// `path` as an R string, with the home folder written `~`.
+fn r_path(path: &Path) -> String {
+    runtime::r_string(&display_path(path))
 }
 
 struct PackageEnvironment {
@@ -891,6 +942,7 @@ impl Render for EnvironmentPanel {
                                 this.save_workspace(&SaveWorkspace, window, cx)
                             })),
                     )
+                    .child(self.render_import_menu(cx))
                     .children(self.render_memory_menu(cx))
                     .child(div().flex_1())
                     .child(
@@ -1304,6 +1356,73 @@ mod tests {
         cx.simulate_path_prompt_response(|_| None);
         cx.run_until_parked();
         assert!(harness.requests.try_recv().is_err());
+    }
+
+    #[gpui::test]
+    async fn test_import_dataset_previews_and_imports(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        let workspace = harness
+            .panel
+            .read_with(cx, |panel, _| panel.workspace.upgrade())
+            .unwrap();
+        let modal = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.active_modal::<ImportDataset>(cx)
+            })
+        };
+
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.import_dataset(Source::Text, window, cx)
+        });
+        assert!(modal(cx).is_some());
+        // The dialog starts by asking for the file.
+        cx.simulate_path_prompt_response(|_| {
+            Some(vec![util::paths::home_dir().join("data/cars.csv")])
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+
+        let preview = json!({
+            "names": ["speed", "dist"], "types": ["numeric", "numeric"],
+            "columns": [["4", "4"], ["2", "10"]], "rows": 2, "sheets": null
+        });
+        let (method, params) = harness.answer(json!({ "result": preview, "output": "" }), cx);
+        assert_eq!(method, "evaluate_code");
+        let code = params["code"].as_str().unwrap_or_default().to_string();
+        assert!(
+            code.contains("readr::read_csv(\"~/data/cars.csv\", n_max = 50"),
+            "{code}"
+        );
+
+        // Changing an option reads the preview again with it.
+        let dialog = modal(cx).unwrap();
+        dialog.update(cx, |dialog, cx| {
+            dialog.set_delimiter(import_dataset::Delimiter::Semicolon, cx)
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let (_, params) = harness.answer(json!({ "result": preview, "output": "" }), cx);
+        assert!(
+            params["code"]
+                .as_str()
+                .is_some_and(|code| code.contains("read_delim(\"~/data/cars.csv\", delim = \";\"")),
+            "{params}"
+        );
+
+        dialog.update_in(cx, |dialog, window, cx| {
+            dialog.import(&menu::Confirm, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(modal(cx).is_none(), "importing closes the dialog");
+        let request = harness.requests.try_recv().expect("an execute request");
+        let JupyterMessageContent::ExecuteRequest(execute) = &request.content else {
+            panic!("expected execute_request, got {}", request.header.msg_type);
+        };
+        assert_eq!(
+            execute.code,
+            "library(readr)\ncars <- read_delim(\"~/data/cars.csv\", delim = \";\")\nView(cars)"
+        );
     }
 
     #[test]

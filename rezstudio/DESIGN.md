@@ -1257,7 +1257,30 @@ Steps:
      totals, nested and cyclic parent tables, the save and load code from simulated
      dialogs, cancelling a dialog, and path quoting.
    - **Not checked live:** the machine was in use.
-4. **Import Dataset.** The menu, the dialog with its preview and code, and importing.
+4. **Import Dataset.** *(Done.)* An Import Dataset menu in the toolbar's top row offers
+   From Text (readr), From Excel, From SPSS, From SAS and From Stata. Each opens a dialog
+   that starts by asking for a file.
+   - **Fields:** the file's path (or a URL, which readr reads too), with Browse; the
+     name, suggested from the file's name with characters R doesn't allow in names
+     replaced by `_`, until it's typed over; and Open Data Viewer. Text and Excel also
+     have Skip, Missing Values and First Row as Names. Text has a Delimiter (comma,
+     tab, semicolon, whitespace) and Excel a Sheet, listed from the file.
+   - **Preview:** the first 50 rows, read with the chosen options by R code run with
+     `evaluate_code` 300 ms after the last change. It returns each column's name,
+     class and values formatted as text, and an Excel file's sheets. A newer change
+     drops a preview still waiting. R's errors, such as a missing package, show in the
+     preview's place.
+   - **Code:** as RStudio writes it, with only the arguments that differ from the
+     reader's defaults, for example `library(readr)`, `cars <- read_csv("~/cars.csv")`
+     and `View(cars)`. Names R doesn't accept as they are go in backticks. Import runs
+     it in the console and closes the dialog.
+   - **Checked in R:** the preview and import code for a CSV with row names, a
+     semicolon file with a skipped line and a custom missing value, readxl's example
+     workbook with and without a sheet, and haven's SPSS, SAS and Stata examples.
+   - **Tests:** the code for each format and option, the preview code, names, the
+     preview's parsing (including R's one-value and empty vectors), and the dialog
+     from choosing a file through a preview, a delimiter change and importing.
+   - **Not checked live:** the machine was in use.
 5. **Rendering.** The Render button and shortcut, the Render tab, the Viewer for `.qmd`
    and `.Rmd`, other formats, and Render on Save.
 6. **Tests and live checks.** Unit tests for each step, a real-R test for package

@@ -15639,6 +15639,7 @@ dependencies = [
  "jupyter-protocol",
  "languages",
  "log",
+ "menu",
  "project",
  "r_console",
  "runtime",
