@@ -1064,9 +1064,22 @@ pub async fn derive_paths_with_position(
             parsed.path = canonicalized;
         }
 
+        // Opening an RStudio project file opens its project, as in RStudio.
+        if is_r_project_file(&parsed.path)
+            && fs.is_file(&parsed.path).await
+            && let Some(folder) = parsed.path.parent()
+        {
+            parsed = PathWithPosition::from_path(folder.to_path_buf());
+        }
+
         result.push(parsed);
     }
     result
+}
+
+fn is_r_project_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("Rproj"))
 }
 
 #[cfg(test)]
@@ -1256,6 +1269,43 @@ mod tests {
                 (path!("/root/TEST (1)").to_string(), None, None),
                 (path!("/root/Project (2,3)").to_string(), None, None),
                 (path!("/root/test 123").to_string(), None, None),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_derive_paths_with_position_opens_r_projects_as_folders(cx: &mut TestAppContext) {
+        let app_state = init_test(cx);
+        let fs = app_state.fs.as_fake();
+        fs.insert_tree(
+            path!("/root"),
+            json!({
+                "dplyr": { "dplyr.Rproj": "Version: 1.0\n", "R": { "arrange.R": "" } },
+                "notes": { "old.rproj": "" },
+                "folder.Rproj": {},
+            }),
+        )
+        .await;
+
+        let inputs = vec![
+            path!("/root/dplyr/dplyr.Rproj").to_string(),
+            path!("/root/notes/old.rproj").to_string(),
+            path!("/root/dplyr/R/arrange.R").to_string(),
+            // A folder that happens to end in `.Rproj` is opened as itself.
+            path!("/root/folder.Rproj").to_string(),
+        ];
+        let result = derive_paths_with_position(fs.as_ref(), inputs).await;
+        let paths: Vec<_> = result
+            .iter()
+            .map(|p| p.path.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                path!("/root/dplyr").to_string(),
+                path!("/root/notes").to_string(),
+                path!("/root/dplyr/R/arrange.R").to_string(),
+                path!("/root/folder.Rproj").to_string(),
             ]
         );
     }
