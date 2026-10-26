@@ -292,6 +292,8 @@ pub struct Dock {
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
     layout: DockLayout,
+    /// The size of the area a split dock's panes share, as last drawn.
+    pane_area: Option<gpui::Size<Pixels>>,
     /// Whether the window's saved layout has been looked for.
     pub(crate) layout_restored: bool,
     _subscriptions: [Subscription; 2],
@@ -421,6 +423,41 @@ pub enum TabDropTarget {
     NewPane { first: bool },
 }
 
+/// How much room a panel's pane should have along the dock's split.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PaneRoom {
+    /// At least this much, tab row included.
+    AtLeast(Pixels),
+    /// As much as the other pane allows.
+    Most,
+}
+
+/// The height of a pane's tab row.
+const TAB_ROW_HEIGHT: Pixels = px(28.);
+/// The space the divider between two panes takes.
+const DIVIDER_SIZE: Pixels = px(5.);
+
+/// The layouts docks start with in a window that has none saved, which an
+/// app can set. Without them, a dock has one pane, as in Zed.
+#[derive(Default)]
+pub struct DefaultDockLayouts {
+    pub left: Option<DockLayout>,
+    pub right: Option<DockLayout>,
+    pub bottom: Option<DockLayout>,
+}
+
+impl gpui::Global for DefaultDockLayouts {}
+
+impl DefaultDockLayouts {
+    pub fn for_position(&self, position: DockPosition) -> Option<&DockLayout> {
+        match position {
+            DockPosition::Left => self.left.as_ref(),
+            DockPosition::Right => self.right.as_ref(),
+            DockPosition::Bottom => self.bottom.as_ref(),
+        }
+    }
+}
+
 const DEFAULT_DIVIDER: f32 = 0.5;
 /// Neither pane gets less than this share of a split dock.
 const MIN_PANE_SHARE: f32 = 0.1;
@@ -540,6 +577,7 @@ impl Dock {
                 zoom_layer_open: false,
                 modal_layer,
                 layout: DockLayout::default(),
+                pane_area: None,
                 layout_restored: false,
             }
         });
@@ -946,6 +984,53 @@ impl Dock {
             self.activate_panel(ix, window, cx);
         }
         self.persist_layout(cx);
+    }
+
+    /// Moves the divider so the pane holding `panel_id` has `room`, as when
+    /// an htmlwidget asks for a height. Does nothing in a dock with one pane.
+    pub fn make_room_for(&mut self, panel_id: EntityId, room: PaneRoom, cx: &mut Context<Self>) {
+        let panes = self.panes();
+        if panes.len() < 2 {
+            return;
+        }
+        let Some(pane_pos) = panes.iter().position(|(_, panels)| {
+            panels.iter().any(|ix| {
+                self.panel_entries
+                    .get(*ix)
+                    .is_some_and(|entry| entry.panel.panel_id() == panel_id)
+            })
+        }) else {
+            return;
+        };
+        let share = match room {
+            PaneRoom::Most => 1. - MIN_PANE_SHARE,
+            PaneRoom::AtLeast(size) => {
+                let Some(area) = self.pane_area else {
+                    return;
+                };
+                let length = if self.position.axis() == Axis::Horizontal {
+                    area.height
+                } else {
+                    area.width
+                } - DIVIDER_SIZE;
+                if length <= Pixels::ZERO {
+                    return;
+                }
+                f32::from(size + TAB_ROW_HEIGHT) / f32::from(length)
+            }
+        }
+        .clamp(MIN_PANE_SHARE, 1. - MIN_PANE_SHARE);
+        // The divider gives the first pane its share and the second the rest.
+        let divider = if pane_pos == 0 {
+            self.layout.divider.max(share)
+        } else {
+            self.layout.divider.min(1. - share)
+        };
+        if divider != self.layout.divider {
+            self.layout.divider = divider;
+            self.persist_layout(cx);
+            cx.notify();
+        }
     }
 
     /// Remembers that `ix` is what its pane shows. Returns whether that changed.
@@ -1718,9 +1803,9 @@ impl Dock {
             .items_center()
             .map(|this| {
                 if stacked {
-                    this.w_full().h(px(5.)).flex_col().cursor_row_resize()
+                    this.w_full().h(DIVIDER_SIZE).flex_col().cursor_row_resize()
                 } else {
-                    this.h_full().w(px(5.)).flex_row().cursor_col_resize()
+                    this.h_full().w(DIVIDER_SIZE).flex_row().cursor_col_resize()
                 }
             })
             .child(div().bg(cx.theme().colors().border).map(|this| {
@@ -1742,9 +1827,11 @@ impl Dock {
                 }
             }));
 
+        let dock = cx.entity();
         div()
             .size_full()
             .flex()
+            .relative()
             .map(|this| {
                 if stacked {
                     this.flex_col()
@@ -1752,6 +1839,16 @@ impl Dock {
                     this.flex_row()
                 }
             })
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        dock.update(cx, |dock, _| dock.pane_area = Some(bounds.size));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .on_drag_move(cx.listener(
                 move |dock, event: &gpui::DragMoveEvent<DraggedDockDivider>, _, cx| {
                     if event.drag(cx).0 != dock.position {
@@ -1902,7 +1999,7 @@ impl Dock {
         h_flex()
             .w_full()
             .flex_none()
-            .h(px(28.))
+            .h(TAB_ROW_HEIGHT)
             .px_1()
             .gap_0p5()
             .overflow_x_hidden()

@@ -2888,7 +2888,12 @@ impl Workspace {
                 });
 
         let persisted_layout = (!dock.read(cx).layout_restored)
-            .then(|| dock::Dock::load_persisted_layout(self, dock_position, cx))
+            .then(|| {
+                dock::Dock::load_persisted_layout(self, dock_position, cx).or_else(|| {
+                    cx.try_global::<dock::DefaultDockLayouts>()
+                        .and_then(|defaults| defaults.for_position(dock_position).cloned())
+                })
+            })
             .flatten();
 
         dock.update(cx, |dock, cx| {
@@ -17296,6 +17301,101 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(panes, ["Environment Git", "Plots"]);
+    }
+
+    #[gpui::test]
+    async fn test_docks_start_from_default_layouts(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            cx.set_global(dock::DefaultDockLayouts {
+                right: Some(dock::DockLayout {
+                    panes: vec![
+                        pane(&["Environment", "Git"], None),
+                        pane(&["Files", "Plots"], Some("Plots")),
+                    ],
+                    ..dock::DockLayout::default()
+                }),
+                ..dock::DefaultDockLayouts::default()
+            })
+        });
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(cx.new(EnvironmentPanel::new), window, cx);
+            workspace.add_panel(cx.new(GitPanel::new), window, cx);
+            workspace.add_panel(cx.new(FilesPanel::new), window, cx);
+            workspace.add_panel(cx.new(PlotsPanel::new), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            let visible: Vec<_> = workspace
+                .right_dock()
+                .read(cx)
+                .visible_panels()
+                .iter()
+                .map(|panel| panel.persistent_name())
+                .collect();
+            assert_eq!(visible, ["Environment", "Plots"]);
+            // Docks without a default have one pane, as in Zed.
+            assert!(workspace.left_dock().read(cx).layout().panes.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_making_room_in_a_dock_pane(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let (environment, plots) = workspace.update_in(cx, |workspace, window, cx| {
+            let environment = cx.new(EnvironmentPanel::new);
+            let plots = cx.new(PlotsPanel::new);
+            workspace.add_panel(environment.clone(), window, cx);
+            workspace.add_panel(plots.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.set_layout(
+                    dock::DockLayout {
+                        panes: vec![pane(&["Environment"], None), pane(&["Plots"], None)],
+                        divider: 0.5,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            (environment, plots)
+        });
+        cx.run_until_parked();
+        let dock = workspace.read_with(cx, |workspace, _| workspace.right_dock().clone());
+        let area = cx.debug_bounds("dock-pane-1").unwrap().size.height * 2.;
+        let divider =
+            |cx: &mut VisualTestContext| dock.read_with(cx, |dock, _| dock.layout().divider);
+
+        // A pane that's already tall enough stays as it is.
+        dock.update(cx, |dock, cx| {
+            dock.make_room_for(plots.entity_id(), dock::PaneRoom::AtLeast(px(100.)), cx)
+        });
+        assert_eq!(divider(cx), 0.5);
+
+        // Asking for most of the dock grows the lower pane by moving the divider up.
+        let wanted = area * 0.7;
+        dock.update(cx, |dock, cx| {
+            dock.make_room_for(plots.entity_id(), dock::PaneRoom::AtLeast(wanted), cx)
+        });
+        assert!(divider(cx) < 0.31, "{}", divider(cx));
+
+        // As much as possible leaves the other pane its minimum.
+        dock.update(cx, |dock, cx| {
+            dock.make_room_for(plots.entity_id(), dock::PaneRoom::Most, cx)
+        });
+        assert!((divider(cx) - 0.1).abs() < 0.001);
+        dock.update(cx, |dock, cx| {
+            dock.make_room_for(environment.entity_id(), dock::PaneRoom::Most, cx)
+        });
+        assert!((divider(cx) - 0.9).abs() < 0.001);
     }
 
     #[gpui::test]

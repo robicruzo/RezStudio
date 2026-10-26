@@ -195,6 +195,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(quit);
 
     cx.on_action(|_: &RestoreBanner, cx| title_bar::restore_banner(cx));
+    cx.set_global(rstudio_dock_layouts());
 
     cx.observe_flag::<PanicFeatureFlag, _>({
         let mut added = false;
@@ -704,10 +705,34 @@ fn show_software_emulation_warning_if_needed(
     }
 }
 
+/// RStudio's arrangement, for windows that haven't saved their own: the
+/// environment and Git above the files, plots, packages, help and viewer in
+/// the right dock, and the console first in the bottom one.
+fn rstudio_dock_layouts() -> workspace::dock::DefaultDockLayouts {
+    use workspace::dock::{DefaultDockLayouts, DockLayout, DockPaneLayout};
+    let pane = |panels: &[&str]| DockPaneLayout {
+        panels: panels.iter().map(|name| name.to_string()).collect(),
+        active: panels.first().map(|name| name.to_string()),
+    };
+    DefaultDockLayouts {
+        left: None,
+        right: Some(DockLayout {
+            panes: vec![
+                pane(&["Environment", "GitPanel"]),
+                pane(&["Project Panel", "Plots", "Packages", "Help", "Viewer"]),
+            ],
+            ..DockLayout::default()
+        }),
+        bottom: Some(DockLayout {
+            panes: vec![pane(&["R Console", "TerminalPanel", "DebugPanel"])],
+            ..DockLayout::default()
+        }),
+    }
+}
+
 fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<anyhow::Result<()>> {
     cx.spawn_in(window, async move |workspace_handle, cx| {
         let project_panel = ProjectPanel::load(workspace_handle.clone(), cx.clone());
-        let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
         let r_console_panel = r_console::ConsolePanel::load(workspace_handle.clone(), cx.clone());
@@ -737,7 +762,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
 
         futures::join!(
             add_panel_when_ready(project_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),

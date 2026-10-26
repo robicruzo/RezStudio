@@ -12,7 +12,7 @@ use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
 use web_view::{WebView, WebViewEvent, watch_cover};
 use workspace::Workspace;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
+use workspace::dock::{DockPosition, PaneRoom, Panel, PanelEvent};
 
 actions!(
     viewer_panel,
@@ -23,6 +23,8 @@ actions!(
 );
 
 const PANEL_KEY: &str = "ViewerPanel";
+/// The height of the toolbar above a widget, roughly.
+const TOOLBAR_HEIGHT: Pixels = px(32.);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -42,9 +44,8 @@ enum Content {
         path: PathBuf,
         title: String,
         /// The height R asked for in pixels: 0 for no preference, -1 for as
-        /// tall as possible. The right dock is full height until M7 splits
-        /// it, so there's nothing to resize yet.
-        _height: i64,
+        /// tall as possible.
+        height: i64,
     },
     /// A web app on this machine, such as Shiny's.
     App { url: String },
@@ -266,7 +267,7 @@ impl ViewerPanel {
                 Content::File {
                     path: path.clone(),
                     title: title.clone(),
-                    _height: *height,
+                    height: *height,
                 },
                 window,
                 cx,
@@ -299,10 +300,17 @@ impl ViewerPanel {
         if self.history.current() == Some(&content) {
             self.web_view.read(cx).reload();
         } else {
-            self.history.push(content);
+            self.history.push(content.clone());
             self.load_current(cx);
         }
-        self.reveal(window, cx);
+        let room = match content {
+            Content::File { height: -1, .. } => Some(PaneRoom::Most),
+            Content::File { height, .. } if height > 0 => {
+                Some(PaneRoom::AtLeast(px(height as f32) + TOOLBAR_HEIGHT))
+            }
+            _ => None,
+        };
+        self.reveal(room, window, cx);
     }
 
     fn load_current(&mut self, cx: &mut Context<Self>) {
@@ -316,13 +324,21 @@ impl ViewerPanel {
         cx.notify();
     }
 
-    fn reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Brings the pane to the front, with `room` if a widget asked for it.
+    fn reveal(&mut self, room: Option<PaneRoom>, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let position = self.position;
+        let panel_id = cx.entity_id();
         // Opening a panel updates the docks, which can't happen mid-update.
         window.defer(cx, move |window, cx| {
             workspace
                 .update(cx, |workspace, cx| {
-                    workspace.open_panel::<ViewerPanel>(window, cx)
+                    workspace.open_panel::<ViewerPanel>(window, cx);
+                    if let Some(room) = room {
+                        workspace
+                            .dock_at_position(position)
+                            .update(cx, |dock, cx| dock.make_room_for(panel_id, room, cx));
+                    }
                 })
                 .log_err();
         });

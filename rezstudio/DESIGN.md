@@ -1071,13 +1071,28 @@ Steps:
      the drag to GPUI's view, where it started.
    - **Tests:** every kind of move; dragging a tab with the mouse onto a tab in the other
      pane; and dropping one near the bottom of a one-pane dock to split it.
-3. **RStudio defaults.**
-   - **Right dock:** Environment and Git on top; Files, Plots, Packages, Help and Viewer below.
-   - **Bottom dock:** Console, Terminal and Debug as tabs.
-   - **Outline panel:** no longer registered. The outline picker (cmd-shift-o) stays.
-   - **New panels:** a panel the defaults don't name goes to the end of the bottom pane.
-   - **Widget heights (from M6):** a widget's requested height makes the Viewer's pane at
-     least that tall, and `-1` gives it the whole dock.
+3. **RStudio defaults.** *(Done.)*
+   - **Default layouts:** `workspace::dock::DefaultDockLayouts` is a global an app can set.
+     A dock with no saved layout for its window starts from it. Without it, docks have one
+     pane, as in Zed, so Zed's tests don't change.
+   - **RezStudio's defaults** (`rstudio_dock_layouts` in `zed.rs`):
+     - **Right dock:** Environment and Git above; Project, Plots, Packages, Help and
+       Viewer below. Each pane starts on its first tab.
+     - **Bottom dock:** R Console, Terminal and Debug, in that order.
+     - Windows with a saved layout keep theirs.
+   - **Outline panel:** no longer added to the workspace, and its View menu item is gone.
+     Its actions still exist, so key bindings that name them still load. cmd-shift-b is
+     left for the outline sidebar (step 4).
+   - **Widget heights (from M6):** `Dock::make_room_for(panel, PaneRoom)` moves the divider
+     so the panel's pane has at least that much room, tab row included, or as much as the
+     other pane allows. The dock remembers its split area's size as it draws. The Viewer
+     asks for a widget's height plus its toolbar when it shows one, and for `-1`, as much
+     as possible. A dock with one pane is left alone.
+   - **Tests:** a dock starting from its default layout, and making room (enough already,
+     growing the lower pane, as much as possible for either pane).
+   - **Checked live:** a new window on an empty folder opened with Environment and Git
+     above, Project, Plots, Packages, Help and Viewer below, and no Outline tab. The bottom
+     dock showed R Console, Terminal and Debug.
 4. **Outline sidebar.** A toolbar button toggles a sidebar at the right of the editor,
    remembered per editor.
    - **Contents:** the document's outline: R sections and functions; Markdown headings; and
