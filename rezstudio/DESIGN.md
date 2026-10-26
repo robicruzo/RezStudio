@@ -187,6 +187,11 @@ Steps:
    LSP TCP port, like Zed's `--askpass` netcat mode. The `ark` language server adapter (registered
    by `runtime` for R) waits for the window's session to report its port, then launches the
    bridge; when R restarts on a new port, `ark` is restarted for the project's open buffers.
+   Ark serves one connection per LSP comm, and Zed can start a new `ark` at any time, as when
+   the project's toolchain changes. So each port goes to one server: a second server waits
+   while the session closes the LSP comm and opens a new one, and takes the new port Ark
+   reports, as Positron does when it restarts its language server. Only a restart of R
+   restarts the servers, which avoids a loop of new ports and restarts.
 4. **`r_console`.** *(Done.)* The crate is `r_console` because the
    workspace already depends on the external `console` crate and the debugger uses the
    `console::` action namespace. A bottom-dock panel, open by default next to the terminal like

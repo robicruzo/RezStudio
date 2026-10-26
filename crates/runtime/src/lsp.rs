@@ -79,7 +79,7 @@ impl ArkLspAdapter {
     async fn wait_for_port(root: &Path, cx: &AsyncApp) -> Option<u16> {
         let started = std::time::Instant::now();
         loop {
-            match cx.update(|cx| port_for_project(root, cx)) {
+            match cx.update(|cx| take_port_for_project(root, cx)) {
                 PortStatus::Ready(port) => return Some(port),
                 PortStatus::NoSession => return None,
                 PortStatus::Pending if started.elapsed() > PORT_WAIT_TIMEOUT => {
@@ -102,24 +102,26 @@ enum PortStatus {
     NoSession,
 }
 
-fn port_for_project(root: &Path, cx: &gpui::App) -> PortStatus {
+fn take_port_for_project(root: &Path, cx: &mut gpui::App) -> PortStatus {
     let Some(registry) = SessionRegistry::global(cx) else {
         return PortStatus::NoSession;
     };
     let session = registry
         .read(cx)
         .sessions()
-        .find(|session| session.read(cx).project_root() == root);
+        .find(|session| session.read(cx).project_root() == root)
+        .cloned();
     let Some(session) = session else {
         // The session is created asynchronously after the project opens.
         return PortStatus::Pending;
     };
-    let session = session.read(cx);
-    match (session.language_server_port(), session.state()) {
-        (Some(port), _) => PortStatus::Ready(port),
-        (None, SessionState::Unavailable(_)) => PortStatus::NoSession,
-        (None, _) => PortStatus::Pending,
-    }
+    session.update(cx, |session, _| {
+        match (session.take_language_server_port(), session.state()) {
+            (Some(port), _) => PortStatus::Ready(port),
+            (None, SessionState::Unavailable(_)) => PortStatus::NoSession,
+            (None, _) => PortStatus::Pending,
+        }
+    })
 }
 
 impl LspInstaller for ArkLspAdapter {
