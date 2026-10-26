@@ -92,6 +92,9 @@ pub trait NativeView {
     /// Asks for a picture of the page, which arrives as a
     /// [`NativeEvent::Snapshot`].
     fn snapshot(&self) -> Result<()>;
+    /// Leaves these areas, relative to the view's top left, see-through, so
+    /// what GPUI draws there shows.
+    fn set_cut_outs(&self, cut_outs: &[Bounds<Pixels>]) -> Result<()>;
 }
 
 /// Makes the native view for a window, which needs the window's handle,
@@ -143,6 +146,11 @@ pub struct WebView {
     events: Option<mpsc::UnboundedSender<NativeEvent>>,
     _events_task: Option<Task<()>>,
     _decode_snapshot: Option<Task<()>>,
+    /// What GPUI drew over the window's elements in the last frame, such as
+    /// tooltips and menus, and the parts of the view left see-through for them.
+    overlays: Vec<Bounds<Pixels>>,
+    cut_outs: Vec<Bounds<Pixels>>,
+    _overlay_subscription: Option<Subscription>,
 }
 
 impl EventEmitter<WebViewEvent> for WebView {}
@@ -189,6 +197,9 @@ impl WebView {
             events: Some(events_tx),
             _events_task: Some(events_task),
             _decode_snapshot: None,
+            overlays: Vec::new(),
+            cut_outs: Vec::new(),
+            _overlay_subscription: None,
         }
     }
 
@@ -372,12 +383,41 @@ impl WebView {
             native.set_visible(visible).log_err();
             self.native_visible = Some(visible);
         }
+        let cut_outs = self.overlapping_overlays();
+        if cut_outs != self.cut_outs {
+            native.set_cut_outs(&cut_outs).log_err();
+            self.cut_outs = cut_outs;
+        }
         if self.url != self.loaded
             && let Some(url) = &self.url
         {
             native.load_url(url).log_err();
             self.loaded = self.url.clone();
         }
+    }
+
+    /// The window's overlays that fall on the page, relative to its top
+    /// left. Under a modal the page is out of sight, with its snapshot drawn
+    /// by GPUI, so nothing needs cutting out.
+    fn overlapping_overlays(&self) -> Vec<Bounds<Pixels>> {
+        let Some(bounds) = self.bounds.filter(|_| self.shown && !self.covered) else {
+            return Vec::new();
+        };
+        self.overlays
+            .iter()
+            .filter_map(|overlay| {
+                let overlap = overlay.dilate(OVERLAY_SHADOW).intersect(&bounds);
+                (overlap.size.width > Pixels::ZERO && overlap.size.height > Pixels::ZERO).then(
+                    || Bounds {
+                        origin: point(
+                            overlap.origin.x - bounds.origin.x,
+                            overlap.origin.y - bounds.origin.y,
+                        ),
+                        size: overlap.size,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn handle_native_event(&mut self, event: NativeEvent, cx: &mut Context<Self>) {
@@ -414,6 +454,10 @@ impl Drop for WebView {
     }
 }
 
+/// How far past an overlay's bounds the page is cut away, for the shadow a
+/// menu or tooltip draws around itself.
+const OVERLAY_SHADOW: Pixels = px(8.);
+
 /// Just left of the window, where the view isn't seen or clicked but is
 /// still in the window, so WebKit keeps drawing the page.
 fn out_of_sight(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -427,7 +471,14 @@ fn out_of_sight(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
 /// at its bounds. It's a view of its own so that what changes it, such as a
 /// snapshot arriving, redraws it inside a cached pane.
 impl Render for WebView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self._overlay_subscription.is_none() {
+            self._overlay_subscription =
+                Some(cx.observe_overlay_bounds(window, |this, window, cx| {
+                    this.overlays = window.overlay_bounds().to_vec();
+                    this.apply(cx);
+                }));
+        }
         if let Some(reason) = self.unavailable.clone() {
             return div()
                 .size_full()
@@ -575,6 +626,24 @@ impl NativeView for FakeNative {
     }
     fn snapshot(&self) -> Result<()> {
         self.0.borrow_mut().push("snapshot".into());
+        Ok(())
+    }
+    fn set_cut_outs(&self, cut_outs: &[Bounds<Pixels>]) -> Result<()> {
+        let rects: Vec<String> = cut_outs
+            .iter()
+            .map(|bounds| {
+                format!(
+                    "{}x{} at {},{}",
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height),
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y)
+                )
+            })
+            .collect();
+        self.0
+            .borrow_mut()
+            .push(format!("cut outs [{}]", rects.join(", ")));
         Ok(())
     }
 }
@@ -732,6 +801,81 @@ mod tests {
         view.update(cx, |view, cx| view.set_covered(false, cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("web-view-snapshot").is_none());
+    }
+
+    /// A cached pane with the web view, beside which a popover can open, as
+    /// a status bar tooltip does over a dock.
+    struct PaneWithPopover {
+        host: Entity<Host>,
+        popover: bool,
+    }
+
+    impl Render for PaneWithPopover {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(
+                    gpui::AnyView::from(self.host.clone())
+                        .cached(gpui::StyleRefinement::default().size_full()),
+                )
+                .when(self.popover, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top(px(100.))
+                            .left(px(100.))
+                            .child(gpui::deferred(
+                                div().size(px(50.)).bg(gpui::black()).occlude(),
+                            )),
+                    )
+                })
+        }
+    }
+
+    #[gpui::test]
+    fn test_overlays_are_cut_out_of_the_page(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let calls: Rc<RefCell<Vec<String>>> = Rc::default();
+        let factory = fake_factory(calls.clone());
+        let (pane, cx) = cx.add_window_view(|_, cx| {
+            let view = cx.new(|cx| WebView::with_factory(Some(factory), cx));
+            PaneWithPopover {
+                host: cx.new(|_| Host { view }),
+                popover: false,
+            }
+        });
+        cx.simulate_resize(size(px(800.), px(600.)));
+        cx.run_until_parked();
+        let view = pane.read_with(cx, |pane, cx| pane.host.read(cx).view.clone());
+        view.update(cx, |view, cx| view.set_shown(true, cx));
+        take_calls(&calls);
+        let cut_outs = |calls: &Rc<RefCell<Vec<String>>>| {
+            take_calls(calls)
+                .into_iter()
+                .filter(|call| call.starts_with("cut outs"))
+                .collect::<Vec<_>>()
+        };
+
+        // The popover and its shadow are cut out, though the pane isn't redrawn.
+        pane.update(cx, |pane, cx| {
+            pane.popover = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(cut_outs(&calls), ["cut outs [66x66 at 92,92]"]);
+
+        // Under a modal the page is out of sight, so nothing is cut out.
+        view.update(cx, |view, cx| view.set_covered(true, cx));
+        assert_eq!(cut_outs(&calls), ["cut outs []"]);
+        view.update(cx, |view, cx| view.set_covered(false, cx));
+        assert_eq!(cut_outs(&calls), ["cut outs [66x66 at 92,92]"]);
+
+        pane.update(cx, |pane, cx| {
+            pane.popover = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(cut_outs(&calls), ["cut outs []"]);
     }
 
     #[gpui::test]

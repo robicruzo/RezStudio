@@ -1056,6 +1056,8 @@ pub(crate) struct Frame {
     pub(crate) input_handlers: Vec<Option<PlatformInputHandler>>,
     pub(crate) tooltip_requests: Vec<Option<TooltipRequest>>,
     pub(crate) cursor_styles: Vec<CursorStyleRequest>,
+    /// What's drawn over the elements: the tooltip and each deferred draw.
+    pub(crate) overlay_bounds: Vec<Bounds<Pixels>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1111,6 +1113,7 @@ impl Frame {
             deferred_draws: Vec::new(),
             input_handlers: Vec::new(),
             tooltip_requests: Vec::new(),
+            overlay_bounds: Vec::new(),
             cursor_styles: Vec::new(),
 
             #[cfg(any(test, feature = "test-support"))]
@@ -1135,6 +1138,7 @@ impl Frame {
         self.scene.clear();
         self.input_handlers.clear();
         self.tooltip_requests.clear();
+        self.overlay_bounds.clear();
         self.cursor_styles.clear();
         self.hitboxes.clear();
         self.window_control_hitboxes.clear();
@@ -1263,6 +1267,10 @@ pub struct Window {
     pub(crate) next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
+    pub(crate) overlay_listeners: SubscriberSet<(), AnyObserver>,
+    /// Whether an overlay listener was added since the last frame, so
+    /// listeners are called once with the overlays as they are.
+    pub(crate) overlay_listener_added: bool,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
     default_prevented: bool,
@@ -2167,6 +2175,8 @@ impl Window {
             tooltip_bounds: None,
             dirty_views: FxHashSet::default(),
             focus_listeners: SubscriberSet::new(),
+            overlay_listeners: SubscriberSet::new(),
+            overlay_listener_added: false,
             focus_lost_listeners: SubscriberSet::new(),
             focus_lost_path: SmallVec::new(),
             default_prevented: true,
@@ -2390,6 +2400,14 @@ impl Window {
             self.refreshing = true;
             self.invalidator.set_dirty(true);
         }
+    }
+
+    /// Where GPUI drew over the window's elements in the last frame: the
+    /// tooltip and each deferred draw, such as a menu or popover. A native
+    /// view placed over the window hides what's under it, so it can leave
+    /// these areas uncovered. See [`Context::observe_overlay_bounds`].
+    pub fn overlay_bounds(&self) -> &[Bounds<Pixels>] {
+        &self.rendered_frame.overlay_bounds
     }
 
     /// Close this window.
@@ -3528,8 +3546,16 @@ impl Window {
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
         let previous_window_active = self.rendered_frame.window_active;
+        let previous_overlay_bounds = mem::take(&mut self.rendered_frame.overlay_bounds);
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
         self.next_frame.clear();
+        if mem::take(&mut self.overlay_listener_added)
+            || previous_overlay_bounds != self.rendered_frame.overlay_bounds
+        {
+            self.overlay_listeners
+                .clone()
+                .retain(&(), |listener| listener(self, cx));
+        }
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;
@@ -3879,6 +3905,7 @@ impl Window {
                 id: tooltip_request.id,
                 bounds: tooltip_bounds,
             });
+            self.next_frame.overlay_bounds.push(tooltip_bounds);
             return Some(element);
         }
         None
@@ -3987,7 +4014,34 @@ impl Window {
                 self.reuse_paint(deferred_draw.paint_range.clone());
             }
             let paint_end = self.paint_index();
+            let scene_range = paint_start.scene_index..paint_end.scene_index;
             deferred_draw.paint_range = paint_start..paint_end;
+
+            // Overlays that draw nothing, such as dock resize handles, hide nothing.
+            let drew = self
+                .next_frame
+                .scene
+                .paint_operations
+                .get(scene_range)
+                .is_some_and(|operations| {
+                    operations
+                        .iter()
+                        .any(|operation| matches!(operation, crate::PaintOperation::Primitive(_)))
+                });
+            let hitboxes = deferred_draw.prepaint_range.start.hitboxes_index
+                ..deferred_draw.prepaint_range.end.hitboxes_index;
+            if drew
+                && let Some(bounds) = self
+                    .next_frame
+                    .hitboxes
+                    .get(hitboxes)
+                    .into_iter()
+                    .flatten()
+                    .map(|hitbox| hitbox.bounds)
+                    .reduce(|bounds, other| bounds.union(&other))
+            {
+                self.next_frame.overlay_bounds.push(bounds);
+            }
         }
         self.next_frame.deferred_draws = deferred_draws;
         self.element_id_stack.clear();
@@ -7932,6 +7986,86 @@ mod tests {
         TouchEvent, TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance,
         WindowOptions, canvas, div, hsla, point, px, size,
     };
+
+    #[gpui::test]
+    fn test_overlay_bounds_follow_deferred_draws(cx: &mut TestAppContext) {
+        struct WithPopover {
+            shown: bool,
+            changes: Rc<Cell<usize>>,
+            _subscription: Option<crate::Subscription>,
+        }
+
+        impl Render for WithPopover {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                if self._subscription.is_none() {
+                    let changes = self.changes.clone();
+                    self._subscription = Some(cx.observe_overlay_bounds(window, move |_, _, _| {
+                        changes.set(changes.get() + 1)
+                    }));
+                }
+                crate::util::FluentBuilder::when(div().size_full(), self.shown, |this| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top(px(10.))
+                            .left(px(20.))
+                            .child(crate::deferred(
+                                div().size(px(50.)).bg(hsla(0., 0., 0.5, 1.)).occlude(),
+                            )),
+                    )
+                    // Like a dock's resize handle, which draws nothing.
+                    .child(crate::deferred(div().size(px(6.)).occlude()))
+                })
+            }
+        }
+
+        let changes = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let changes = changes.clone();
+            move |_, _| WithPopover {
+                shown: false,
+                changes,
+                _subscription: None,
+            }
+        });
+        cx.run_until_parked();
+        let overlays = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |_, window, _| window.overlay_bounds().to_vec())
+                .unwrap()
+        };
+        assert!(overlays(cx).is_empty());
+        // A new listener hears about the overlays as they are.
+        assert_eq!(changes.get(), 1);
+
+        window
+            .update(cx, |view, _, cx| {
+                view.shown = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            overlays(cx),
+            [Bounds::new(point(px(20.), px(10.)), size(px(50.), px(50.)))]
+        );
+        assert_eq!(changes.get(), 2);
+
+        // Redrawing the same overlays isn't a change.
+        window.update(cx, |_, window, _| window.refresh()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(changes.get(), 2);
+
+        window
+            .update(cx, |view, _, cx| {
+                view.shown = false;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(overlays(cx).is_empty());
+        assert_eq!(changes.get(), 3);
+    }
 
     #[gpui::test]
     async fn test_focus_handle_release(cx: &mut TestAppContext) {
