@@ -140,7 +140,7 @@ packages and addins that call `rstudioapi` keep working.
 | M4 | Packages + search *(done)* | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
 | M5 | Rmd/Quarto inline chunks *(done)* | Chunk execution with inline output. |
 | M6 | Help + Viewer *(done)* | WKWebView embedded; help, htmlwidgets, Shiny. |
-| M7 | RStudio layout | Two stacked, tabbed panes in the right dock; Console and Terminal as tabs; outline from an editor button. |
+| M7 | RStudio layout | Two stacked, tabbed panes in the right dock, with tabs dragged between them; Console, Terminal and Debug as tabs; an outline sidebar from an editor button. |
 | M8 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
 | M9 | Typst native preview | Live preview with source ↔ preview jumping. |
 | M10 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
@@ -972,37 +972,102 @@ All met, with CI green on every job:
   - File > Open on a `.Rproj` still opens just the file;
   - a widget's requested height waits for M7.
 
-### M7 scope (to plan after M6)
+### M7 plan
 
-Agreed so far:
-- **Right dock:** two stacked panes, each with a row of tabs (Plots, Help, Git and so on)
-  and a divider between them, as in RStudio. The status bar's panel buttons stay, for
-  getting panes back when a dock is closed.
-- **Console:** the bottom dock shows the R console and the terminal as tabs. Background
-  jobs come later, as another tab.
-- **Outline:** no outline panel. A button in the editor's toolbar, beside buffer search and
-  the selection controls, shows the outline.
-- **Visual mode:** the Quarto and R Markdown visual-mode button goes in that toolbar too,
-  once a visual editor exists. It's a large feature of its own.
+Decisions:
+- **Right dock:** two stacked panes with tabs, split as in RStudio. Environment and Git are on
+  top; Files, Plots, Packages, Help and Viewer are below.
+- **Moving tabs:** tabs can be dragged to reorder them or to move them to the other pane,
+  and each window remembers where they are.
+- **Outline:** RStudio's document outline, a sidebar inside the editor. It lists sections,
+  chunks and functions, jumps to one when clicked, and is toggled by a button in the editor's
+  toolbar. The outline panel goes.
+- **Bottom dock:** Console, Terminal and Debug as tabs.
+- **Status bar:** the panel buttons stay, for getting panes back when a dock is closed.
 
-Findings so far:
-- Zed's `Dock` holds panels but shows only its active one, chosen from the status bar; it
-  has no tabs and no split. The likely approach is to give `Dock` a tab row and an optional
-  split into two groups, so panels keep their actions, focus, zoom and saved sizes. The
-  alternative, a RezStudio container panel hosting the panes, would leave Zed's own panels
-  (Git, Files) without their dock behaviour.
-- Zed's `bottom_dock_layout` setting can already keep the bottom dock under the editor
-  with the right dock full height, which is RStudio's arrangement.
-- Help's web view follows its pane's bounds and snapshots under modals, so it should work
-  in a half-height pane; to check.
+Findings that shape the plan:
+- **How a dock draws:** `workspace::Dock` keeps a list of panels and one active index, and
+  draws only that panel, as a cached view.
+  - Panels learn when they show or hide through `Panel::set_active`, which Help and Viewer
+    rely on.
+  - The status bar's `PanelButtons` lists every panel in the dock, and clicking one makes it
+    the active panel.
+- **Sizes:** each panel keeps its own width or height (`PanelSizeState`), saved under
+  `dock_panel_size` in the key-value store. A split dock needs one width shared by both
+  panes.
+- **What's saved:** `DockData` saves only whether the dock is open, its active panel and
+  zoom. Pane contents, order and the divider need saving too, in the key-value store like
+  sizes, which avoids a database migration.
+- **Where panels are now:** Files, Outline and Git already default to the right dock, beside
+  Environment, Plots, Packages, Help and Viewer. Console, Terminal and Debug are in the
+  bottom dock.
+- **Bottom dock layout:** `bottom_dock_layout` is already `contained`, which keeps the bottom
+  dock under the editor with the right dock full height. That is RStudio's arrangement.
+- **Terminal:** the Terminal panel has its own tabs, one per terminal, so it sits as one tab
+  holding its own row of terminal tabs.
+- **Editor toolbar:** `crates/zed/src/zed/quick_action_bar.rs` already has buffer search,
+  Selection Controls and Editor Controls. The Outline button goes beside them.
+- **Outlines:** R's outline query lists functions and RStudio code sections (`# Title ----`).
+  R Markdown and Quarto use Markdown's, which lists headings but not chunks.
+- **Web views:** the Help and Viewer web views follow their element's bounds, snapshot under
+  modals and cut out tooltips and menus. A half-height pane needs no special handling, but
+  it should be checked.
 
-Open questions:
-- Which tabs go in the top and bottom panes by default (RStudio: Environment, History,
-  Connections, Git, Tutorial on top; Files, Plots, Packages, Help, Viewer below).
-- Whether Files moves from the left dock to the bottom-right pane.
-- Whether tabs can move between the two panes at first, or the split is fixed.
-- What the outline button opens: an RStudio-style outline sidebar inside the editor, Zed's
-  minimap with the outline beside it, or Zed's outline picker.
+Steps:
+
+1. **Dock panes (`workspace`).** A dock can hold one or two stacked panes. Each has its own
+   panels, active panel and tab row.
+   - **Tab row:** each panel's icon and name. Clicking one shows it. The status bar's
+     buttons still work, showing a panel in whichever pane holds it.
+   - **Showing:** each pane's active panel is drawn, cached as now, and gets
+     `set_active(true)` while the dock is open. Focusing or toggling a panel shows it in its
+     own pane.
+   - **Divider:** draggable between the two panes. Double-clicking it resets it to half and
+     half.
+   - **Width:** a split dock has one width, shared by every panel in it.
+   - **Zoom:** a zoomed panel fills the workspace as now, whichever pane it's in.
+   - **Saved per window:** which pane each panel is in, their order, each pane's active
+     panel, and the divider, in the key-value store.
+   - **Not split:** a dock with one pane looks as now, with a tab row added.
+2. **Dragging tabs.** Drag a tab within its row to reorder it, or onto the other pane's row
+   to move it there.
+   - Emptying a pane leaves the other with the whole dock.
+   - While a tab is dragged, a drop zone at the dock's top or bottom edge makes a second pane
+     again.
+3. **RStudio defaults.**
+   - **Right dock:** Environment and Git on top; Files, Plots, Packages, Help and Viewer below.
+   - **Bottom dock:** Console, Terminal and Debug as tabs.
+   - **Outline panel:** no longer registered. The outline picker (cmd-shift-o) stays.
+   - **New panels:** a panel the defaults don't name goes to the end of the bottom pane.
+   - **Widget heights (from M6):** a widget's requested height makes the Viewer's pane at
+     least that tall, and `-1` gives it the whole dock.
+4. **Outline sidebar.** A toolbar button toggles a sidebar at the right of the editor,
+   remembered per editor.
+   - **Contents:** the document's outline: R sections and functions; Markdown headings; and
+     in R Markdown and Quarto, chunks by label.
+   - **Using it:** clicking an entry jumps there, and the entry at the cursor is highlighted.
+   - **Outline query:** R Markdown and Quarto get one that adds chunks.
+   - **Where it lives:** it belongs to the editor, not to a dock, so it moves with the editor
+     when panes are split.
+5. **Tests.**
+   - **Unit tests:**
+     - dock panes: showing, `set_active`, the divider, sharing a width, saving and
+       restoring, dragging tabs, emptying a pane;
+     - the default layout and new panels;
+     - the Viewer's requested height;
+     - the outline sidebar's entries for R, R Markdown and Quarto, and jumping to them.
+   - **Checks by hand:** Help and Viewer in a half-height pane, with snapshots under the
+     command palette and tooltips over pages; a Shiny app in the bottom pane.
+
+Done when:
+- A new window shows Environment and Git above, and Files, Plots, Packages, Help and Viewer
+  below, in the right dock, with the console under the editor.
+- Clicking a tab switches panes; dragging one between panes or reordering it is remembered
+  after reopening the window.
+- Console, Terminal and Debug are tabs in the bottom dock.
+- The editor's Outline button shows an outline of an R file's sections and functions, and
+  of an R Markdown file's headings and chunks, and clicking an entry jumps to it.
+- Help pages and htmlwidgets work in a half-height pane, under menus and the palette.
 
 ## Risks
 
