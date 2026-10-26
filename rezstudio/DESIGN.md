@@ -141,9 +141,10 @@ packages and addins that call `rstudioapi` keep working.
 | M5 | Rmd/Quarto inline chunks *(done)* | Chunk execution with inline output. |
 | M6 | Help + Viewer *(done)* | WKWebView embedded; help, htmlwidgets, Shiny. |
 | M7 | RStudio layout *(done)* | Two stacked, tabbed panes in the right dock, with tabs dragged between them; Console, Terminal and Debug as tabs; an outline sidebar from an editor button. |
-| M8 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
-| M9 | Typst native preview | Live preview with source ↔ preview jumping. |
-| M10 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
+| M8 | Documents and Environment | Render button for Quarto and R Markdown with output in the Viewer; Environment pane with RStudio's environment menu, grouping, memory use, workspace save/load and Import Dataset. |
+| M9 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
+| M10 | Typst native preview | Live preview with source ↔ preview jumping. |
+| M11 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
 
 ### M1 plan (done)
 
@@ -1155,6 +1156,68 @@ Done when:
 - The editor's Outline button shows an outline of an R file's sections and functions, and
   of an R Markdown file's headings and chunks, and clicking an entry jumps to it.
 - Help pages and htmlwidgets work in a half-height pane, under menus and the palette.
+
+### M8 plan
+
+Decisions:
+- **Order:** this comes before Python parity, which moves to M9. Neither feature needs
+  Python, and M9 then ports a finished Environment pane once instead of twice.
+- **Environment menu:** as in RStudio, a menu at the top of the Environment pane lists
+  Global Environment and then every `package:` environment on R's search path, in
+  `search()` order. Package environments are read-only: no delete or Remove All. RStudio's
+  language picker beside it ("R") waits for M9, when there is a second language.
+- **Grouping:** RStudio's list view, with rows under Data, Values and Functions headings.
+  Data frames read "150 obs. of 5 variables". Clicking a column heading sorts by it.
+- **Memory:** RStudio's memory indicator in the pane's toolbar, showing what the R session
+  uses. Clicking it shows a report with the session's and the system's memory, and a way
+  to free unused R memory.
+- **Workspace:** buttons to save the environment to an `.RData` file and to load one. They
+  run `save.image()` and `load()` in the console, so the code shows there, as in RStudio.
+- **Import Dataset:** RStudio's menu with From Text (readr), From Excel (readxl) and From
+  SPSS, SAS and Stata (haven). A dialog picks the file, previews the first rows, sets the
+  options and shows the code. Import runs that code in the console and opens the result
+  with `View()`.
+- **Rendering:** a Render button in the editor toolbar of `.qmd` and `.Rmd` files, and
+  Cmd+Shift+K, as in RStudio.
+  - Rendering runs in its own process, not the console's R session.
+  - Its output streams to a Render tab in the bottom dock, which has a stop button.
+  - HTML opens in the Viewer pane. PDF and Word open in the system's default app.
+  - `.qmd` files use `quarto preview`, which serves the page for the Viewer. `.Rmd` files
+    use `rmarkdown::render()` in `Rscript`, and the Viewer shows the file it writes.
+  - A Render on Save toggle re-renders whenever the file is saved.
+
+To check before starting:
+- Ark's variables comm lists only the global environment (or the frame being debugged).
+  Package environments would be listed with `evaluate_code`, R code returning each
+  object's name, type, size and a short value. `package:base` has over a thousand objects,
+  so that needs timing.
+- How the Viewer opens a local HTML file (a `file://` URL in WKWebView needs read access
+  to its folder), and what `quarto preview` prints when it's ready to serve.
+- Whether the R process's memory can be read with `sysinfo` from Ark's process id, which
+  avoids running R code while R is busy.
+
+Steps:
+1. **Environment menu.** The menu, listing package environments, and refreshing the list
+   after each execution, so `library()` adds its package at once.
+2. **Grouping and sorting.** Data, Values and Functions headings, RStudio's data frame
+   summaries, and sorting by column.
+3. **Memory and workspace.** The memory indicator and report, and the save and load
+   buttons.
+4. **Import Dataset.** The menu, the dialog with its preview and code, and importing.
+5. **Rendering.** The Render button and shortcut, the Render tab, the Viewer for `.qmd`
+   and `.Rmd`, other formats, and Render on Save.
+6. **Tests and live checks.** Unit tests for each step, a real-R test for package
+   listings and imports, and live checks of rendering a Quarto and an R Markdown document.
+
+Done when:
+- The Environment menu switches between Global Environment and attached packages, and
+  `library()` adds a package to it.
+- Rows are grouped as in RStudio and sort by column.
+- The memory indicator shows the session's memory, and saving and loading a workspace
+  works.
+- Import Dataset brings in a CSV, an Excel sheet and a Stata file.
+- Render on a `.qmd` and an `.Rmd` file shows the HTML in the Viewer, with output in the
+  Render tab.
 
 ## Risks
 
