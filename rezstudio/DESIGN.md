@@ -1192,8 +1192,8 @@ To check before starting:
   are listed by R code run with `evaluate_code`.
 - How the Viewer opens a local HTML file (a `file://` URL in WKWebView needs read access
   to its folder), and what `quarto preview` prints when it's ready to serve.
-- Whether the R process's memory can be read with `sysinfo` from Ark's process id, which
-  avoids running R code while R is busy.
+- *(Checked in step 3.)* The R session's memory is read with `sysinfo`, from the process
+  Ark runs under, so it doesn't need R and keeps updating while R is busy.
 
 Steps:
 1. **Environment menu.** *(Done.)* A menu at the left of the Environment pane's toolbar
@@ -1241,8 +1241,22 @@ Steps:
      the headings in the pane.
    - **Not checked live:** the machine was in use. The headings and group rows reuse
      the pane's existing row layout.
-3. **Memory and workspace.** The memory indicator and report, and the save and load
-   buttons.
+3. **Memory and workspace.** *(Done.)* The pane's toolbar now has two rows, as in
+   RStudio: Load, Save, the memory reading and Remove All above, and the environment
+   menu and filter below.
+   - **Memory:** every five seconds the pane sums the resident memory of the process R
+     runs under (the shell supervising Ark), Ark, and any processes R started.
+     `RSession::process_id` gives the shell's id. The toolbar shows the total, and its
+     menu shows the session's and the system's memory and Free Unused R Memory, which
+     runs `gc()` in the console. The reading is hidden while R isn't running.
+   - **Workspace:** Save Workspace As asks for a file in R's working directory,
+     suggesting `.RData`, and runs `save.image("…")` in the console. Load Workspace asks
+     for a file and runs `load("…")`. Paths under the home folder are written with `~`,
+     as in RStudio. Both are also actions, for the command palette.
+   - **Tests:** the memory reader finds a real shell's child process and the system
+     totals, nested and cyclic parent tables, the save and load code from simulated
+     dialogs, cancelling a dialog, and path quoting.
+   - **Not checked live:** the machine was in use.
 4. **Import Dataset.** The menu, the dialog with its preview and code, and importing.
 5. **Rendering.** The Render button and shortcut, the Render tab, the Viewer for `.qmd`
    and `.Rmd`, other formats, and Render on Save.

@@ -1,5 +1,6 @@
 //! The Environment pane: the R session's variables, live, like RStudio's.
 
+mod memory;
 mod search_path;
 mod tree;
 
@@ -7,12 +8,15 @@ use anyhow::{Context as _, Result};
 use editor::Editor;
 use gpui::{
     Action, Anchor, App, AsyncWindowContext, Empty, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window, actions, px,
-    uniform_list,
+    Focusable, PathPromptOptions, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window,
+    actions, px, uniform_list,
 };
+use memory::{MemorySampler, MemoryUsage, format_memory};
+use r_console::ConsolePanel;
 use runtime::comms::{InspectedVariable, VariablesEvent};
 use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use std::ops::Range;
+use std::path::Path;
 use std::time::Duration;
 use tree::{Row, Sort, SortColumn, VariablePath, VariableTree};
 use ui::{
@@ -30,12 +34,17 @@ actions!(
         ToggleFocus,
         /// Removes every variable from the R session's global environment.
         ClearEnvironment,
+        /// Saves the R session's global environment to an `.RData` file.
+        SaveWorkspace,
+        /// Loads an `.RData` file into the R session's global environment.
+        LoadWorkspace,
     ]
 );
 
 const PANEL_KEY: &str = "EnvironmentPanel";
 /// Ark answers on R's thread, so a request can wait for running code.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const MEMORY_INTERVAL: Duration = Duration::from_secs(5);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -47,6 +56,7 @@ pub fn init(cx: &mut App) {
 }
 
 pub struct EnvironmentPanel {
+    workspace: WeakEntity<Workspace>,
     workspace_id: EntityId,
     session: Option<Entity<RSession>>,
     /// The global environment, kept live by Ark's variables comm.
@@ -62,6 +72,8 @@ pub struct EnvironmentPanel {
     position: DockPosition,
     /// The last failed request, shown under the toolbar.
     error: Option<String>,
+    memory: Option<MemoryUsage>,
+    _memory_task: Task<()>,
     _session_subscription: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
@@ -100,6 +112,7 @@ impl EnvironmentPanel {
             ));
         }
         let mut this = Self {
+            workspace: workspace.weak_handle(),
             workspace_id,
             session: None,
             tree: VariableTree::default(),
@@ -111,6 +124,8 @@ impl EnvironmentPanel {
             focus_handle: cx.focus_handle(),
             position: DockPosition::Right,
             error: None,
+            memory: None,
+            _memory_task: Self::watch_memory(cx),
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
@@ -266,6 +281,178 @@ impl EnvironmentPanel {
             .log_err();
         })
         .detach();
+    }
+
+    /// Samples the R session's memory every few seconds while R runs.
+    fn watch_memory(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let mut sampler = MemorySampler::new();
+            loop {
+                let Ok(root) = this.read_with(cx, |this, cx| {
+                    this.session
+                        .as_ref()
+                        .and_then(|session| session.read(cx).process_id())
+                }) else {
+                    break;
+                };
+                let usage = match root {
+                    Some(root) => {
+                        let (returned, usage) = cx
+                            .background_spawn(async move {
+                                let usage = sampler.sample(root);
+                                (sampler, usage)
+                            })
+                            .await;
+                        sampler = returned;
+                        Some(usage)
+                    }
+                    None => None,
+                };
+                let updated = this.update(cx, |this, cx| {
+                    if this.memory != usage {
+                        this.memory = usage;
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
+                    break;
+                }
+                cx.background_executor().timer(MEMORY_INTERVAL).await;
+            }
+        })
+    }
+
+    /// Runs `code` in the console, showing it and its output there, as
+    /// RStudio does for the pane's commands.
+    fn run_in_console(&mut self, code: String, window: &mut Window, cx: &mut Context<Self>) {
+        let console = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).panel::<ConsolePanel>(cx));
+        match console {
+            Some(console) => {
+                console.update(cx, |console, cx| console.run_from_editor(&code, cx));
+                let workspace = self.workspace.clone();
+                // Opening the console updates the docks, which can't happen mid-update.
+                window.defer(cx, move |window, cx| {
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.open_panel::<ConsolePanel>(window, cx)
+                        })
+                        .log_err();
+                });
+            }
+            None => {
+                if let Some(session) = self.session.clone()
+                    && let Err(error) = session.update(cx, |session, cx| session.execute(code, cx))
+                {
+                    self.error = Some(format!("{error:#}"));
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Where the dialogs start: R's working directory.
+    fn working_directory(&self, cx: &App) -> Option<std::path::PathBuf> {
+        let session = self.session.as_ref()?.read(cx);
+        Some(
+            session
+                .working_directory()
+                .unwrap_or(session.project_root())
+                .clone(),
+        )
+    }
+
+    fn save_workspace(&mut self, _: &SaveWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(directory) = self.working_directory(cx) else {
+            return;
+        };
+        let path = cx.prompt_for_new_path(&directory, Some(".RData"));
+        cx.spawn_in(window, async move |this, cx| {
+            let path = path.await;
+            this.update_in(cx, |this, window, cx| match path {
+                Ok(Ok(Some(path))) => {
+                    this.run_in_console(format!("save.image({})", r_path(&path)), window, cx)
+                }
+                Ok(Ok(None)) | Err(_) => {}
+                Ok(Err(error)) => {
+                    this.error = Some(format!("{error:#}"));
+                    cx.notify();
+                }
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn load_workspace(&mut self, _: &LoadWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Load".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = paths.await;
+            this.update_in(cx, |this, window, cx| match paths {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.first() {
+                        this.run_in_console(format!("load({})", r_path(path)), window, cx)
+                    }
+                }
+                Ok(Ok(None)) | Err(_) => {}
+                Ok(Err(error)) => {
+                    this.error = Some(format!("{error:#}"));
+                    cx.notify();
+                }
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn render_memory_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let memory = self.memory?;
+        let panel = cx.weak_entity();
+        Some(
+            PopoverMenu::new("memory-menu")
+                .trigger_with_tooltip(
+                    Button::new("memory-menu-trigger", format_memory(memory.session))
+                        .label_size(LabelSize::Small)
+                        .end_icon(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        ),
+                    Tooltip::text("Memory Used by R"),
+                )
+                .anchor(Anchor::TopLeft)
+                .menu(move |window, cx| {
+                    let panel = panel.clone();
+                    Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                        menu.header("Memory Usage")
+                            .label(format!("R session: {}", format_memory(memory.session)))
+                            .label(format!(
+                                "System: {} of {} used",
+                                format_memory(memory.system_used),
+                                format_memory(memory.system_total)
+                            ))
+                            .separator()
+                            .entry("Free Unused R Memory", None, move |window, cx| {
+                                panel
+                                    .update(cx, |panel, cx| {
+                                        panel.run_in_console("gc()".to_string(), window, cx)
+                                    })
+                                    .log_err();
+                            })
+                    }))
+                })
+                .into_any_element(),
+        )
     }
 
     fn sort_by(&mut self, column: SortColumn, cx: &mut Context<Self>) {
@@ -600,6 +787,15 @@ impl EnvironmentPanel {
     }
 }
 
+/// `path` as an R string, with the home folder written `~` as RStudio does.
+fn r_path(path: &Path) -> String {
+    let text = match path.strip_prefix(util::paths::home_dir()) {
+        Ok(relative) => format!("~/{}", relative.to_string_lossy()),
+        Err(_) => path.to_string_lossy().into_owned(),
+    };
+    runtime::r_string(&text)
+}
+
 struct PackageEnvironment {
     /// The name on R's search path, such as `package:stats`.
     search_name: String,
@@ -666,6 +862,8 @@ impl Render for EnvironmentPanel {
             .key_context("EnvironmentPanel")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::clear_environment))
+            .on_action(cx.listener(Self::save_workspace))
+            .on_action(cx.listener(Self::load_workspace))
             .size_full()
             .bg(cx.theme().colors().panel_background)
             .child(
@@ -675,8 +873,26 @@ impl Render for EnvironmentPanel {
                     .gap_1()
                     .border_b_1()
                     .border_color(cx.theme().colors().border_variant)
-                    .child(self.render_environment_menu(cx))
-                    .child(div().flex_1().min_w_0().child(self.filter.clone()))
+                    .child(
+                        IconButton::new("load-workspace", IconName::FolderOpen)
+                            .icon_size(IconSize::Small)
+                            .disabled(self.session.is_none())
+                            .tooltip(Tooltip::text("Load Workspace…"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.load_workspace(&LoadWorkspace, window, cx)
+                            })),
+                    )
+                    .child(
+                        IconButton::new("save-workspace", IconName::Download)
+                            .icon_size(IconSize::Small)
+                            .disabled(self.session.is_none())
+                            .tooltip(Tooltip::text("Save Workspace As…"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.save_workspace(&SaveWorkspace, window, cx)
+                            })),
+                    )
+                    .children(self.render_memory_menu(cx))
+                    .child(div().flex_1())
                     .child(
                         IconButton::new("clear-environment", IconName::Trash)
                             .icon_size(IconSize::Small)
@@ -686,6 +902,16 @@ impl Render for EnvironmentPanel {
                                 this.clear_environment(&ClearEnvironment, window, cx)
                             })),
                     ),
+            )
+            .child(
+                h_flex()
+                    .px_2()
+                    .py_1()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(self.render_environment_menu(cx))
+                    .child(div().flex_1().min_w_0().child(self.filter.clone())),
             )
             .when(placeholder.is_none(), |this| {
                 let name = self.render_sort_heading("Name", SortColumn::Name, cx);
@@ -1040,6 +1266,53 @@ mod tests {
         assert_eq!(harness.row_names(cx), ["[Values]", "a", "c", "b"]);
         click("sort-by-Name", cx);
         assert_eq!(harness.row_names(cx), ["[Values]", "a", "b", "c"]);
+    }
+
+    #[gpui::test]
+    async fn test_save_and_load_run_in_the_console(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        let mut next_code = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            let request = harness.requests.try_recv().expect("an execute request");
+            match &request.content {
+                JupyterMessageContent::ExecuteRequest(execute) => execute.code.clone(),
+                other => panic!("expected execute_request, got {other:?}"),
+            }
+        };
+
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.save_workspace(&SaveWorkspace, window, cx)
+        });
+        cx.simulate_new_path_selection(|directory| {
+            assert_eq!(directory, Path::new("/projects/analysis"));
+            Some(PathBuf::from("/projects/analysis/.RData"))
+        });
+        assert_eq!(next_code(cx), r#"save.image("/projects/analysis/.RData")"#);
+
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.load_workspace(&LoadWorkspace, window, cx)
+        });
+        cx.simulate_path_prompt_response(|_| {
+            Some(vec![util::paths::home_dir().join("data/old.RData")])
+        });
+        assert_eq!(next_code(cx), r#"load("~/data/old.RData")"#);
+
+        // Cancelling runs nothing.
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.load_workspace(&LoadWorkspace, window, cx)
+        });
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+        assert!(harness.requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_r_path_abbreviates_the_home_folder() {
+        assert_eq!(
+            r_path(&util::paths::home_dir().join("a \"b\".RData")),
+            r#""~/a \"b\".RData""#
+        );
+        assert_eq!(r_path(Path::new("/tmp/x.RData")), r#""/tmp/x.RData""#);
     }
 
     #[gpui::test]

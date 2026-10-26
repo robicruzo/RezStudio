@@ -71,6 +71,11 @@ impl ArkProcess {
         self.process.kill().log_err();
     }
 
+    /// The id of the shell supervising Ark, whose child Ark is.
+    pub fn id(&self) -> u32 {
+        self.process.id()
+    }
+
     pub fn status(
         &mut self,
     ) -> impl Future<Output = std::io::Result<std::process::ExitStatus>> + use<> {

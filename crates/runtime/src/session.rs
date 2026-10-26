@@ -277,6 +277,12 @@ impl RSession {
         self.working_directory.as_ref()
     }
 
+    /// The id of the process R runs under while it's running. Ark is a child
+    /// of it, and processes R starts are below Ark.
+    pub fn process_id(&self) -> Option<u32> {
+        self.process.as_ref().map(|process| process.id())
+    }
+
     pub fn language_server_port(&self) -> Option<u16> {
         self.lsp_port
     }
