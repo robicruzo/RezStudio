@@ -1015,20 +1015,41 @@ Findings that shape the plan:
 
 Steps:
 
-1. **Dock panes (`workspace`).** A dock can hold one or two stacked panes. Each has its own
-   panels, active panel and tab row.
-   - **Tab row:** each panel's icon and name. Clicking one shows it. The status bar's
-     buttons still work, showing a panel in whichever pane holds it.
-   - **Showing:** each pane's active panel is drawn, cached as now, and gets
-     `set_active(true)` while the dock is open. Focusing or toggling a panel shows it in its
-     own pane.
-   - **Divider:** draggable between the two panes. Double-clicking it resets it to half and
-     half.
-   - **Width:** a split dock has one width, shared by every panel in it.
-   - **Zoom:** a zoomed panel fills the workspace as now, whichever pane it's in.
-   - **Saved per window:** which pane each panel is in, their order, each pane's active
-     panel, and the divider, in the key-value store.
-   - **Not split:** a dock with one pane looks as now, with a tab row added.
+1. **Dock panes (`workspace`).** *(Done.)* A dock can hold one or two panes, each with its own
+   panels, the panel it shows, and a tab row.
+   - **Layout:** `DockLayout` lists each pane's panels by persistent name, in tab order,
+     with the one it shows, and the divider's share.
+     - Panels it doesn't name go at the end of the last pane, so new panels still appear.
+       A pane with none of its panels present gives the dock to the other.
+     - `Dock::set_layout` applies a layout and saves it. The workspace restores a saved
+       one when the dock gets its first panel.
+     - It's saved per window under `dock_layout` in the key-value store, keyed like panel
+       sizes, so there's no database migration.
+   - **What's shown:** each pane shows its remembered panel, else the dock's active panel
+     if it's there, else its first.
+     - `Dock::active_panel()` keeps Zed's meaning: the panel last chosen, which focus and
+       zoom follow. `visible_panels()` lists what each pane shows.
+     - Choosing a panel hides only the one its own pane showed. Opening or closing the
+       dock tells every shown panel.
+     - A panel shown because the layout changed, rather than because it was chosen, is
+       only told while the dock is open, so a web view never shows in a closed dock.
+   - **Tab rows:** a pane with more than one panel shows each one's icon and name: its
+     status bar tooltip without "Panel", so "Project Panel" is "Project". Clicking a tab
+     shows and focuses that panel. The status bar highlights every shown panel, and its
+     buttons still work.
+   - **Divider:** side docks stack their panes and the bottom dock puts them side by side.
+     The divider can be dragged (each pane keeps at least a tenth of the dock), and
+     double-clicking it resets it to half and half. The layout is saved when a drag ends.
+   - **Width:** a split dock resizes all its panels together, and splitting evens their
+     sizes, so both panes share one width.
+   - **Zed's tests:** single-pane docks behave as before, and the workspace's 250 tests
+     pass unchanged.
+   - **New tests:** split showing and hiding, panes remembering what they show, the shared
+     width, closing and reopening, a new panel joining the last pane, an emptied pane, and
+     saving and restoring.
+   - **Checked live:** a temporary split of a real window's right dock showed Environment
+     and Git above and Project, Plots, Packages, Help, Viewer and Outline below, with tab
+     rows and the divider. The bottom dock showed Terminal, Debug and R Console as tabs.
 2. **Dragging tabs.** Drag a tab within its row to reorder it, or onto the other pane's row
    to move it there.
    - Emptying a pane leaves the other with the whole dock.

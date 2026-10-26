@@ -2656,6 +2656,34 @@ impl Workspace {
         dock::Dock::load_persisted_size_state(self, panel_key, cx)
     }
 
+    pub fn persist_dock_layout(
+        &self,
+        position: DockPosition,
+        layout: &dock::DockLayout,
+        cx: &mut App,
+    ) {
+        let Some(workspace_id) = self
+            .database_id()
+            .map(|id| i64::from(id).to_string())
+            .or(self.session_id())
+        else {
+            return;
+        };
+        let json = match serde_json::to_string(layout) {
+            Ok(json) => json,
+            Err(error) => {
+                log::error!("couldn't save the dock's layout: {error}");
+                return;
+            }
+        };
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        let key = format!("{workspace_id}:{}", position.label());
+        cx.background_spawn(
+            async move { kvp.scoped(dock::DOCK_LAYOUT_KEY).write(key, json).await },
+        )
+        .detach_and_log_err(cx);
+    }
+
     pub fn persist_panel_size_state(
         &self,
         panel_key: &str,
@@ -2859,7 +2887,17 @@ impl Workspace {
                     })
                 });
 
+        let persisted_layout = (!dock.read(cx).layout_restored)
+            .then(|| dock::Dock::load_persisted_layout(self, dock_position, cx))
+            .flatten();
+
         dock.update(cx, |dock, cx| {
+            if !dock.layout_restored {
+                dock.layout_restored = true;
+                if let Some(layout) = persisted_layout {
+                    dock.apply_layout(layout, window, cx);
+                }
+            }
             let index = dock.add_panel(panel.clone(), self.weak_self.clone(), window, cx);
             if let Some(size_state) = persisted_size_state {
                 dock.set_panel_size_state(&panel, size_state, cx);
@@ -16787,6 +16825,259 @@ mod tests {
                 .is_some()),
             "reopen with an active modal that dismisses after the action should reveal the stash"
         );
+    }
+
+    /// Dock panels with their own names, which dock layouts go by.
+    macro_rules! named_panel {
+        ($type:ident, $name:literal, $priority:literal) => {
+            struct $type {
+                active: bool,
+                focus_handle: FocusHandle,
+            }
+
+            impl $type {
+                fn new(cx: &mut Context<Self>) -> Self {
+                    Self {
+                        active: false,
+                        focus_handle: cx.focus_handle(),
+                    }
+                }
+            }
+
+            impl EventEmitter<PanelEvent> for $type {}
+
+            impl Focusable for $type {
+                fn focus_handle(&self, _: &App) -> FocusHandle {
+                    self.focus_handle.clone()
+                }
+            }
+
+            impl Render for $type {
+                fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                    div().size_full().track_focus(&self.focus_handle)
+                }
+            }
+
+            impl Panel for $type {
+                fn persistent_name() -> &'static str {
+                    $name
+                }
+                fn panel_key() -> &'static str {
+                    $name
+                }
+                fn position(&self, _: &Window, _: &App) -> DockPosition {
+                    DockPosition::Right
+                }
+                fn position_is_valid(&self, _: DockPosition) -> bool {
+                    true
+                }
+                fn set_position(&mut self, _: DockPosition, _: &mut Window, _: &mut Context<Self>) {
+                }
+                fn default_size(&self, _: &Window, _: &App) -> Pixels {
+                    px(300.) + px($priority as f32)
+                }
+                fn icon(&self, _: &Window, _: &App) -> Option<ui::IconName> {
+                    Some(ui::IconName::Folder)
+                }
+                fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {
+                    Some($name)
+                }
+                fn toggle_action(&self) -> Box<dyn Action> {
+                    Box::new(ToggleRightDock)
+                }
+                fn set_active(&mut self, active: bool, _: &mut Window, _: &mut Context<Self>) {
+                    self.active = active;
+                }
+                fn activation_priority(&self) -> u32 {
+                    $priority
+                }
+            }
+        };
+    }
+
+    named_panel!(EnvironmentPanel, "Environment", 101);
+    named_panel!(GitPanel, "Git", 102);
+    named_panel!(FilesPanel, "Files", 103);
+    named_panel!(PlotsPanel, "Plots", 104);
+    named_panel!(HelpPanel, "Help", 105);
+
+    fn pane(panels: &[&str], active: Option<&str>) -> dock::DockPaneLayout {
+        dock::DockPaneLayout {
+            panels: panels.iter().map(|name| name.to_string()).collect(),
+            active: active.map(str::to_string),
+        }
+    }
+
+    #[gpui::test]
+    async fn test_dock_panes(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let (environment, git, files, plots) = workspace.update_in(cx, |workspace, window, cx| {
+            let environment = cx.new(EnvironmentPanel::new);
+            let git = cx.new(GitPanel::new);
+            let files = cx.new(FilesPanel::new);
+            let plots = cx.new(PlotsPanel::new);
+            workspace.add_panel(environment.clone(), window, cx);
+            workspace.add_panel(git.clone(), window, cx);
+            workspace.add_panel(files.clone(), window, cx);
+            workspace.add_panel(plots.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            (environment, git, files, plots)
+        });
+        let right_dock = workspace.read_with(cx, |workspace, _| workspace.right_dock().clone());
+        let active = |cx: &mut VisualTestContext| {
+            [
+                environment.read_with(cx, |panel, _| panel.active),
+                git.read_with(cx, |panel, _| panel.active),
+                files.read_with(cx, |panel, _| panel.active),
+                plots.read_with(cx, |panel, _| panel.active),
+            ]
+        };
+        let visible = |cx: &mut VisualTestContext| {
+            right_dock.read_with(cx, |dock, _| {
+                dock.visible_panels()
+                    .iter()
+                    .map(|panel| panel.persistent_name())
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        // One pane, as in Zed: only the active panel shows.
+        assert!(!right_dock.read_with(cx, |dock, _| dock.is_split()));
+        assert_eq!(visible(cx), ["Environment"]);
+
+        // Two panes each show a panel.
+        right_dock.update_in(cx, |dock, window, cx| {
+            dock.set_layout(
+                dock::DockLayout {
+                    panes: vec![
+                        pane(&["Environment", "Git"], Some("Environment")),
+                        pane(&["Files", "Plots"], Some("Plots")),
+                    ],
+                    divider: 0.4,
+                },
+                window,
+                cx,
+            )
+        });
+        assert!(right_dock.read_with(cx, |dock, _| dock.is_split()));
+        assert_eq!(visible(cx), ["Environment", "Plots"]);
+        assert_eq!(active(cx), [true, false, false, true]);
+
+        // Showing a panel hides only the one its pane showed.
+        right_dock.update_in(cx, |dock, window, cx| {
+            let files_ix = dock.panel_index_for_type::<FilesPanel>().unwrap();
+            dock.activate_panel(files_ix, window, cx)
+        });
+        assert_eq!(visible(cx), ["Environment", "Files"]);
+        assert_eq!(active(cx), [true, false, true, false]);
+        right_dock.update_in(cx, |dock, window, cx| {
+            dock.show_panel_from_tab(git.entity_id(), window, cx)
+        });
+        assert_eq!(visible(cx), ["Git", "Files"]);
+        assert_eq!(active(cx), [false, true, true, false]);
+        assert_eq!(
+            right_dock.read_with(cx, |dock, _| dock.layout().panes[1].active.clone()),
+            Some("Files".to_string()),
+            "each pane remembers what it shows"
+        );
+
+        // The panes share the dock's width.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.resize_right_dock(px(500.), window, cx);
+            let dock = workspace.right_dock().read(cx);
+            for panel in [
+                environment.to_any(),
+                git.to_any(),
+                files.to_any(),
+                plots.to_any(),
+            ] {
+                let panel = dock.panel_for_id(panel.entity_id()).unwrap();
+                assert_eq!(
+                    dock.stored_panel_size(panel.as_ref(), window, cx),
+                    Some(px(500.))
+                );
+            }
+        });
+
+        // Closing the dock hides both; opening it shows them again.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Right, window, cx)
+        });
+        assert_eq!(active(cx), [false, false, false, false]);
+        assert!(visible(cx).is_empty());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_dock(DockPosition::Right, window, cx)
+        });
+        assert_eq!(active(cx), [false, true, true, false]);
+
+        // A panel the layout doesn't name joins the last pane, without showing.
+        let help = workspace.update_in(cx, |workspace, window, cx| {
+            let help = cx.new(HelpPanel::new);
+            workspace.add_panel(help.clone(), window, cx);
+            help
+        });
+        assert!(!help.read_with(cx, |panel, _| panel.active));
+        assert_eq!(visible(cx), ["Git", "Files"]);
+
+        // A pane with nothing in it gives the dock to the other.
+        right_dock.update_in(cx, |dock, window, cx| {
+            dock.set_layout(
+                dock::DockLayout {
+                    panes: vec![pane(&[], None), pane(&[], None)],
+                    divider: 0.5,
+                },
+                window,
+                cx,
+            )
+        });
+        assert!(!right_dock.read_with(cx, |dock, _| dock.is_split()));
+        assert_eq!(visible(cx), ["Git"]);
+        assert_eq!(active(cx), [false, true, false, false]);
+    }
+
+    #[gpui::test]
+    async fn test_dock_layout_is_saved_and_restored(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let layout = dock::DockLayout {
+            panes: vec![
+                pane(&["Environment", "Git"], Some("Git")),
+                pane(&["Files", "Plots"], None),
+            ],
+            divider: 0.3,
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(cx.new(EnvironmentPanel::new), window, cx);
+            let layout = layout.clone();
+            workspace
+                .right_dock()
+                .update(cx, |dock, cx| dock.set_layout(layout, window, cx));
+        });
+        cx.run_until_parked();
+        let saved = workspace.read_with(cx, |workspace, cx| {
+            dock::Dock::load_persisted_layout(workspace, DockPosition::Right, cx)
+        });
+        assert_eq!(saved, Some(layout.clone()));
+
+        // A dock that hasn't looked for its saved layout takes it with its first panel.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.apply_layout(dock::DockLayout::default(), window, cx);
+                dock.layout_restored = false;
+            });
+            workspace.add_panel(cx.new(GitPanel::new), window, cx);
+            assert_eq!(workspace.right_dock().read(cx).layout(), &layout);
+        });
     }
 
     #[gpui::test]
