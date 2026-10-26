@@ -1379,6 +1379,7 @@ fn initialize_pane(
             toolbar.add_item(image_view_toolbar, window, cx);
         })
     });
+    outline_sidebar::attach(pane, window, cx);
 }
 
 fn open_about_window(cx: &mut App) {
@@ -5871,6 +5872,7 @@ mod tests {
                 "onboarding",
                 "outline",
                 "outline_panel",
+                "outline_sidebar",
                 "packages_panel",
                 "pane",
                 "picker",
@@ -6096,6 +6098,7 @@ mod tests {
             git_ui::init(cx);
             project_panel::init(cx);
             outline_panel::init(cx);
+            outline_sidebar::init(cx);
             terminal_view::init(cx);
             image_viewer::init(cx);
 

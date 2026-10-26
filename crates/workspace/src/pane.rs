@@ -19,11 +19,11 @@ use collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use futures::{StreamExt, stream::FuturesUnordered};
 use git::{CopyFilePermalink, OpenFilePermalink};
 use gpui::{
-    Action, Anchor, AnyElement, App, AsyncWindowContext, ClickEvent, ClipboardItem, Context, Div,
-    DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, FocusOutEvent,
-    Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point, PromptLevel, Render,
-    ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle, Window, actions,
-    anchored, deferred, prelude::*,
+    Action, Anchor, AnyElement, AnyView, App, AsyncWindowContext, ClickEvent, ClipboardItem,
+    Context, Div, DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle,
+    FocusOutEvent, Focusable, KeyContext, MouseButton, NavigationDirection, Pixels, Point,
+    PromptLevel, Render, ScrollHandle, Subscription, Task, TaskExt, WeakEntity, WeakFocusHandle,
+    Window, actions, anchored, deferred, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -453,6 +453,8 @@ pub struct Pane {
     /// If a certain project item wants to get recreated with specific data, it can persist its data before the recreation here.
     pub project_item_restoration_data: HashMap<ProjectItemKind, Box<dyn Any + Send>>,
     welcome_page: Option<Entity<crate::welcome::WelcomePage>>,
+    side_view: Option<AnyView>,
+    side_view_shown: bool,
 
     pub in_center_group: bool,
 }
@@ -625,6 +627,8 @@ impl Pane {
             diagnostic_summary_update: Task::ready(()),
             project_item_restoration_data: HashMap::default(),
             welcome_page: None,
+            side_view: None,
+            side_view_shown: false,
             in_center_group: false,
         }
     }
@@ -2608,6 +2612,28 @@ impl Pane {
 
     pub fn toolbar(&self) -> &Entity<Toolbar> {
         &self.toolbar
+    }
+
+    /// Sets a view that can be shown to the right of the active item, below the
+    /// toolbar. The pane keeps it alive while hidden.
+    pub fn set_side_view(&mut self, side_view: Option<AnyView>, cx: &mut Context<Self>) {
+        self.side_view = side_view;
+        cx.notify();
+    }
+
+    pub fn set_side_view_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.side_view_shown != shown {
+            self.side_view_shown = shown;
+            cx.notify();
+        }
+    }
+
+    pub fn side_view(&self) -> Option<AnyView> {
+        self.side_view.clone()
+    }
+
+    pub fn is_side_view_shown(&self) -> bool {
+        self.side_view_shown && self.side_view.is_some()
     }
 
     pub fn handle_deleted_project_item(
@@ -4624,7 +4650,26 @@ impl Render for Pane {
                                 .size_full()
                                 .overflow_hidden()
                                 .child(self.toolbar.clone())
-                                .child(item.to_any_view())
+                                .map(|div| {
+                                    match self.side_view.clone().filter(|_| self.side_view_shown) {
+                                        Some(side_view) => div.child(
+                                            h_flex()
+                                                .flex_1()
+                                                .min_h_0()
+                                                .w_full()
+                                                .items_stretch()
+                                                .child(
+                                                    gpui::div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .h_full()
+                                                        .child(item.to_any_view()),
+                                                )
+                                                .child(side_view),
+                                        ),
+                                        None => div.child(item.to_any_view()),
+                                    }
+                                })
                         } else {
                             let placeholder = div
                                 .id("pane_placeholder")

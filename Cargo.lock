@@ -9467,6 +9467,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "outline_sidebar"
+version = "0.1.0"
+dependencies = [
+ "collections",
+ "editor",
+ "fs",
+ "gpui",
+ "indoc",
+ "language",
+ "languages",
+ "project",
+ "r_markdown",
+ "serde_json",
+ "tree-sitter-r",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18457,6 +18477,7 @@ dependencies = [
  "onboarding",
  "outline",
  "outline_panel",
+ "outline_sidebar",
  "packages_panel",
  "parking_lot",
  "paths",

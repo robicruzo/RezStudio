@@ -1094,13 +1094,38 @@ Steps:
      above, Project, Plots, Packages, Help and Viewer below, and no Outline tab. The bottom
      dock showed R Console, Terminal and Debug.
 4. **Outline sidebar.** A toolbar button toggles a sidebar at the right of the editor,
-   remembered per editor.
+   remembered per editor. *(Done.)*
    - **Contents:** the document's outline: R sections and functions; Markdown headings; and
      in R Markdown and Quarto, chunks by label.
    - **Using it:** clicking an entry jumps there, and the entry at the cursor is highlighted.
-   - **Outline query:** R Markdown and Quarto get one that adds chunks.
-   - **Where it lives:** it belongs to the editor, not to a dock, so it moves with the editor
-     when panes are split.
+   - **Where it lives:** it belongs to the editor, not to a dock.
+   - **How it's built:**
+     - **The pane:** `workspace::Pane` can hold a side view, drawn right of the active item
+       and under the toolbar while shown. The pane keeps it while it's hidden.
+     - **The crate:** `outline_sidebar` gives each center pane a sidebar (from
+       `initialize_pane` in `zed.rs`). It shows when the pane's active editor has its outline
+       on. Which editors have it on is kept in memory by editor, so an editor moved to another
+       pane keeps it. A split makes a new editor, which starts with it off.
+     - **Toggling:** the Outline button (a list icon at the end of the editor toolbar), or
+       `outline_sidebar::Toggle` on cmd-shift-b, which used to focus the outline panel.
+   - **Entries:**
+     - **R:** from R's outline query. A section's level is its number of leading `#`, and
+       its name drops the `#`s and the trailing `-`, `=` or `#`. Divider lines with no name
+       are left out. Functions sit one level under the section above them, and nested
+       functions under theirs.
+     - **R Markdown and Quarto:** headings from the Markdown outline query. Chunks come from
+       `r_markdown::chunks` rather than a query, so they match what the Run buttons see. They
+       read "Chunk 2" or "Chunk 2: label" (the label from the header or `#| label:`) and sit
+       one level under the heading above them. The outline also carries items from embedded
+       languages (front-matter keys, functions in chunks); those are left out, as in RStudio.
+     - **Other languages:** their outline as it is.
+     - **Updating:** entries are rebuilt off the main thread when the buffer is edited or
+       reparsed; the highlight follows the cursor and scrolls into view.
+   - **Tests:** R sections and functions with nesting, levels and unnamed dividers;
+     headings and chunks; and in a workspace, toggling the sidebar, its entries for an R
+     file, the cursor's entry, and clicking one to jump there.
+   - **Checked live:** an R file showed its sections and functions nested by level, and an
+     R Markdown file its headings and chunks, each with the cursor's entry highlighted.
 5. **Tests.**
    - **Unit tests:**
      - dock panes: showing, `set_active`, the divider, sharing a width, saving and
