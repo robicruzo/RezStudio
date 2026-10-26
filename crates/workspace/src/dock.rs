@@ -411,10 +411,45 @@ pub struct DockPaneLayout {
     pub active: Option<String>,
 }
 
+/// Where a dragged tab is dropped: before another tab, at the end of a
+/// pane's tabs, or in a new pane at the start or end of the dock. Panes are
+/// counted as the dock shows them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TabDropTarget {
+    Before { pane: usize, panel: EntityId },
+    EndOf { pane: usize },
+    NewPane { first: bool },
+}
+
 const DEFAULT_DIVIDER: f32 = 0.5;
 /// Neither pane gets less than this share of a split dock.
 const MIN_PANE_SHARE: f32 = 0.1;
 pub(crate) const DOCK_LAYOUT_KEY: &str = "dock_layout";
+
+/// A tab being dragged to another place in its dock.
+#[derive(Clone)]
+struct DraggedDockTab {
+    position: DockPosition,
+    panel_id: EntityId,
+    icon: ui::IconName,
+    label: SharedString,
+}
+
+impl Render for DraggedDockTab {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .px_1p5()
+            .py_0p5()
+            .gap_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().elevated_surface_background)
+            .shadow_md()
+            .child(Icon::new(self.icon).size(IconSize::Small))
+            .child(Label::new(self.label.clone()).size(LabelSize::Small))
+    }
+}
 
 /// What's dragged when the divider between a dock's panes moves.
 #[derive(Clone)]
@@ -808,6 +843,109 @@ impl Dock {
                 _ => {}
             }
         }
+    }
+
+    /// Moves a panel to `target`, which shows it there. Emptying a pane gives
+    /// the dock to the other; a new pane splits a dock that has one.
+    pub fn move_panel(
+        &mut self,
+        panel_id: EntityId,
+        target: TabDropTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name_of = |dock: &Self, id: EntityId| {
+            dock.panel_entries
+                .iter()
+                .find(|entry| entry.panel.panel_id() == id)
+                .map(|entry| entry.panel.persistent_name().to_string())
+        };
+        let Some(moved) = name_of(self, panel_id) else {
+            return;
+        };
+        let effective = self.panes();
+        let was_split = effective.len() > 1;
+        let mut panes: Vec<(Vec<String>, Option<String>)> = effective
+            .iter()
+            .map(|(pane_ix, panels)| {
+                let shown = if was_split {
+                    self.shown_in_pane(*pane_ix, panels)
+                } else {
+                    self.active_panel_index
+                };
+                let name = |ix: usize| {
+                    self.panel_entries
+                        .get(ix)
+                        .map(|entry| entry.panel.persistent_name().to_string())
+                };
+                (
+                    panels.iter().filter_map(|ix| name(*ix)).collect(),
+                    shown.and_then(name),
+                )
+            })
+            .collect();
+        for (panels, _) in &mut panes {
+            panels.retain(|name| *name != moved);
+        }
+        match target {
+            TabDropTarget::Before { pane, panel } => {
+                let before = name_of(self, panel);
+                let Some((panels, shown)) = panes.get_mut(pane) else {
+                    return;
+                };
+                let at = before
+                    .and_then(|before| panels.iter().position(|name| *name == before))
+                    .unwrap_or(panels.len());
+                panels.insert(at, moved.clone());
+                *shown = Some(moved);
+            }
+            TabDropTarget::EndOf { pane } => {
+                let Some((panels, shown)) = panes.get_mut(pane) else {
+                    return;
+                };
+                panels.push(moved.clone());
+                *shown = Some(moved);
+            }
+            TabDropTarget::NewPane { first } => {
+                // A dock has at most two panes.
+                if was_split {
+                    return;
+                }
+                let pane = (vec![moved.clone()], Some(moved));
+                if first {
+                    panes.insert(0, pane);
+                } else {
+                    panes.push(pane);
+                }
+            }
+        }
+        panes.retain(|(panels, _)| !panels.is_empty());
+        for (panels, shown) in &mut panes {
+            if shown.as_ref().is_none_or(|shown| !panels.contains(shown)) {
+                *shown = panels.first().cloned();
+            }
+        }
+        let divider = if !was_split && panes.len() > 1 {
+            DEFAULT_DIVIDER
+        } else {
+            self.layout.divider
+        };
+        let layout = DockLayout {
+            panes: panes
+                .into_iter()
+                .map(|(panels, active)| DockPaneLayout { panels, active })
+                .collect(),
+            divider,
+        };
+        self.apply_layout(layout, window, cx);
+        if let Some(ix) = self
+            .panel_entries
+            .iter()
+            .position(|entry| entry.panel.panel_id() == panel_id)
+        {
+            self.activate_panel(ix, window, cx);
+        }
+        self.persist_layout(cx);
     }
 
     /// Remembers that `ix` is what its pane shows. Returns whether that changed.
@@ -1544,23 +1682,25 @@ impl Dock {
     fn render_panes(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let panes = self.panes();
         let split = panes.len() > 1;
-        let mut pane_elements = panes.iter().filter_map(|(pane_ix, panels)| {
-            let shown = if split {
-                self.shown_in_pane(*pane_ix, panels)
-            } else {
-                self.active_panel_index
-            }?;
-            Some(self.render_pane(panels, shown, window, cx))
-        });
-        let (Some(first), Some(second)) = (pane_elements.next(), pane_elements.next()) else {
-            drop(pane_elements);
+        if !split {
             return panes
                 .first()
                 .and_then(|(_, panels)| {
                     let shown = self.active_panel_index?;
-                    Some(self.render_pane(panels, shown, window, cx))
+                    Some(self.render_pane(0, panels, shown, false, window, cx))
                 })
                 .unwrap_or_else(|| gpui::Empty.into_any_element());
+        }
+        let mut pane_elements =
+            panes
+                .iter()
+                .enumerate()
+                .filter_map(|(pane_pos, (pane_ix, panels))| {
+                    let shown = self.shown_in_pane(*pane_ix, panels)?;
+                    Some(self.render_pane(pane_pos, panels, shown, true, window, cx))
+                });
+        let (Some(first), Some(second)) = (pane_elements.next(), pane_elements.next()) else {
+            return gpui::Empty.into_any_element();
         };
 
         let position = self.position;
@@ -1661,47 +1801,104 @@ impl Dock {
             .into_any_element()
     }
 
-    /// A pane: a tab row when it has more than one panel, and the panel it shows.
+    /// A pane: a tab row when it has more than one panel, and the panel it
+    /// shows. While a tab is dragged, the panel's area takes drops: into this
+    /// pane when the dock is split, or into a new pane at either end when not.
     fn render_pane(
         &self,
+        pane_pos: usize,
         panels: &[usize],
         shown: usize,
+        split: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(entry) = self.panel_entries.get(shown) else {
             return gpui::Empty.into_any_element();
         };
+        let dragging_tab = cx.has_active_drag();
+        let drop_highlight = cx.theme().colors().drop_target_background;
+        let stacked = self.position.axis() == Axis::Horizontal;
+        let new_pane_zone = |first: bool, cx: &mut Context<Self>| {
+            div()
+                .id(("dock-new-pane", usize::from(first)))
+                .absolute()
+                .map(|this| match (stacked, first) {
+                    (true, true) => this.top_0().left_0().w_full().h(relative(0.3)),
+                    (true, false) => this.bottom_0().left_0().w_full().h(relative(0.3)),
+                    (false, true) => this.left_0().top_0().h_full().w(relative(0.3)),
+                    (false, false) => this.right_0().top_0().h_full().w(relative(0.3)),
+                })
+                .drag_over::<DraggedDockTab>(move |style, _, _, _| style.bg(drop_highlight))
+                .on_drop(cx.listener(move |dock, tab: &DraggedDockTab, window, cx| {
+                    if tab.position == dock.position {
+                        dock.move_panel(tab.panel_id, TabDropTarget::NewPane { first }, window, cx);
+                    }
+                }))
+        };
         v_flex()
             .size_full()
             .min_h_0()
             .when(panels.len() > 1, |this| {
-                this.child(self.render_tab_row(panels, shown, window, cx))
+                this.child(self.render_tab_row(pane_pos, panels, shown, window, cx))
             })
             .child(
-                div().flex_1().min_h_0().w_full().child(
-                    entry
-                        .panel
-                        .to_any()
-                        .cached(StyleRefinement::default().v_flex().size_full()),
-                ),
+                div()
+                    .id(("dock-pane", pane_pos))
+                    .debug_selector(move || format!("dock-pane-{pane_pos}"))
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(
+                        entry
+                            .panel
+                            .to_any()
+                            .cached(StyleRefinement::default().v_flex().size_full()),
+                    )
+                    .when(split, |this| {
+                        this.drag_over::<DraggedDockTab>(move |style, _, _, _| {
+                            style.bg(drop_highlight)
+                        })
+                        .on_drop(cx.listener(
+                            move |dock, tab: &DraggedDockTab, window, cx| {
+                                if tab.position == dock.position {
+                                    dock.move_panel(
+                                        tab.panel_id,
+                                        TabDropTarget::EndOf { pane: pane_pos },
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            },
+                        ))
+                    })
+                    // A dock with one pane splits when a tab is dropped near an end.
+                    .when(!split && dragging_tab && panels.len() > 1, |this| {
+                        this.child(new_pane_zone(true, cx))
+                            .child(new_pane_zone(false, cx))
+                    }),
             )
             .into_any_element()
     }
 
     fn render_tab_row(
         &self,
+        pane_pos: usize,
         panels: &[usize],
         shown: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let colors = cx.theme().colors();
-        let (selected_bg, hover_bg, border) = (
+        let (selected_bg, hover_bg, border, drop_line, drop_highlight) = (
             colors.element_selected,
             colors.element_hover,
             colors.border_variant,
+            colors.text_accent,
+            colors.drop_target_background,
         );
+        let position = self.position;
         h_flex()
             .w_full()
             .flex_none()
@@ -1725,6 +1922,10 @@ impl Dock {
                 Some(
                     h_flex()
                         .id(("dock-tab", ix))
+                        .debug_selector({
+                            let label = label.clone();
+                            move || format!("dock-tab-{label}")
+                        })
                         .flex_none()
                         .px_1p5()
                         .py_0p5()
@@ -1734,12 +1935,62 @@ impl Dock {
                         .when(selected, |this| this.bg(selected_bg))
                         .hover(move |style| style.bg(hover_bg))
                         .child(Icon::new(icon).size(IconSize::Small).color(color))
-                        .child(Label::new(label).size(LabelSize::Small).color(color))
+                        .child(
+                            Label::new(label.clone())
+                                .size(LabelSize::Small)
+                                .color(color),
+                        )
                         .on_click(cx.listener(move |dock, _, window, cx| {
                             dock.show_panel_from_tab(panel_id, window, cx)
+                        }))
+                        .on_drag(
+                            DraggedDockTab {
+                                position,
+                                panel_id,
+                                icon,
+                                label,
+                            },
+                            |tab, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.new(|_| tab.clone())
+                            },
+                        )
+                        // A line at the tab's start shows where the dragged one lands.
+                        .drag_over::<DraggedDockTab>(move |style, _, _, _| {
+                            style.border_l_2().border_color(drop_line)
+                        })
+                        .on_drop(cx.listener(move |dock, tab: &DraggedDockTab, window, cx| {
+                            if tab.position == dock.position && tab.panel_id != panel_id {
+                                dock.move_panel(
+                                    tab.panel_id,
+                                    TabDropTarget::Before {
+                                        pane: pane_pos,
+                                        panel: panel_id,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            }
                         })),
                 )
             }))
+            .child(
+                div()
+                    .id(("dock-tab-row-end", pane_pos))
+                    .flex_1()
+                    .h_full()
+                    .drag_over::<DraggedDockTab>(move |style, _, _, _| style.bg(drop_highlight))
+                    .on_drop(cx.listener(move |dock, tab: &DraggedDockTab, window, cx| {
+                        if tab.position == dock.position {
+                            dock.move_panel(
+                                tab.panel_id,
+                                TabDropTarget::EndOf { pane: pane_pos },
+                                window,
+                                cx,
+                            );
+                        }
+                    })),
+            )
     }
 
     pub(crate) fn show_panel_from_tab(

@@ -1050,11 +1050,27 @@ Steps:
    - **Checked live:** a temporary split of a real window's right dock showed Environment
      and Git above and Project, Plots, Packages, Help, Viewer and Outline below, with tab
      rows and the divider. The bottom dock showed Terminal, Debug and R Console as tabs.
-2. **Dragging tabs.** Drag a tab within its row to reorder it, or onto the other pane's row
-   to move it there.
-   - Emptying a pane leaves the other with the whole dock.
-   - While a tab is dragged, a drop zone at the dock's top or bottom edge makes a second pane
-     again.
+2. **Dragging tabs.** *(Done.)* Tabs drag within their dock.
+   - **Dropping:**
+     - on a tab puts the dragged one before it, with an accent line at the tab's start
+       showing where;
+     - on the empty end of a tab row puts it last;
+     - in a split dock, on a pane's content moves it into that pane.
+   - **Splitting:** while a tab is dragged in a dock with one pane, the pane's top and
+     bottom thirds (left and right in the bottom dock) become drop zones that split the
+     dock, with the tab in the new pane. A split dock takes no third pane.
+   - **Moving:** `Dock::move_panel` takes the panel and a `TabDropTarget` (before a tab,
+     at a pane's end, or a new pane at either end).
+     - It writes out the panes as the dock shows them, panels the layout didn't name
+       included, then moves the panel and shows it where it lands.
+     - Emptying a pane gives the dock to the other. The layout is saved.
+   - **Dragging:** a dragged tab shows as a small copy of itself. Tabs move only within
+     their own dock.
+   - **Over web views:** GPUI draws the drop highlights and the dragged tab, so they're
+     hidden over a Help or Viewer page, but drops there still work. AppKit keeps sending
+     the drag to GPUI's view, where it started.
+   - **Tests:** every kind of move; dragging a tab with the mouse onto a tab in the other
+     pane; and dropping one near the bottom of a one-pane dock to split it.
 3. **RStudio defaults.**
    - **Right dock:** Environment and Git on top; Files, Plots, Packages, Help and Viewer below.
    - **Bottom dock:** Console, Terminal and Debug as tabs.

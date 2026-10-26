@@ -17042,6 +17042,263 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_moving_dock_tabs(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let (environment, git, files, plots) = workspace.update_in(cx, |workspace, window, cx| {
+            let panels = (
+                cx.new(EnvironmentPanel::new),
+                cx.new(GitPanel::new),
+                cx.new(FilesPanel::new),
+                cx.new(PlotsPanel::new),
+            );
+            workspace.add_panel(panels.0.clone(), window, cx);
+            workspace.add_panel(panels.1.clone(), window, cx);
+            workspace.add_panel(panels.2.clone(), window, cx);
+            workspace.add_panel(panels.3.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            panels
+        });
+        let dock = workspace.read_with(cx, |workspace, _| workspace.right_dock().clone());
+        let move_panel = |id: EntityId, target: dock::TabDropTarget, cx: &mut VisualTestContext| {
+            dock.update_in(cx, |dock, window, cx| {
+                dock.move_panel(id, target, window, cx)
+            })
+        };
+        // Each pane's tabs, with the one it shows marked, and the panels told they show.
+        let state = |cx: &mut VisualTestContext| {
+            let panes = dock.read_with(cx, |dock, _| {
+                let visible: Vec<_> = dock
+                    .visible_panels()
+                    .iter()
+                    .map(|panel| panel.persistent_name())
+                    .collect();
+                dock.layout()
+                    .panes
+                    .iter()
+                    .map(|pane| {
+                        pane.panels
+                            .iter()
+                            .map(|name| {
+                                if visible.contains(&name.as_str()) {
+                                    format!("[{name}]")
+                                } else {
+                                    name.clone()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let active = [
+                environment.read_with(cx, |panel, _| panel.active),
+                git.read_with(cx, |panel, _| panel.active),
+                files.read_with(cx, |panel, _| panel.active),
+                plots.read_with(cx, |panel, _| panel.active),
+            ];
+            (panes, active)
+        };
+
+        // Dropping a tab at the dock's end splits it.
+        move_panel(
+            plots.entity_id(),
+            dock::TabDropTarget::NewPane { first: false },
+            cx,
+        );
+        assert_eq!(
+            state(cx),
+            (
+                vec!["[Environment] Git Files".into(), "[Plots]".into()],
+                [true, false, false, true]
+            )
+        );
+        assert_eq!(dock.read_with(cx, |dock, _| dock.layout().divider), 0.5);
+
+        // Moving a tab between panes shows it where it lands.
+        move_panel(
+            files.entity_id(),
+            dock::TabDropTarget::Before {
+                pane: 1,
+                panel: plots.entity_id(),
+            },
+            cx,
+        );
+        assert_eq!(
+            state(cx),
+            (
+                vec!["[Environment] Git".into(), "[Files] Plots".into()],
+                [true, false, true, false]
+            )
+        );
+        move_panel(
+            plots.entity_id(),
+            dock::TabDropTarget::EndOf { pane: 0 },
+            cx,
+        );
+        assert_eq!(
+            state(cx),
+            (
+                vec!["Environment Git [Plots]".into(), "[Files]".into()],
+                [false, false, true, true]
+            )
+        );
+
+        // Reordering within a pane.
+        move_panel(
+            git.entity_id(),
+            dock::TabDropTarget::Before {
+                pane: 0,
+                panel: environment.entity_id(),
+            },
+            cx,
+        );
+        assert_eq!(
+            state(cx),
+            (
+                vec!["[Git] Environment Plots".into(), "[Files]".into()],
+                [false, true, true, false]
+            )
+        );
+
+        // A split dock takes no third pane.
+        move_panel(
+            environment.entity_id(),
+            dock::TabDropTarget::NewPane { first: true },
+            cx,
+        );
+        assert_eq!(state(cx).0.len(), 2);
+
+        // Emptying a pane gives the dock to the other.
+        move_panel(
+            files.entity_id(),
+            dock::TabDropTarget::EndOf { pane: 0 },
+            cx,
+        );
+        assert_eq!(
+            state(cx),
+            (
+                vec!["Git Environment Plots [Files]".into()],
+                [false, false, true, false]
+            )
+        );
+        assert!(!dock.read_with(cx, |dock, _| dock.is_split()));
+    }
+
+    #[gpui::test]
+    async fn test_dragging_a_dock_tab(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let plots = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(cx.new(EnvironmentPanel::new), window, cx);
+            workspace.add_panel(cx.new(GitPanel::new), window, cx);
+            workspace.add_panel(cx.new(FilesPanel::new), window, cx);
+            let plots = cx.new(PlotsPanel::new);
+            workspace.add_panel(plots.clone(), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.set_layout(
+                    dock::DockLayout {
+                        panes: vec![
+                            pane(&["Environment", "Git"], None),
+                            pane(&["Files", "Plots"], None),
+                        ],
+                        divider: 0.5,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            plots
+        });
+        cx.run_until_parked();
+        let center = |selector: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("no {selector}"))
+                .center()
+        };
+        let from = center("dock-tab-Plots", cx);
+        let to = center("dock-tab-Environment", cx);
+
+        // Drag the Plots tab from the lower pane onto the Environment tab.
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::none());
+        for step in 1..=10 {
+            let progress = step as f32 / 10.;
+            let position = from + (to - from) * progress;
+            cx.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::none());
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        let (panes, visible) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.right_dock().read(cx);
+            (
+                dock.layout()
+                    .panes
+                    .iter()
+                    .map(|pane| pane.panels.join(" "))
+                    .collect::<Vec<_>>(),
+                dock.visible_panels()
+                    .iter()
+                    .map(|panel| panel.persistent_name())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(panes, ["Plots Environment Git", "Files"]);
+        assert_eq!(visible, ["Plots", "Files"]);
+        assert!(plots.read_with(cx, |panel, _| panel.active));
+    }
+
+    #[gpui::test]
+    async fn test_dropping_a_dock_tab_at_the_end_splits_the_dock(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(cx.new(EnvironmentPanel::new), window, cx);
+            workspace.add_panel(cx.new(GitPanel::new), window, cx);
+            workspace.add_panel(cx.new(PlotsPanel::new), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+        });
+        cx.run_until_parked();
+        let from = cx.debug_bounds("dock-tab-Plots").unwrap().center();
+        let pane = cx.debug_bounds("dock-pane-0").unwrap();
+        // Near the bottom of the pane, inside the zone that appears while dragging.
+        let to = point(pane.center().x, pane.bottom() - px(20.));
+
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::none());
+        for step in 1..=10 {
+            let position = from + (to - from) * (step as f32 / 10.);
+            cx.simulate_mouse_move(position, MouseButton::Left, gpui::Modifiers::none());
+        }
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::none());
+        cx.run_until_parked();
+
+        let panes = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .right_dock()
+                .read(cx)
+                .layout()
+                .panes
+                .iter()
+                .map(|pane| pane.panels.join(" "))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(panes, ["Environment Git", "Plots"]);
+    }
+
+    #[gpui::test]
     async fn test_dock_layout_is_saved_and_restored(cx: &mut gpui::TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
