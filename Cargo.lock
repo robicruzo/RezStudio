@@ -15638,6 +15638,7 @@ dependencies = [
  "gpui",
  "jupyter-protocol",
  "languages",
+ "log",
  "project",
  "runtime",
  "serde_json",

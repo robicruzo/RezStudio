@@ -3,21 +3,7 @@
 
 use package_index::{IndexedPackage, PackageSource};
 
-/// An R string literal.
-pub fn r_string(text: &str) -> String {
-    let mut literal = String::with_capacity(text.len() + 2);
-    literal.push('"');
-    for character in text.chars() {
-        match character {
-            '"' => literal.push_str("\\\""),
-            '\\' => literal.push_str("\\\\"),
-            '\n' => literal.push_str("\\n"),
-            character => literal.push(character),
-        }
-    }
-    literal.push('"');
-    literal
-}
+pub use runtime::r_string;
 
 /// `"a"` for one name, `c("a", "b")` for several.
 fn r_strings(names: &[String]) -> String {

@@ -1,19 +1,24 @@
 //! The Environment pane: the R session's variables, live, like RStudio's.
 
+mod search_path;
 mod tree;
 
 use anyhow::{Context as _, Result};
 use editor::Editor;
 use gpui::{
-    Action, App, AsyncWindowContext, Empty, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Pixels, PromptLevel, Subscription, Task, WeakEntity, Window, actions, px, uniform_list,
+    Action, Anchor, App, AsyncWindowContext, Empty, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window, actions, px,
+    uniform_list,
 };
 use runtime::comms::{InspectedVariable, VariablesEvent};
 use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use std::ops::Range;
 use std::time::Duration;
 use tree::{Row, VariablePath, VariableTree};
-use ui::{Disclosure, IconButton, IconName, Tooltip, prelude::*};
+use ui::{
+    ContextMenu, ContextMenuEntry, Disclosure, IconButton, IconName, PopoverMenu, Tooltip,
+    prelude::*,
+};
 use util::ResultExt as _;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -44,7 +49,12 @@ pub fn init(cx: &mut App) {
 pub struct EnvironmentPanel {
     workspace_id: EntityId,
     session: Option<Entity<RSession>>,
+    /// The global environment, kept live by Ark's variables comm.
     tree: VariableTree,
+    /// The `package:` entries on R's search path, for the environment menu.
+    attached_packages: Vec<String>,
+    /// The package environment shown instead of the global one, if any.
+    package: Option<PackageEnvironment>,
     rows: Vec<Row>,
     filter: Entity<Editor>,
     focus_handle: FocusHandle,
@@ -92,6 +102,8 @@ impl EnvironmentPanel {
             workspace_id,
             session: None,
             tree: VariableTree::default(),
+            attached_packages: Vec::new(),
+            package: None,
             rows: Vec::new(),
             filter,
             focus_handle: cx.focus_handle(),
@@ -120,6 +132,8 @@ impl EnvironmentPanel {
             }));
         self.session = Some(session);
         self.tree.clear();
+        self.attached_packages.clear();
+        self.package = None;
         self.rebuild_rows(cx);
     }
 
@@ -130,7 +144,11 @@ impl EnvironmentPanel {
                 self.error = None;
                 self.fetch_children(refetch, cx);
                 self.rebuild_rows(cx);
+                self.refresh_attached_packages(cx);
             }
+            // Code can attach or detach packages without touching the global
+            // environment, so there's no variables update to go by.
+            SessionEvent::ExecutionFinished { .. } => self.refresh_attached_packages(cx),
             SessionEvent::Variables(VariablesEvent::Update(update)) => {
                 let refetch = self.tree.update(update.assigned.clone(), &update.removed);
                 self.fetch_children(refetch, cx);
@@ -144,8 +162,10 @@ impl EnvironmentPanel {
                     )
                 });
                 // A new R process sends its own refresh once it starts.
-                if !running && !self.tree.is_empty() {
+                if !running && (!self.tree.is_empty() || self.package.is_some()) {
                     self.tree.clear();
+                    self.attached_packages.clear();
+                    self.package = None;
                     self.rebuild_rows(cx);
                 }
                 cx.notify();
@@ -156,8 +176,149 @@ impl EnvironmentPanel {
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let filter = self.filter.read(cx).text(cx);
-        self.rows = self.tree.rows(&filter);
+        self.rows = match &self.package {
+            Some(package) => package.tree.rows(&filter),
+            None => self.tree.rows(&filter),
+        };
         cx.notify();
+    }
+
+    fn refresh_attached_packages(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let reply = session.update(cx, |session, cx| {
+            session.evaluate_code(search_path::SEARCH_PATH_CODE, cx)
+        });
+        cx.spawn(async move |this, cx| {
+            let attached = reply
+                .await
+                .and_then(|reply| search_path::attached_packages(reply.result));
+            this.update(cx, |this, cx| match attached {
+                Ok(attached) => this.set_attached_packages(attached, cx),
+                Err(error) => log::error!("listing R's search path: {error:#}"),
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn set_attached_packages(&mut self, attached: Vec<String>, cx: &mut Context<Self>) {
+        // As in RStudio, detaching the package being shown goes back to the
+        // global environment.
+        if self
+            .package
+            .as_ref()
+            .is_some_and(|package| !attached.contains(&package.search_name))
+        {
+            self.package = None;
+            self.rebuild_rows(cx);
+        }
+        self.attached_packages = attached;
+        cx.notify();
+    }
+
+    /// Shows a package environment, such as `package:stats`, or the global
+    /// environment for `None`.
+    fn select_environment(&mut self, search_name: Option<String>, cx: &mut Context<Self>) {
+        self.error = None;
+        let Some(search_name) = search_name else {
+            self.package = None;
+            self.rebuild_rows(cx);
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let reply = session.update(cx, |session, cx| {
+            session.evaluate_code(&search_path::listing_code(&search_name), cx)
+        });
+        self.package = Some(PackageEnvironment {
+            search_name: search_name.clone(),
+            tree: VariableTree::default(),
+            loading: true,
+        });
+        self.rebuild_rows(cx);
+        cx.spawn(async move |this, cx| {
+            let listing = reply
+                .await
+                .and_then(|reply| search_path::parse_listing(reply.result));
+            this.update(cx, |this, cx| {
+                // A later choice replaces this one.
+                let Some(package) = this
+                    .package
+                    .as_mut()
+                    .filter(|package| package.search_name == search_name)
+                else {
+                    return;
+                };
+                package.loading = false;
+                match listing {
+                    Ok(variables) => {
+                        package.tree.refresh(variables);
+                    }
+                    Err(error) => this.error = Some(format!("{error:#}")),
+                }
+                this.rebuild_rows(cx);
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn render_environment_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (label, icon) = match &self.package {
+            Some(package) => (
+                SharedString::from(package.search_name.clone()),
+                IconName::Blocks,
+            ),
+            None => (SharedString::from("Global Environment"), IconName::Box),
+        };
+        let panel = cx.weak_entity();
+        let attached_packages = self.attached_packages.clone();
+        PopoverMenu::new("environment-menu")
+            .trigger_with_tooltip(
+                Button::new("environment-menu-trigger", label)
+                    .label_size(LabelSize::Small)
+                    .start_icon(Icon::new(icon).size(IconSize::Small).color(Color::Muted))
+                    .end_icon(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .disabled(self.session.is_none()),
+                Tooltip::text("Choose an Environment"),
+            )
+            .anchor(Anchor::TopLeft)
+            .menu(move |window, cx| {
+                let panel = panel.clone();
+                let attached_packages = attached_packages.clone();
+                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                    let entry = |label: &str, icon: IconName, search_name: Option<String>| {
+                        let panel = panel.clone();
+                        ContextMenuEntry::new(label.to_string())
+                            .icon(icon)
+                            .icon_position(IconPosition::Start)
+                            .icon_color(Color::Muted)
+                            .handler(move |_, cx| {
+                                panel
+                                    .update(cx, |panel, cx| {
+                                        panel.select_environment(search_name.clone(), cx)
+                                    })
+                                    .log_err();
+                            })
+                    };
+                    let mut menu = menu.item(entry("Global Environment", IconName::Box, None));
+                    for search_name in &attached_packages {
+                        menu = menu.item(entry(
+                            search_name,
+                            IconName::Blocks,
+                            Some(search_name.clone()),
+                        ));
+                    }
+                    menu
+                }))
+            })
     }
 
     fn toggle(&mut self, path: VariablePath, cx: &mut Context<Self>) {
@@ -209,7 +370,7 @@ impl EnvironmentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tree.is_empty() {
+        if self.tree.is_empty() || self.package.is_some() {
             return;
         }
         let answer = window.prompt(
@@ -322,7 +483,7 @@ impl EnvironmentPanel {
                             ),
                     );
                 }
-                if *depth == 0 {
+                if *depth == 0 && self.package.is_none() {
                     let name = variable.display_name.clone();
                     actions = actions.child(
                         IconButton::new(("delete-variable", index), IconName::Trash)
@@ -356,6 +517,17 @@ impl EnvironmentPanel {
         };
         match session.read(cx).state() {
             SessionState::Idle | SessionState::Busy => {
+                if let Some(package) = &self.package {
+                    return if package.loading {
+                        Some("Loading…")
+                    } else if package.tree.is_empty() {
+                        Some("This environment is empty.")
+                    } else if self.rows.is_empty() {
+                        Some("No objects match the filter.")
+                    } else {
+                        None
+                    };
+                }
                 if self.rows.is_empty() {
                     if self.tree.is_empty() {
                         Some("Variables you create in R appear here.")
@@ -371,6 +543,13 @@ impl EnvironmentPanel {
             SessionState::Unavailable(_) | SessionState::Exited(_) => Some("R isn't running."),
         }
     }
+}
+
+struct PackageEnvironment {
+    /// The name on R's search path, such as `package:stats`.
+    search_name: String,
+    tree: VariableTree,
+    loading: bool,
 }
 
 const ROW_HEIGHT: Pixels = px(26.);
@@ -441,11 +620,12 @@ impl Render for EnvironmentPanel {
                     .gap_1()
                     .border_b_1()
                     .border_color(cx.theme().colors().border_variant)
-                    .child(div().flex_1().child(self.filter.clone()))
+                    .child(self.render_environment_menu(cx))
+                    .child(div().flex_1().min_w_0().child(self.filter.clone()))
                     .child(
                         IconButton::new("clear-environment", IconName::Trash)
                             .icon_size(IconSize::Small)
-                            .disabled(self.tree.is_empty())
+                            .disabled(self.tree.is_empty() || self.package.is_some())
                             .tooltip(Tooltip::text("Remove All Objects"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.clear_environment(&ClearEnvironment, window, cx)
@@ -704,6 +884,20 @@ mod tests {
             (method, params)
         }
 
+        /// Answers the search path request that follows a refresh or an
+        /// execution, with `packages` attached.
+        fn answer_search_path(&mut self, packages: &[&str], cx: &mut VisualTestContext) {
+            let search: Vec<&str> = std::iter::once(".GlobalEnv")
+                .chain(packages.iter().copied())
+                .chain(["Autoloads", "package:base"])
+                .collect();
+            let (method, params) = self.answer(json!({ "result": search, "output": "" }), cx);
+            assert_eq!(
+                (method.as_str(), params),
+                ("evaluate_code", json!({ "code": "search()" }))
+            );
+        }
+
         fn row_names(&self, cx: &mut VisualTestContext) -> Vec<String> {
             self.panel.read_with(cx, |panel, _| {
                 panel
@@ -771,6 +965,7 @@ mod tests {
             }}),
             cx,
         );
+        harness.answer_search_path(&[], cx);
         harness
             .panel
             .update(cx, |panel, cx| panel.toggle(vec!["cars".to_string()], cx));
@@ -794,6 +989,7 @@ mod tests {
             }}),
             cx,
         );
+        harness.answer_search_path(&[], cx);
 
         harness
             .panel
@@ -841,6 +1037,7 @@ mod tests {
             }}),
             cx,
         );
+        harness.answer_search_path(&[], cx);
         harness
             .panel
             .update(cx, |panel, cx| panel.delete("cars".to_string(), cx));
@@ -880,6 +1077,149 @@ mod tests {
                 .panel
                 .read_with(cx, |panel, cx| panel.placeholder(cx)),
             Some("R isn't running.")
+        );
+    }
+
+    fn function_record(name: &str) -> serde_json::Value {
+        json!({
+            "access_key": name, "display_name": name, "display_value": "function (x, ...)",
+            "display_type": "function", "type_info": "", "size": 4848, "kind": "function",
+            "length": 1, "has_children": false, "has_viewer": false, "is_truncated": false
+        })
+    }
+
+    #[gpui::test]
+    async fn test_environment_menu_shows_attached_packages(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        harness.send_variables_event(
+            json!({ "method": "refresh", "params": {
+                "variables": [variable("x", false, false)], "length": 1, "version": 1
+            }}),
+            cx,
+        );
+        harness.answer_search_path(&["package:stats"], cx);
+        assert_eq!(
+            harness
+                .panel
+                .read_with(cx, |panel, _| panel.attached_packages.clone()),
+            ["package:stats", "package:base"]
+        );
+
+        // A package environment is listed by R code and shown read-only.
+        harness.panel.update(cx, |panel, cx| {
+            panel.select_environment(Some("package:stats".to_string()), cx)
+        });
+        assert!(harness.row_names(cx).is_empty());
+        assert_eq!(
+            harness
+                .panel
+                .read_with(cx, |panel, cx| panel.placeholder(cx)),
+            Some("Loading…")
+        );
+        let (method, params) = harness.answer(
+            json!({ "result": [function_record("lm"), function_record("acf")], "output": "" }),
+            cx,
+        );
+        assert_eq!(method, "evaluate_code");
+        assert!(
+            params["code"]
+                .as_str()
+                .is_some_and(|code| code.contains(r#"search_name <- "package:stats""#)),
+            "{params}"
+        );
+        assert_eq!(harness.row_names(cx), ["acf", "lm"]);
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.clear_environment(&ClearEnvironment, window, cx)
+        });
+        assert!(!cx.has_pending_prompt());
+
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel
+                .filter
+                .update(cx, |editor, cx| editor.set_text("zzz", window, cx))
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            harness
+                .panel
+                .read_with(cx, |panel, cx| panel.placeholder(cx)),
+            Some("No objects match the filter.")
+        );
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel
+                .filter
+                .update(cx, |editor, cx| editor.set_text("", window, cx))
+        });
+        cx.run_until_parked();
+
+        // Changes to the global environment arrive while a package is shown,
+        // and appear on going back.
+        harness.send_variables_event(
+            json!({ "method": "update", "params": {
+                "assigned": [variable("y", false, false)], "unevaluated": [], "removed": [], "version": 2
+            }}),
+            cx,
+        );
+        assert_eq!(harness.row_names(cx), ["acf", "lm"]);
+
+        // Detaching the package shown goes back to the global environment.
+        harness.session.update(cx, |_, cx| {
+            cx.emit(SessionEvent::ExecutionFinished {
+                request_id: "detach".to_string(),
+                succeeded: true,
+            })
+        });
+        cx.run_until_parked();
+        harness.answer_search_path(&[], cx);
+        assert_eq!(harness.row_names(cx), ["x", "y"]);
+        assert_eq!(
+            harness
+                .panel
+                .read_with(cx, |panel, _| panel.attached_packages.clone()),
+            ["package:base"]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_only_the_last_chosen_environment_is_shown(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        harness.send_variables_event(
+            json!({ "method": "refresh", "params": { "variables": [], "length": 0, "version": 1 }}),
+            cx,
+        );
+        harness.answer_search_path(&["package:stats"], cx);
+
+        harness.panel.update(cx, |panel, cx| {
+            panel.select_environment(Some("package:stats".to_string()), cx);
+            panel.select_environment(Some("package:base".to_string()), cx);
+        });
+        harness.answer(
+            json!({ "result": [function_record("lm")], "output": "" }),
+            cx,
+        );
+        assert_eq!(
+            harness
+                .panel
+                .read_with(cx, |panel, cx| panel.placeholder(cx)),
+            Some("Loading…")
+        );
+        // R's empty list arrives as null.
+        harness.answer(json!({ "result": null, "output": "" }), cx);
+        assert_eq!(
+            harness
+                .panel
+                .read_with(cx, |panel, cx| panel.placeholder(cx)),
+            Some("This environment is empty.")
+        );
+
+        harness
+            .panel
+            .update(cx, |panel, cx| panel.select_environment(None, cx));
+        assert_eq!(
+            harness
+                .panel
+                .read_with(cx, |panel, cx| panel.placeholder(cx)),
+            Some("Variables you create in R appear here.")
         );
     }
 }

@@ -1187,18 +1187,44 @@ Decisions:
   - A Render on Save toggle re-renders whenever the file is saved.
 
 To check before starting:
-- Ark's variables comm lists only the global environment (or the frame being debugged).
-  Package environments would be listed with `evaluate_code`, R code returning each
-  object's name, type, size and a short value. `package:base` has over a thousand objects,
-  so that needs timing.
+- *(Checked in step 1.)* Ark's variables comm lists only the global environment (or the
+  frame being debugged), and its `inspect` paths start there too, so package environments
+  are listed by R code run with `evaluate_code`.
 - How the Viewer opens a local HTML file (a `file://` URL in WKWebView needs read access
   to its folder), and what `quarto preview` prints when it's ready to serve.
 - Whether the R process's memory can be read with `sysinfo` from Ark's process id, which
   avoids running R code while R is busy.
 
 Steps:
-1. **Environment menu.** The menu, listing package environments, and refreshing the list
-   after each execution, so `library()` adds its package at once.
+1. **Environment menu.** *(Done.)* A menu at the left of the Environment pane's toolbar
+   lists Global Environment and then the `package:` entries of `search()`, in order.
+   - **Search path:** fetched with `evaluate_code` after each refresh of the global
+     environment and after each execution, since `library()` and `detach()` don't touch
+     the global environment. Detaching the package being shown goes back to Global
+     Environment, as in RStudio.
+   - **Listing a package:** R code returns one record per object in the shape Ark's
+     variables comm uses, so the pane's tree shows it unchanged. `evaluate_code` turns an
+     unnamed R list into a JSON array and an empty one into null.
+     - Functions are forced, which only loads their code, and show their arguments.
+     - Lazy-loaded data stays a `<Promise>`, as in RStudio. Package environments hold
+       their data as promises (all of `package:datasets`, and `ggplot2::diamonds`), and
+       forcing them could load a large dataset.
+     - Data frames read "32 obs. of 11 variables", and other values show `str()`'s first
+       line.
+     - Timed in R: `package:base` (1,283 objects) takes 0.14 s, ggplot2 (649) 0.19 s.
+   - **Read-only:** a package's rows have no delete button, and Remove All is off. Rows
+     don't expand. Only the last environment chosen is shown, if an earlier listing
+     arrives late.
+   - **Shared code:** `runtime::r_string` quotes R strings for the pane, the Packages
+     pane and the console, which each had their own copy.
+   - **Tests:** the search path's parsing, the listing code's quoting, choosing a
+     package, the filter, Remove All staying off, detaching the package shown, a late
+     listing, and an empty environment. The existing tests now answer the search path
+     request that follows each refresh.
+   - **Checked live:** the menu listed Global Environment and the seven default
+     packages in search order, and choosing one listed its functions with their
+     arguments. Not checked live, since the machine was in use: `library()` adding a
+     package to the menu, and detaching the package shown. Unit tests cover both.
 2. **Grouping and sorting.** Data, Values and Functions headings, RStudio's data frame
    summaries, and sorting by column.
 3. **Memory and workspace.** The memory indicator and report, and the save and load

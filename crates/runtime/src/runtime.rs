@@ -114,6 +114,22 @@ pub fn session_for_workspace(workspace: &Entity<Workspace>, cx: &App) -> Option<
         .cloned()
 }
 
+/// `text` as an R string literal, for building code to run in R.
+pub fn r_string(text: &str) -> String {
+    let mut literal = String::with_capacity(text.len() + 2);
+    literal.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => literal.push_str("\\\""),
+            '\\' => literal.push_str("\\\\"),
+            '\n' => literal.push_str("\\n"),
+            character => literal.push(character),
+        }
+    }
+    literal.push('"');
+    literal
+}
+
 fn has_session(workspace_id: EntityId, cx: &App) -> bool {
     SessionRegistry::global(cx)
         .is_some_and(|registry| registry.read(cx).sessions.contains_key(&workspace_id))
