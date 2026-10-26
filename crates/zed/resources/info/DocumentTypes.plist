@@ -3,6 +3,50 @@
     <dict>
         <key>CFBundleTypeIconFile</key>
         <string>Document</string>
+        <key>CFBundleTypeName</key>
+        <string>R Script</string>
+        <key>CFBundleTypeRole</key>
+        <string>Editor</string>
+        <key>LSHandlerRank</key>
+        <string>Default</string>
+        <key>CFBundleTypeExtensions</key>
+        <array>
+            <string>R</string>
+        </array>
+    </dict>
+    <dict>
+        <key>CFBundleTypeIconFile</key>
+        <string>Document</string>
+        <key>CFBundleTypeName</key>
+        <string>R Markdown Document</string>
+        <key>CFBundleTypeRole</key>
+        <string>Editor</string>
+        <key>LSHandlerRank</key>
+        <string>Default</string>
+        <key>CFBundleTypeExtensions</key>
+        <array>
+            <string>Rmd</string>
+            <string>Rmarkdown</string>
+            <string>qmd</string>
+        </array>
+    </dict>
+    <dict>
+        <key>CFBundleTypeIconFile</key>
+        <string>Document</string>
+        <key>CFBundleTypeName</key>
+        <string>RStudio Project</string>
+        <key>CFBundleTypeRole</key>
+        <string>Editor</string>
+        <key>LSHandlerRank</key>
+        <string>Default</string>
+        <key>CFBundleTypeExtensions</key>
+        <array>
+            <string>Rproj</string>
+        </array>
+    </dict>
+    <dict>
+        <key>CFBundleTypeIconFile</key>
+        <string>Document</string>
         <key>CFBundleTypeRole</key>
         <string>Editor</string>
         <key>LSHandlerRank</key>
