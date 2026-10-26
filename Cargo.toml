@@ -115,6 +115,7 @@ members = [
     "crates/open_path_prompt",
     "crates/outline",
     "crates/outline_panel",
+    "crates/outline_sidebar",
     "crates/path",
     "crates/package_index",
     "crates/packages_panel",
@@ -347,6 +348,7 @@ onboarding = { path = "crates/onboarding" }
 open_path_prompt = { path = "crates/open_path_prompt" }
 outline = { path = "crates/outline" }
 outline_panel = { path = "crates/outline_panel" }
+outline_sidebar = { path = "crates/outline_sidebar" }
 path = { path = "crates/path" }
 package_index = { path = "crates/package_index" }
 packages_panel = { path = "crates/packages_panel" }

@@ -58,6 +58,7 @@ impl QuickActionBar {
         this.apply_settings(cx);
         cx.observe_global::<SettingsStore>(|this, cx| this.apply_settings(cx))
             .detach();
+        outline_sidebar::observe_toggles(cx, |_, cx| cx.notify()).detach();
         this
     }
 
@@ -120,6 +121,21 @@ impl Render for QuickActionBar {
         let has_available_code_actions = editor_value.has_available_code_actions_for_selection();
         let code_action_enabled = editor_value.code_actions_enabled_for_toolbar(cx);
         let focus_handle = editor_value.focus_handle(cx);
+
+        let outline_button = (editor.buffer_kind(cx) == ItemBufferKind::Singleton).then(|| {
+            QuickActionBarButton::new(
+                "toggle outline sidebar",
+                IconName::ListTree,
+                outline_sidebar::is_shown(&editor, cx),
+                Box::new(outline_sidebar::Toggle),
+                focus_handle.clone(),
+                "Outline",
+                {
+                    let editor = editor.clone();
+                    move |_, _, cx| outline_sidebar::toggle(&editor, cx)
+                },
+            )
+        });
 
         let search_button = (editor.buffer_kind(cx) == ItemBufferKind::Singleton).then(|| {
             QuickActionBarButton::new(
@@ -667,6 +683,7 @@ impl Render for QuickActionBar {
             .children(code_actions_dropdown)
             .children(editor_selections_dropdown)
             .child(editor_settings_dropdown)
+            .children(outline_button)
     }
 }
 

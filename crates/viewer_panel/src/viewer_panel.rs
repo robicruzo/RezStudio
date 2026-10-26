@@ -12,7 +12,7 @@ use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
 use web_view::{WebView, WebViewEvent, watch_cover};
 use workspace::Workspace;
-use workspace::dock::{DockPosition, Panel, PanelEvent};
+use workspace::dock::{DockPosition, PaneRoom, Panel, PanelEvent};
 
 actions!(
     viewer_panel,
@@ -23,6 +23,8 @@ actions!(
 );
 
 const PANEL_KEY: &str = "ViewerPanel";
+/// The height of the toolbar above a widget, roughly.
+const TOOLBAR_HEIGHT: Pixels = px(32.);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
@@ -42,9 +44,8 @@ enum Content {
         path: PathBuf,
         title: String,
         /// The height R asked for in pixels: 0 for no preference, -1 for as
-        /// tall as possible. The right dock is full height until M7 splits
-        /// it, so there's nothing to resize yet.
-        _height: i64,
+        /// tall as possible.
+        height: i64,
     },
     /// A web app on this machine, such as Shiny's.
     App { url: String },
@@ -266,7 +267,7 @@ impl ViewerPanel {
                 Content::File {
                     path: path.clone(),
                     title: title.clone(),
-                    _height: *height,
+                    height: *height,
                 },
                 window,
                 cx,
@@ -299,10 +300,17 @@ impl ViewerPanel {
         if self.history.current() == Some(&content) {
             self.web_view.read(cx).reload();
         } else {
-            self.history.push(content);
+            self.history.push(content.clone());
             self.load_current(cx);
         }
-        self.reveal(window, cx);
+        let room = match content {
+            Content::File { height: -1, .. } => Some(PaneRoom::Most),
+            Content::File { height, .. } if height > 0 => {
+                Some(PaneRoom::AtLeast(px(height as f32) + TOOLBAR_HEIGHT))
+            }
+            _ => None,
+        };
+        self.reveal(room, window, cx);
     }
 
     fn load_current(&mut self, cx: &mut Context<Self>) {
@@ -316,13 +324,21 @@ impl ViewerPanel {
         cx.notify();
     }
 
-    fn reveal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Brings the pane to the front, with `room` if a widget asked for it.
+    fn reveal(&mut self, room: Option<PaneRoom>, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let position = self.position;
+        let panel_id = cx.entity_id();
         // Opening a panel updates the docks, which can't happen mid-update.
         window.defer(cx, move |window, cx| {
             workspace
                 .update(cx, |workspace, cx| {
-                    workspace.open_panel::<ViewerPanel>(window, cx)
+                    workspace.open_panel::<ViewerPanel>(window, cx);
+                    if let Some(room) = room {
+                        workspace
+                            .dock_at_position(position)
+                            .update(cx, |dock, cx| dock.make_room_for(panel_id, room, cx));
+                    }
                 })
                 .log_err();
         });
@@ -595,6 +611,7 @@ mod tests {
     use std::rc::Rc;
     use web_view::{fake_factory, take_calls};
     use workspace::MultiWorkspace;
+    use workspace::dock::{DockLayout, DockPaneLayout, test::TestPanel};
 
     const WIDGET: &str = "/tmp/RtmpX/viewhtml1/index.html";
     const APP: &str = "http://127.0.0.1:7654/";
@@ -708,9 +725,13 @@ mod tests {
         }
 
         fn show_widget(&self, path: &str, cx: &mut VisualTestContext) {
+            self.show_widget_with_height(path, 400, cx);
+        }
+
+        fn show_widget_with_height(&self, path: &str, height: i64, cx: &mut VisualTestContext) {
             self.ui_event(
                 json!({ "method": "show_html_file", "params": {
-                    "path": path, "title": "plotly", "destination": "plot", "height": 400
+                    "path": path, "title": "plotly", "destination": "plot", "height": height
                 }}),
                 cx,
             );
@@ -810,6 +831,69 @@ mod tests {
         harness.panel.update(cx, |panel, cx| panel.clear(cx));
         assert!(harness.shown(cx).is_empty());
         assert_eq!(harness.loads(), ["visible false"]);
+    }
+
+    #[gpui::test]
+    async fn test_widgets_get_the_room_they_ask_for(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::new(cx).await;
+        let dock = harness.workspace.update_in(cx, |workspace, window, cx| {
+            let other = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(other, window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            let dock = workspace.right_dock().clone();
+            dock.update(cx, |dock, cx| {
+                dock.set_layout(
+                    DockLayout {
+                        panes: vec![
+                            DockPaneLayout {
+                                panels: vec!["TestPanel".to_string()],
+                                active: None,
+                            },
+                            DockPaneLayout {
+                                panels: vec!["Viewer".to_string()],
+                                active: None,
+                            },
+                        ],
+                        divider: 0.5,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            dock
+        });
+        cx.run_until_parked();
+        let divider =
+            |cx: &mut VisualTestContext| dock.read_with(cx, |dock, _| dock.layout().divider);
+        let reset = |cx: &mut VisualTestContext| {
+            dock.update_in(cx, |dock, window, cx| {
+                let mut layout = dock.layout().clone();
+                layout.divider = 0.5;
+                dock.set_layout(layout, window, cx);
+            });
+            cx.run_until_parked();
+        };
+
+        // No preference leaves the panes as they are.
+        harness.show_widget_with_height(WIDGET, 0, cx);
+        assert_eq!(divider(cx), 0.5);
+
+        // A widget's height, plus the toolbar above it, fits in the Viewer's pane.
+        harness.show_widget_with_height("/tmp/RtmpX/viewhtml2/index.html", 500, cx);
+        assert!(divider(cx) < 0.5, "{}", divider(cx));
+        let viewer_pane = cx
+            .debug_bounds("dock-pane-1")
+            .expect("the Viewer's pane is drawn");
+        assert!(
+            viewer_pane.size.height >= px(500.) + TOOLBAR_HEIGHT - px(1.),
+            "{:?}",
+            viewer_pane.size.height
+        );
+
+        // -1 asks for as much as the other pane allows.
+        reset(cx);
+        harness.show_widget_with_height("/tmp/RtmpX/viewhtml3/index.html", -1, cx);
+        assert!((divider(cx) - 0.1).abs() < 0.001, "{}", divider(cx));
     }
 
     #[gpui::test]
