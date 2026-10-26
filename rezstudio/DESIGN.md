@@ -187,6 +187,11 @@ Steps:
    LSP TCP port, like Zed's `--askpass` netcat mode. The `ark` language server adapter (registered
    by `runtime` for R) waits for the window's session to report its port, then launches the
    bridge; when R restarts on a new port, `ark` is restarted for the project's open buffers.
+   Ark serves one connection per LSP comm, and Zed can start a new `ark` at any time, as when
+   the project's toolchain changes. So each port goes to one server: a second server waits
+   while the session closes the LSP comm and opens a new one, and takes the new port Ark
+   reports, as Positron does when it restarts its language server. Only a restart of R
+   restarts the servers, which avoids a loop of new ports and restarts.
 4. **`r_console`.** *(Done.)* The crate is `r_console` because the
    workspace already depends on the external `console` crate and the debugger uses the
    `console::` action namespace. A bottom-dock panel, open by default next to the terminal like
@@ -805,6 +810,21 @@ Steps:
        GPUI caches. So the pane stayed blank under the picker, and a theme preview showed
        for a moment before the next snapshot freed the image the cached drawing still
        used. A test draws the view inside a cached pane to keep this so.
+   - **Tooltips and menus:** GPUI draws these over everything, the page included, and a
+     native view hides whatever GPUI draws in its rectangle. So the page is cut away where
+     they overlap it, live, with no snapshot.
+     - GPUI now records where it drew over the window's elements each frame, as
+       `Window::overlay_bounds`: the tooltip, and each deferred draw (menus, popovers) that
+       painted something, as the union of its hitboxes. Deferred draws that paint nothing,
+       such as dock resize handles, don't count.
+     - `Context::observe_overlay_bounds` calls a listener after frames where that set
+       changed, and once after the frame following its registration. Opening a menu doesn't
+       redraw a cached pane, so a check while the pane paints would miss it.
+     - The web view cuts the overlapping parts, plus 8 px for shadows, out of its native
+       layer with an even-odd `CAShapeLayer` mask. Under a modal it uses the snapshot
+       instead, with no cut-outs.
+     - Checked live with a throwaway window: two GPUI boxes drawn over a page showed through
+       the page at their own positions, the right way up.
    - **Local files:** `load_file` serves the file through a `rezfile://` scheme rooted at
      its folder, since WebKit won't let a page loaded from `file://` read files beside it.
      Paths are percent-encoded; anything outside the folder or with `..` gets a 403.

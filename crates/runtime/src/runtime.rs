@@ -199,21 +199,21 @@ fn start_session(
         .detach();
 }
 
-/// A restarted R listens on a new port, and the bridge to the old one has
+/// A restarted R listens on a new port, and the bridges to the old one have
 /// exited, so restart Ark's language server for the project's open buffers.
 fn restart_language_server_on_new_port(
     session: &Entity<RSession>,
     project: WeakEntity<Project>,
     cx: &mut App,
 ) {
-    let mut first_port = true;
     cx.subscribe(session, move |_, event, cx| {
-        let SessionEvent::LanguageServerStarted { .. } = event else {
+        let SessionEvent::LanguageServerStarted {
+            restart_servers: true,
+            ..
+        } = event
+        else {
             return;
         };
-        if std::mem::replace(&mut first_port, false) {
-            return;
-        }
         project
             .update(cx, |project, cx| {
                 let buffers = project.opened_buffers(cx);

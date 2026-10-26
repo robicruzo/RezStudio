@@ -80,6 +80,9 @@ pub enum SessionEvent {
     },
     LanguageServerStarted {
         port: u16,
+        /// Whether language servers connected to the R that's gone, which
+        /// restarted, so they need restarting to connect to this one.
+        restart_servers: bool,
     },
     /// A message on the variables comm, which the Environment pane mirrors.
     Variables(VariablesEvent),
@@ -175,6 +178,12 @@ pub struct RSession {
     /// Comm RPCs sent and not yet answered, by request message id.
     pending_comm_requests: HashMap<String, oneshot::Sender<Result<serde_json::Value>>>,
     lsp_port: Option<u16>,
+    /// Whether a language server has connected to `lsp_port`. Ark serves one
+    /// connection per port.
+    lsp_port_taken: bool,
+    /// Whether the next port is for an R that restarted under running
+    /// language servers.
+    restart_servers_on_next_port: bool,
     prompt: PromptStateParams,
     working_directory: Option<PathBuf>,
     /// Execute requests sent and not yet finished, oldest first.
@@ -223,6 +232,8 @@ impl RSession {
             ui_comm_id: None,
             lsp_comm_id: None,
             lsp_port: None,
+            lsp_port_taken: false,
+            restart_servers_on_next_port: false,
             prompt: PromptStateParams {
                 input_prompt: "> ".to_string(),
                 continuation_prompt: "+ ".to_string(),
@@ -268,6 +279,55 @@ impl RSession {
 
     pub fn language_server_port(&self) -> Option<u16> {
         self.lsp_port
+    }
+
+    /// The port for a language server that's starting to connect to. Ark
+    /// serves only one connection per port, and Zed can start a new server
+    /// at any time, as when the project's toolchain changes. So once a port
+    /// is taken, this asks Ark for a new one and returns `None` until the
+    /// [`SessionEvent::LanguageServerStarted`] with it arrives.
+    pub fn take_language_server_port(&mut self) -> Option<u16> {
+        let port = self.lsp_port?;
+        if self.lsp_port_taken {
+            self.reopen_lsp_comm().log_err();
+            return None;
+        }
+        self.lsp_port_taken = true;
+        Some(port)
+    }
+
+    fn open_lsp_comm(&mut self) -> Result<()> {
+        let lsp_comm_id = uuid::Uuid::new_v4().to_string();
+        self.send_request(JupyterMessage::new(
+            CommOpen {
+                comm_id: CommId(lsp_comm_id.clone()),
+                target_name: LSP_COMM_TARGET.to_string(),
+                data: json_object(&ServerStartData {
+                    ip_address: "127.0.0.1".to_string(),
+                })?,
+                target_module: None,
+            },
+            None,
+        ))?;
+        self.lsp_comm_id = Some(lsp_comm_id);
+        Ok(())
+    }
+
+    /// Ark starts a new language server, on a new port, for each LSP comm,
+    /// as when Positron restarts its language server.
+    fn reopen_lsp_comm(&mut self) -> Result<()> {
+        if let Some(old) = self.lsp_comm_id.take() {
+            self.send_request(JupyterMessage::new(
+                CommClose {
+                    comm_id: CommId(old),
+                    data: serde_json::Map::new(),
+                },
+                None,
+            ))?;
+        }
+        self.lsp_port = None;
+        self.lsp_port_taken = false;
+        self.open_lsp_comm()
     }
 
     pub fn variables_comm_id(&self) -> Option<&str> {
@@ -747,19 +807,7 @@ impl RSession {
         }
         self.ui_comm_id = Some(ui_comm_id);
 
-        let lsp_comm_id = uuid::Uuid::new_v4().to_string();
-        self.send_request(JupyterMessage::new(
-            CommOpen {
-                comm_id: CommId(lsp_comm_id.clone()),
-                target_name: LSP_COMM_TARGET.to_string(),
-                data: json_object(&ServerStartData {
-                    ip_address: "127.0.0.1".to_string(),
-                })?,
-                target_module: None,
-            },
-            None,
-        ))?;
-        self.lsp_comm_id = Some(lsp_comm_id);
+        self.open_lsp_comm()?;
 
         // Ark answers by sending a `refresh` with every variable.
         let variables_comm_id = uuid::Uuid::new_v4().to_string();
@@ -966,7 +1014,11 @@ impl RSession {
             match serde_json::from_value::<LspCommMessage>(data) {
                 Ok(LspCommMessage::ServerStarted { port }) => {
                     self.lsp_port = Some(port);
-                    cx.emit(SessionEvent::LanguageServerStarted { port });
+                    let restart_servers = std::mem::take(&mut self.restart_servers_on_next_port);
+                    cx.emit(SessionEvent::LanguageServerStarted {
+                        port,
+                        restart_servers,
+                    });
                 }
                 Err(error) => log::warn!("unexpected message on Ark's LSP comm: {error}"),
             }
@@ -1203,6 +1255,7 @@ impl RSession {
         self.ui_comm_id = None;
         self.lsp_comm_id = None;
         self.lsp_port = None;
+        self.restart_servers_on_next_port |= std::mem::take(&mut self.lsp_port_taken);
         self.variables_comm_id = None;
         self.help_comm_id = None;
         self.pending_input_request = None;
@@ -1765,9 +1818,72 @@ mod tests {
             [
                 SessionEvent::PromptChanged,
                 SessionEvent::WorkingDirectoryChanged,
-                SessionEvent::LanguageServerStarted { port: 40123 },
+                SessionEvent::LanguageServerStarted {
+                    port: 40123,
+                    restart_servers: false
+                },
             ]
         ));
+    }
+
+    #[gpui::test]
+    fn test_each_language_server_gets_its_own_port(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let mut harness = Harness::new(cx);
+        harness.finish_startup(cx);
+        let lsp_comm = |harness: &Harness, cx: &mut VisualTestContext| {
+            CommId(harness.session.read_with(cx, |session, _| {
+                session.lsp_comm_id.clone().unwrap_or_default()
+            }))
+        };
+        let first_comm = lsp_comm(&harness, cx);
+        harness.receive(
+            comm_message(
+                &first_comm,
+                json!({ "msg_type": "server_started", "content": { "port": 40123 } }),
+            ),
+            cx,
+        );
+        harness.take_events();
+
+        // The first server takes the port Ark reported.
+        let take = |harness: &Harness, cx: &mut VisualTestContext| {
+            harness
+                .session
+                .update(cx, |session, _| session.take_language_server_port())
+        };
+        assert_eq!(take(&harness, cx), Some(40123));
+
+        // Another server, as Zed starts when the toolchain changes, can't
+        // share it, so Ark is asked for a new one on a new comm.
+        assert_eq!(take(&harness, cx), None);
+        let close = harness.next_request();
+        assert!(
+            matches!(&close.content, JupyterMessageContent::CommClose(close) if close.comm_id == first_comm)
+        );
+        let open = harness.next_request();
+        let JupyterMessageContent::CommOpen(open) = &open.content else {
+            panic!("expected a new LSP comm");
+        };
+        assert_eq!(open.target_name, LSP_COMM_TARGET);
+        assert_ne!(open.comm_id, first_comm);
+        assert_eq!(take(&harness, cx), None, "waiting for the new port");
+        harness.receive(
+            comm_message(
+                &open.comm_id,
+                json!({ "msg_type": "server_started", "content": { "port": 40124 } }),
+            ),
+            cx,
+        );
+        // The waiting server takes it; nothing needs restarting.
+        assert!(matches!(
+            &harness.take_events()[..],
+            [SessionEvent::LanguageServerStarted {
+                port: 40124,
+                restart_servers: false
+            }]
+        ));
+        assert_eq!(take(&harness, cx), Some(40124));
     }
 
     #[gpui::test]

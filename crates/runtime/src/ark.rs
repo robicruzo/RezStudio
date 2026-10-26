@@ -844,6 +844,47 @@ mod integration_tests {
                 "{completions:?}"
             );
 
+            // A language server connects once per LSP comm, so a second one,
+            // as Zed starts when the toolchain changes, gets a new comm and
+            // port, as Positron does when it restarts its language server.
+            kernel
+                .send_shell(jupyter_protocol::CommClose {
+                    comm_id: lsp_comm.clone(),
+                    data: serde_json::Map::new(),
+                })
+                .await;
+            let second_comm = CommId(uuid::Uuid::new_v4().to_string());
+            kernel
+                .send_shell(CommOpen {
+                    comm_id: second_comm.clone(),
+                    target_name: crate::comms::LSP_COMM_TARGET.to_string(),
+                    data: serde_json::from_value(serde_json::json!({ "ip_address": "127.0.0.1" }))
+                        .unwrap(),
+                    target_module: None,
+                })
+                .await;
+            let messages = kernel
+                .read_until(|_, message| {
+                    matches!(&message.content, JupyterMessageContent::CommMsg(comm) if comm.comm_id == second_comm)
+                        && data_object(message)
+                            .and_then(|data| serde_json::from_value::<LspCommMessage>(data).ok())
+                            .is_some()
+                })
+                .await;
+            let LspCommMessage::ServerStarted { port: second_port } =
+                data_object(&messages.last().unwrap().1)
+                    .and_then(|data| serde_json::from_value(data).ok())
+                    .unwrap();
+            let completions = std::thread::spawn(move || {
+                lsp_completion_labels(second_port, "x <- me + my_v", 0, 14)
+            })
+            .join()
+            .unwrap();
+            assert!(
+                completions.iter().any(|label| label == "my_value"),
+                "the second language server: {completions:?}"
+            );
+
             let (_, messages) = kernel.execute("x <- 1 + 1\ncat(x, '\\n')").await;
             assert_eq!(execute_reply_status(&messages), ReplyStatus::Ok);
             assert!(

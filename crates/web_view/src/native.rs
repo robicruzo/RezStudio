@@ -7,7 +7,10 @@ use futures::channel::mpsc;
 use gpui::{Bounds, Pixels, Rgba, Window};
 use objc2::{MainThreadMarker, MainThreadOnly as _};
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSView};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::CGMutablePath;
 use objc2_foundation::{NSDictionary, NSError, NSString};
+use objc2_quartz_core::{CAShapeLayer, kCAFillRuleEvenOdd};
 use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -169,6 +172,42 @@ impl NativeView for WryView {
                 .webview()
                 .takeSnapshotWithConfiguration_completionHandler(None, &handler)
         };
+        Ok(())
+    }
+
+    fn set_cut_outs(&self, cut_outs: &[Bounds<Pixels>]) -> Result<()> {
+        let webview = self.view.webview();
+        webview.setWantsLayer(true);
+        let layer = webview.layer().context("the web view has no layer")?;
+        if cut_outs.is_empty() {
+            unsafe { layer.setMask(None) };
+            return Ok(());
+        }
+        let frame = layer.bounds();
+        // In a layer whose geometry isn't flipped, y counts up from the bottom.
+        let from_top = layer.isGeometryFlipped();
+        // Even-odd filling shows the page everywhere but inside the cut-outs.
+        let path = CGMutablePath::new();
+        unsafe { CGMutablePath::add_rect(Some(&path), std::ptr::null(), frame) };
+        for cut_out in cut_outs {
+            let height = f64::from(f32::from(cut_out.size.height));
+            let top = f64::from(f32::from(cut_out.origin.y));
+            let y = if from_top {
+                top
+            } else {
+                frame.size.height - top - height
+            };
+            let rect = CGRect::new(
+                CGPoint::new(f64::from(f32::from(cut_out.origin.x)), y),
+                CGSize::new(f64::from(f32::from(cut_out.size.width)), height),
+            );
+            unsafe { CGMutablePath::add_rect(Some(&path), std::ptr::null(), rect) };
+        }
+        let mask = CAShapeLayer::new();
+        mask.setFrame(frame);
+        mask.setPath(Some(&path));
+        mask.setFillRule(unsafe { kCAFillRuleEvenOdd });
+        unsafe { layer.setMask(Some(&mask)) };
         Ok(())
     }
 

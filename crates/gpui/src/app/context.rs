@@ -629,6 +629,33 @@ impl<'a, T: 'static> Context<'a, T> {
         subscription
     }
 
+    /// Register a listener to be called after the next frame, and then after
+    /// each frame whose [`Window::overlay_bounds`] differ from the previous
+    /// frame's. Returns a subscription and persists until the subscription
+    /// is dropped.
+    pub fn observe_overlay_bounds(
+        &mut self,
+        window: &mut Window,
+        mut listener: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
+    ) -> Subscription {
+        let view = self.weak_entity();
+        let (subscription, activate) = window.overlay_listeners.insert(
+            (),
+            Box::new(move |window, cx| {
+                view.update(cx, |view, cx| listener(view, window, cx))
+                    .is_ok()
+            }),
+        );
+        // Listeners are often added while a frame is drawn, which can't be
+        // refreshed until it's done.
+        self.defer_in(window, |_, window, _| {
+            activate();
+            window.overlay_listener_added = true;
+            window.refresh();
+        });
+        subscription
+    }
+
     /// Register a listener to be called when nothing in the window has focus.
     /// This typically happens when the node that was focused is removed from the tree,
     /// and this callback lets you chose a default place to restore the users focus.
