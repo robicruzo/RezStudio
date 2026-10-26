@@ -14,7 +14,7 @@ use runtime::comms::{InspectedVariable, VariablesEvent};
 use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use std::ops::Range;
 use std::time::Duration;
-use tree::{Row, VariablePath, VariableTree};
+use tree::{Row, Sort, SortColumn, VariablePath, VariableTree};
 use ui::{
     ContextMenu, ContextMenuEntry, Disclosure, IconButton, IconName, PopoverMenu, Tooltip,
     prelude::*,
@@ -56,6 +56,7 @@ pub struct EnvironmentPanel {
     /// The package environment shown instead of the global one, if any.
     package: Option<PackageEnvironment>,
     rows: Vec<Row>,
+    sort: Sort,
     filter: Entity<Editor>,
     focus_handle: FocusHandle,
     position: DockPosition,
@@ -105,6 +106,7 @@ impl EnvironmentPanel {
             attached_packages: Vec::new(),
             package: None,
             rows: Vec::new(),
+            sort: Sort::default(),
             filter,
             focus_handle: cx.focus_handle(),
             position: DockPosition::Right,
@@ -177,8 +179,8 @@ impl EnvironmentPanel {
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let filter = self.filter.read(cx).text(cx);
         self.rows = match &self.package {
-            Some(package) => package.tree.rows(&filter),
-            None => self.tree.rows(&filter),
+            Some(package) => package.tree.rows(&filter, self.sort),
+            None => self.tree.rows(&filter, self.sort),
         };
         cx.notify();
     }
@@ -264,6 +266,46 @@ impl EnvironmentPanel {
             .log_err();
         })
         .detach();
+    }
+
+    fn sort_by(&mut self, column: SortColumn, cx: &mut Context<Self>) {
+        self.sort = self.sort.clicked(column);
+        self.rebuild_rows(cx);
+    }
+
+    /// A column heading that sorts by its column when clicked, with an arrow
+    /// on the column the rows are sorted by.
+    fn render_sort_heading(
+        &self,
+        label: &'static str,
+        column: SortColumn,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let arrow = (self.sort.column == column).then(|| {
+            Icon::new(if self.sort.descending {
+                IconName::ArrowDown
+            } else {
+                IconName::ArrowUp
+            })
+            .size(IconSize::XSmall)
+            .color(Color::Muted)
+        });
+        h_flex()
+            .id(label)
+            .debug_selector(move || format!("sort-by-{label}"))
+            .gap_0p5()
+            .min_w_0()
+            .cursor_pointer()
+            .child(
+                Label::new(label)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .weight(gpui::FontWeight::MEDIUM)
+                    .truncate(),
+            )
+            .children(arrow)
+            .on_click(cx.listener(move |this, _, _, cx| this.sort_by(column, cx)))
+            .into_any_element()
     }
 
     fn render_environment_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -449,6 +491,19 @@ impl EnvironmentPanel {
             )
         };
         match row {
+            Row::Group(group) => h_flex()
+                .id(("environment-row", index))
+                .h(ROW_HEIGHT)
+                .w_full()
+                .px_2()
+                .bg(cx.theme().colors().surface_background)
+                .child(
+                    Label::new(group.label())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .weight(gpui::FontWeight::SEMIBOLD),
+                )
+                .into_any_element(),
             Row::Loading { depth } => note(*depth, muted("Loading…".to_string())),
             Row::Error { depth, message } => note(
                 *depth,
@@ -501,7 +556,7 @@ impl EnvironmentPanel {
                     Label::new(variable.display_name.clone()).truncate(),
                     muted(variable.display_type.clone()).truncate(),
                     muted(tree::format_size(variable.size)),
-                    muted(variable.display_value.clone()).truncate(),
+                    muted(tree::display_value(variable).into_owned()).truncate(),
                     Some((
                         actions.into_any_element(),
                         cx.theme().colors().panel_background,
@@ -633,13 +688,10 @@ impl Render for EnvironmentPanel {
                     ),
             )
             .when(placeholder.is_none(), |this| {
-                let heading = |text: &'static str| {
-                    Label::new(text)
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
-                        .weight(gpui::FontWeight::MEDIUM)
-                        .truncate()
-                };
+                let name = self.render_sort_heading("Name", SortColumn::Name, cx);
+                let type_name = self.render_sort_heading("Type", SortColumn::Type, cx);
+                let size = self.render_sort_heading("Size", SortColumn::Size, cx);
+                let value = self.render_sort_heading("Value", SortColumn::Value, cx);
                 this.child(
                     div()
                         .border_b_1()
@@ -648,10 +700,10 @@ impl Render for EnvironmentPanel {
                             "environment-heading",
                             0,
                             None,
-                            heading("Name"),
-                            heading("Type"),
-                            heading("Size"),
-                            heading("Value"),
+                            name,
+                            type_name,
+                            size,
+                            value,
                             None,
                         )),
                 )
@@ -747,7 +799,7 @@ impl Panel for EnvironmentPanel {
 mod tests {
     use super::*;
     use futures::channel::mpsc;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
     use jupyter_protocol::{
         CommId, CommMsg, JupyterMessage, JupyterMessageContent, KernelInfoReply,
     };
@@ -912,6 +964,7 @@ mod tests {
                         Row::Loading { .. } => "…".to_string(),
                         Row::Error { message, .. } => format!("! {message}"),
                         Row::More { count, .. } => format!("+{count}"),
+                        Row::Group(group) => format!("[{}]", group.label()),
                     })
                     .collect()
             })
@@ -937,7 +990,7 @@ mod tests {
             }}),
             cx,
         );
-        assert_eq!(harness.row_names(cx), ["cars", "x"]);
+        assert_eq!(harness.row_names(cx), ["[Data]", "cars", "[Values]", "x"]);
 
         harness.send_variables_event(
             json!({ "method": "update", "params": {
@@ -945,7 +998,7 @@ mod tests {
             }}),
             cx,
         );
-        assert_eq!(harness.row_names(cx), ["cars", "fit"]);
+        assert_eq!(harness.row_names(cx), ["[Data]", "cars", "[Values]", "fit"]);
 
         harness.panel.update_in(cx, |panel, window, cx| {
             panel
@@ -953,7 +1006,40 @@ mod tests {
                 .update(cx, |editor, cx| editor.set_text("fi", window, cx))
         });
         cx.run_until_parked();
-        assert_eq!(harness.row_names(cx), ["fit"]);
+        assert_eq!(harness.row_names(cx), ["[Values]", "fit"]);
+    }
+
+    #[gpui::test]
+    async fn test_clicking_a_heading_sorts_by_its_column(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        let sized = |name: &str, size: i64| {
+            let mut variable = variable(name, false, false);
+            variable["size"] = json!(size);
+            variable
+        };
+        harness.send_variables_event(
+            json!({ "method": "refresh", "params": {
+                "variables": [sized("a", 300), sized("b", 100), sized("c", 200)],
+                "length": 3, "version": 1
+            }}),
+            cx,
+        );
+        harness.answer_search_path(&[], cx);
+        assert_eq!(harness.row_names(cx), ["[Values]", "a", "b", "c"]);
+
+        let click = |heading: &'static str, cx: &mut VisualTestContext| {
+            let bounds = cx
+                .debug_bounds(heading)
+                .unwrap_or_else(|| panic!("no {heading} heading"));
+            cx.simulate_click(bounds.center(), Modifiers::none());
+            cx.run_until_parked();
+        };
+        click("sort-by-Size", cx);
+        assert_eq!(harness.row_names(cx), ["[Values]", "b", "c", "a"]);
+        click("sort-by-Size", cx);
+        assert_eq!(harness.row_names(cx), ["[Values]", "a", "c", "b"]);
+        click("sort-by-Name", cx);
+        assert_eq!(harness.row_names(cx), ["[Values]", "a", "b", "c"]);
     }
 
     #[gpui::test]
@@ -969,7 +1055,7 @@ mod tests {
         harness
             .panel
             .update(cx, |panel, cx| panel.toggle(vec!["cars".to_string()], cx));
-        assert_eq!(harness.row_names(cx), ["cars", "…"]);
+        assert_eq!(harness.row_names(cx), ["[Data]", "cars", "…"]);
 
         let (method, params) = harness.answer(
             json!({ "children": [variable("mpg", false, false), variable("cyl", false, false)], "length": 11 }),
@@ -977,7 +1063,10 @@ mod tests {
         );
         assert_eq!(method, "inspect");
         assert_eq!(params, json!({ "path": ["cars"] }));
-        assert_eq!(harness.row_names(cx), ["cars", "  mpg", "  cyl", "+9"]);
+        assert_eq!(
+            harness.row_names(cx),
+            ["[Data]", "cars", "  mpg", "  cyl", "+9"]
+        );
     }
 
     #[gpui::test]
@@ -1127,7 +1216,7 @@ mod tests {
                 .is_some_and(|code| code.contains(r#"search_name <- "package:stats""#)),
             "{params}"
         );
-        assert_eq!(harness.row_names(cx), ["acf", "lm"]);
+        assert_eq!(harness.row_names(cx), ["[Functions]", "acf", "lm"]);
         harness.panel.update_in(cx, |panel, window, cx| {
             panel.clear_environment(&ClearEnvironment, window, cx)
         });
@@ -1160,7 +1249,7 @@ mod tests {
             }}),
             cx,
         );
-        assert_eq!(harness.row_names(cx), ["acf", "lm"]);
+        assert_eq!(harness.row_names(cx), ["[Functions]", "acf", "lm"]);
 
         // Detaching the package shown goes back to the global environment.
         harness.session.update(cx, |_, cx| {
@@ -1171,7 +1260,7 @@ mod tests {
         });
         cx.run_until_parked();
         harness.answer_search_path(&[], cx);
-        assert_eq!(harness.row_names(cx), ["x", "y"]);
+        assert_eq!(harness.row_names(cx), ["[Values]", "x", "y"]);
         assert_eq!(
             harness
                 .panel

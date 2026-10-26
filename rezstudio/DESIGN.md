@@ -1225,8 +1225,22 @@ Steps:
      packages in search order, and choosing one listed its functions with their
      arguments. Not checked live, since the machine was in use: `library()` adding a
      package to the menu, and detaching the package shown. Unit tests cover both.
-2. **Grouping and sorting.** Data, Values and Functions headings, RStudio's data frame
-   summaries, and sorting by column.
+2. **Grouping and sorting.** *(Done.)* Top-level rows sit under Data, Values and Functions
+   headings, in both the global environment and package environments.
+   - **Groups:** Data holds what Ark calls a table (data frames and two-dimensional
+     matrices), Functions its functions, and Values everything else. A group the filter
+     empties is left out. Children keep R's order under their parent.
+   - **Data frames:** Ark's `[32 rows x 11 columns] <data.frame>` reads "32 obs. of 11
+     variables", as in RStudio. Matrices keep Ark's text, since RStudio doesn't describe
+     them that way.
+   - **Sorting:** clicking Name, Type, Size or Value sorts each group by that column, and
+     clicking it again reverses the order. An arrow marks the column. Ties fall back to
+     the name, and the order is kept across environments.
+   - **Tests:** grouping, sorting by size both ways, the filter dropping empty groups, the
+     data frame text (including one column and a count with commas), and clicking
+     the headings in the pane.
+   - **Not checked live:** the machine was in use. The headings and group rows reuse
+     the pane's existing row layout.
 3. **Memory and workspace.** The memory indicator and report, and the save and load
    buttons.
 4. **Import Dataset.** The menu, the dialog with its preview and code, and importing.
