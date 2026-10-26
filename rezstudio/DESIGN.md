@@ -139,7 +139,7 @@ packages and addins that call `rstudioapi` keep working.
 | M3 | Plots *(done)* | Plot history, resize re-render, export. |
 | M4 | Packages + search *(done)* | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
 | M5 | Rmd/Quarto inline chunks *(done)* | Chunk execution with inline output. |
-| M6 | Help + Viewer | WKWebView embedded; help, htmlwidgets, Shiny. |
+| M6 | Help + Viewer *(done)* | WKWebView embedded; help, htmlwidgets, Shiny. |
 | M7 | RStudio layout | Two stacked, tabbed panes in the right dock; Console and Terminal as tabs; outline from an editor button. |
 | M8 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
 | M9 | Typst native preview | Live preview with source ↔ preview jumping. |
@@ -714,7 +714,7 @@ All met, with CI green on every job:
 - **Checked live:** highlighting and `mtc` offering `mtcars`.
 - **Not tried by hand:** Quarto (`.qmd`), which shares R Markdown's code and has tests.
 
-### M6 plan
+### M6 plan (done)
 
 Decisions:
 - Help and Viewer join the right dock as two more tabs, next to Environment, Plots and
@@ -930,18 +930,47 @@ Steps:
    - **Checked live:** a reactable widget written the way R writes it for the Viewer
      rendered through the web view in a throwaway window, its React table drawn from the
      `lib/` scripts beside it.
-5. **Tests.**
-   - **Unit tests:** the help comm and viewer events in the session; the Help pane's
-     history, topic search and F1 from scripted replies; the Viewer's history and what
-     opens where; and the web view element's hide-when-not-painted logic, with the web
-     view itself behind a trait so tests don't need WebKit.
-   - **Real-Ark test:** the step 1 checks.
+5. **Tests.** *(Done.)* Written with each step; the web view is behind a `NativeView`
+   trait, so tests use a fake instead of WebKit.
+   - **Unit tests:**
+     - the help comm and viewer events in the session;
+     - the web view's placement, page styles, snapshots under a modal (inside a cached
+       pane too), and cut-outs for overlays;
+     - the Help pane's history, links, topic search, F1 against a fake Ark server,
+       restyling, and the keyboard handoff;
+     - the Viewer's history, apps, and Stop interrupting R;
+     - in GPUI, overlay bounds and their listener.
+   - **Real-Ark test:** the step 1 checks; `help.start()` through `evaluate_code`; and a
+     second LSP comm getting its own port.
 
 Done when: `?mean` shows R's help for `mean` in the Help pane, links in it work, and back
 and forward step through pages. F1 on `lm` in an R file, a chunk and the console opens its
 help. `plotly::plot_ly(mtcars, x = ~wt, y = ~mpg)` shows an interactive plot in the
 Viewer. `shiny::runApp()` on an example app runs it in the Viewer, and Stop ends it. Menus
 and the command palette are never hidden behind the web view.
+
+All met, with CI green on every job:
+- **Checked by hand:**
+  - `?filter` and links in help;
+  - help styled from the theme, following font size changes and theme previews under
+    the theme picker;
+  - typing in the command palette after clicking a help page;
+  - F1 on `lm` in an R file, an R Markdown chunk and the console;
+  - a plotly widget, and `shiny::runExample("01_hello")` stopped with Stop;
+  - status bar tooltips showing over a help page;
+  - opening a `.Rproj` from Finder.
+- **Fixed after trying it:**
+  - Ark's language server failing after Zed restarted it (each server now gets its own
+    port);
+  - closed windows staying in memory, which also hung CI's Linux tests;
+  - Ark outliving RezStudio (the supervisor now kills it);
+  - `.Rproj` files opening without their project, and Finder not offering RezStudio
+    for R files;
+  - a Linux-only lint error.
+- **Known limits:**
+  - snapshots under a picker lag the theme by up to a second;
+  - File > Open on a `.Rproj` still opens just the file;
+  - a widget's requested height waits for M7.
 
 ### M7 scope (to plan after M6)
 
