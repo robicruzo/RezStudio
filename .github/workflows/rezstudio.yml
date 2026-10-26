@@ -100,6 +100,16 @@ jobs:
           test -s "$app_path/Contents/Resources/ark/NOTICE"
           codesign --verify --deep --strict "$app_path"
 
+      - name: Check the R document types
+        run: |
+          app_path=$(find target/aarch64-apple-darwin -maxdepth 4 -name "RezStudio*.app" -type d | head -n 1)
+          extensions=$(plutil -extract CFBundleDocumentTypes json -o - "$app_path/Contents/Info.plist" \
+            | python3 -c 'import json, sys; print(" ".join(e for t in json.load(sys.stdin) for e in t.get("CFBundleTypeExtensions", [])))')
+          echo "$extensions"
+          for extension in R Rmd Rmarkdown qmd Rproj; do
+            [[ " $extensions " == *" $extension "* ]] || { echo "Info.plist doesn't declare .$extension" >&2; exit 1; }
+          done
+
       - name: Archive bundle
         run: |
           app_path=$(find target/aarch64-apple-darwin -maxdepth 4 -name "RezStudio*.app" -type d | head -n 1)
