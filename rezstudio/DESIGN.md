@@ -140,7 +140,7 @@ packages and addins that call `rstudioapi` keep working.
 | M4 | Packages + search *(done)* | Installed/loaded list; instant offline search across CRAN, Bioconductor, R-universe. |
 | M5 | Rmd/Quarto inline chunks *(done)* | Chunk execution with inline output. |
 | M6 | Help + Viewer *(done)* | WKWebView embedded; help, htmlwidgets, Shiny. |
-| M7 | RStudio layout | Two stacked, tabbed panes in the right dock, with tabs dragged between them; Console, Terminal and Debug as tabs; an outline sidebar from an editor button. |
+| M7 | RStudio layout *(done)* | Two stacked, tabbed panes in the right dock, with tabs dragged between them; Console, Terminal and Debug as tabs; an outline sidebar from an editor button. |
 | M8 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
 | M9 | Typst native preview | Live preview with source ↔ preview jumping. |
 | M10 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
@@ -972,7 +972,7 @@ All met, with CI green on every job:
   - File > Open on a `.Rproj` still opens just the file;
   - a widget's requested height waits for M7.
 
-### M7 plan
+### M7 plan (done)
 
 Decisions:
 - **Right dock:** two stacked panes with tabs, split as in RStudio. Environment and Git are on
@@ -1126,7 +1126,7 @@ Steps:
      file, the cursor's entry, and clicking one to jump there.
    - **Checked live:** an R file showed its sections and functions nested by level, and an
      R Markdown file its headings and chunks, each with the cursor's entry highlighted.
-5. **Tests.**
+5. **Tests.** *(Done.)*
    - **Unit tests:**
      - dock panes: showing, `set_active`, the divider, sharing a width, saving and
        restoring, dragging tabs, emptying a pane;
@@ -1135,6 +1135,16 @@ Steps:
      - the outline sidebar's entries for R, R Markdown and Quarto, and jumping to them.
    - **Checks by hand:** Help and Viewer in a half-height pane, with snapshots under the
      command palette and tooltips over pages; a Shiny app in the bottom pane.
+   - **Added:** the Viewer's requested height, in a split right dock: no preference leaves
+     the divider alone, a height makes the Viewer's pane at least that tall plus its toolbar,
+     and `-1` takes as much as the other pane allows. The other tests came with steps 1–4.
+   - **Checked live,** in the lower right pane of a new window:
+     - `?lm` showed the styled help page, which stayed styled under the command palette;
+     - a plotly widget showed in the Viewer;
+     - a Shiny app showed in the Viewer, with its stop button, and quitting left no R
+       running.
+     - Not rechecked: tooltips and menus over a page in the half-height pane. They use the
+       same cut-outs checked in M6, which follow the web view's bounds.
 
 Done when:
 - A new window shows Environment and Git above, and Files, Plots, Packages, Help and Viewer
