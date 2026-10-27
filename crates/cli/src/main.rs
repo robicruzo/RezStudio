@@ -944,7 +944,7 @@ mod linux {
                 } else {
                     format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
                 },
-                option_env!("RELEASE_VERSION").unwrap_or_default(),
+                release_channel::REZSTUDIO_VERSION,
                 match option_env!("ZED_COMMIT_SHA") {
                     Some(commit_sha) => format!(" {commit_sha} "),
                     None => "".to_string(),

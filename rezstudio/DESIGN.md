@@ -57,6 +57,14 @@ merges stay tractable.
 - Project-local settings still live in `.zed/`, so projects shared with Zed users keep working.
 - The internal version stays at Zed's (`1.27.0`) because the extension registry uses it to pick
   compatible extensions.
+- RezStudio's own version is `release_channel::REZSTUDIO_VERSION` (`0.0.1` for the first
+  release). The About window and the CLI's `--version` show it, with "Based on Zed 1.27.0…" in
+  the About window's copied details. `script/bundle-rezstudio` writes it into the bundle's
+  `CFBundleShortVersionString` and `CFBundleVersion` before signing, and names the DMG
+  `RezStudio-<version>-<arch>.dmg`.
+- Zed's release workflows stay as generated: every job in `release.yml` and
+  `after_release.yml` runs only in Zed's repositories or depends on one that does, so a
+  `v0.0.1` tag or a published release here starts them but every job is skipped.
 - `script/bundle-rezstudio` builds an ad-hoc-signed `RezStudio.app` (optionally a DMG);
   `.github/workflows/rezstudio.yml` runs fmt, clippy and tests on Linux and builds the app on a
   macOS arm64 runner.
