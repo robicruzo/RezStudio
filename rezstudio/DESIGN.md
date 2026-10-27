@@ -1435,10 +1435,29 @@ Steps:
      `is_dark_mode_on(cx)` resolves `follow_theme` against the theme.
    - **Tests:** parsing `follow_theme`, the three values against a dark and a light
      theme, and each pane's setting off by default and following changes.
-2. **Dark plots.** Darken the decoded image the pane draws, keeping the PNG that Copy
-   uses. Toggling or a theme change redoes it from the kept PNG, without asking R to
-   draw again. Everywhere the pane draws a plot is darkened: the pane, its history and
-   the zoom window. The moon button goes in the Plots toolbar.
+2. **Dark plots.** *(Done.)* Darken the decoded image the pane draws, keeping the PNG
+   that Copy uses. Toggling or a theme change redoes it from the kept PNG, without
+   asking R to draw again. Everywhere the pane draws a plot is darkened: the pane, its
+   history and the zoom window. The moon button goes in the Plots toolbar.
+   - **The flip:** adding `255 - max - min` to each channel of a pixel flips its HSL
+     lightness exactly while keeping hue and saturation, and stays within 0 to 255. A
+     table per channel then maps the flipped value from the background color (R's white)
+     to the text color (R's black). Alpha is kept.
+   - **Colors:** the pane maps onto its panel background and the zoom window onto its
+     editor background. With a light theme and dark mode forced on, plots go dark gray
+     (`#1e1e1e` to `#d4d4d4`) rather than taking the light theme's colors.
+   - **Where:** `decode_plot` darkens new renders as they're decoded, and each image
+     records how it was darkened. As the pane or zoom window renders, a shown image
+     darkened differently from what's wanted now is decoded again from its PNG, in the
+     background, and replaces it unless a newer render arrived meanwhile. The zoom
+     window frees only images it decoded itself, not the pane's. There are no history
+     thumbnails, so only the shown plot is redrawn; others are when shown.
+   - **Toggle:** a moon button (a new `moon` icon, from Lucide's moon) and the
+     `plots_panel: toggle dark mode` action. Each writes `on` or `off` to the settings
+     file, replacing `follow_theme`.
+   - **Tests:** the pixel flip (white, black, red, gray, alpha, a light blue turning dark
+     blue), the toggle's setting, and the pane decoding a plot darkened with Copy still
+     giving R's PNG, then redrawing R's colors when turned off without asking R.
 3. **Dark Viewer.** Set the web view's appearance from the setting, and add the filter
    script, which runs on each page as it loads and again when the toggle changes, with
    no reload. The moon button goes in the Viewer toolbar.

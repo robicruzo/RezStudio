@@ -3,7 +3,8 @@
 
 use crate::CloseZoomWindow;
 use crate::fitting::{
-    self, PlotImage, Viewport, ViewportChange, decode_plot, describe_render_error,
+    self, Darkening, PlotImage, Viewport, ViewportChange, decode_plot, describe_render_error,
+    redraw_plot,
 };
 use anyhow::Result;
 use gpui::{
@@ -12,6 +13,7 @@ use gpui::{
 };
 use runtime::comms::{PlotEvent, PlotRenderSettings, RenderParams};
 use runtime::{RSession, SessionEvent};
+use std::sync::Arc;
 use ui::prelude::*;
 use util::ResultExt as _;
 
@@ -44,6 +46,12 @@ pub struct PlotZoomWindow {
     image: Option<PlotImage>,
     /// The settings `image` was drawn with by this window, if it was.
     rendered: Option<PlotRenderSettings>,
+    /// Whether `image` is this window's own, to free when it's replaced,
+    /// rather than the pane's.
+    own_image: bool,
+    /// Redrawing `image` for dark mode, and the darkening asked for. Kept
+    /// after a failure so it isn't tried again on every frame.
+    darkening_task: Option<(Option<Darkening>, Task<()>)>,
     live: bool,
     viewport: Viewport,
     pending: Option<PlotRenderSettings>,
@@ -85,6 +93,8 @@ impl PlotZoomWindow {
             comm_id,
             image,
             rendered: None,
+            own_image: false,
+            darkening_task: None,
             live,
             viewport: Viewport::default(),
             pending: None,
@@ -154,11 +164,12 @@ impl PlotZoomWindow {
                 cx,
             )
         });
+        let darkening = self.darkening(cx);
         // Replacing this task drops an older render, so only the latest is shown.
         self._render_task = Some(cx.spawn(async move |this, cx| {
             let image = match render.await {
                 Ok(result) => {
-                    let decode = cx.update(|cx| decode_plot(result, cx));
+                    let decode = cx.update(|cx| decode_plot(result, darkening, cx));
                     decode.await
                 }
                 Err(error) => Err(anyhow::anyhow!(describe_render_error(&error))),
@@ -167,12 +178,7 @@ impl PlotZoomWindow {
                 this.pending = None;
                 match image {
                     Ok(image) => {
-                        // The first image is the pane's, so only this window's own are freed.
-                        if let Some(replaced) = this.image.replace(image)
-                            && this.rendered.is_some()
-                        {
-                            cx.drop_image(replaced.render, None);
-                        }
+                        this.replace_image(image, cx);
                         this.rendered = Some(settings);
                         this.error = None;
                     }
@@ -185,6 +191,62 @@ impl PlotZoomWindow {
         }));
     }
 
+    /// Shows `image`, freeing the one it replaces if it was this window's.
+    fn replace_image(&mut self, image: PlotImage, cx: &mut Context<Self>) {
+        if let Some(replaced) = self.image.replace(image)
+            && self.own_image
+        {
+            cx.drop_image(replaced.render, None);
+        }
+        self.own_image = true;
+    }
+
+    fn darkening(&self, cx: &App) -> Option<Darkening> {
+        Darkening::current(cx.theme().colors().editor_background, cx)
+    }
+
+    /// Redraws the image from its PNG when dark mode or the theme changed
+    /// since it was decoded, or when it's the pane's, darkened for the
+    /// pane's background.
+    fn ensure_darkening(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.darkening(cx);
+        let Some(image) = &self.image else {
+            return;
+        };
+        if image.darkening == wanted
+            || self
+                .darkening_task
+                .as_ref()
+                .is_some_and(|(darkening, _)| *darkening == wanted)
+        {
+            return;
+        }
+        let png = image.png.clone();
+        let redraw = redraw_plot(png.clone(), wanted, cx);
+        let task = cx.spawn(async move |this, cx| {
+            let redrawn = redraw.await;
+            this.update(cx, |this, cx| {
+                match redrawn {
+                    Ok(redrawn) => {
+                        this.darkening_task = None;
+                        // A newer render may have replaced the image meanwhile.
+                        if this
+                            .image
+                            .as_ref()
+                            .is_some_and(|image| Arc::ptr_eq(&image.png, &png))
+                        {
+                            this.replace_image(redrawn, cx);
+                        }
+                    }
+                    Err(error) => this.error = Some(format!("{error:#}")),
+                }
+                cx.notify();
+            })
+            .log_err();
+        });
+        self.darkening_task = Some((wanted, task));
+    }
+
     fn close(&mut self, _: &CloseZoomWindow, window: &mut Window, _: &mut Context<Self>) {
         window.remove_window();
     }
@@ -193,7 +255,7 @@ impl PlotZoomWindow {
 #[cfg(test)]
 impl PlotZoomWindow {
     pub(crate) fn has_own_image_for_test(&self) -> bool {
-        self.image.is_some() && self.rendered.is_some()
+        self.image.is_some() && self.rendered.is_some() && self.own_image
     }
 }
 
@@ -205,6 +267,7 @@ impl Focusable for PlotZoomWindow {
 
 impl Render for PlotZoomWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_darkening(cx);
         let entity = cx.entity();
         let image = self.image.as_ref().map(|image| image.render.clone());
         let error = match (&self.error, self.live) {
