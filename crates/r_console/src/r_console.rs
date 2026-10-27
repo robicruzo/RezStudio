@@ -334,22 +334,8 @@ fn source_call(path: &std::path::Path, echo: bool) -> String {
     let echo = if echo { ", echo = TRUE" } else { "" };
     format!(
         "source({}{echo})",
-        r_string_literal(&path.to_string_lossy())
+        runtime::r_string(&path.to_string_lossy())
     )
-}
-
-fn r_string_literal(text: &str) -> String {
-    let mut literal = String::with_capacity(text.len() + 2);
-    literal.push('"');
-    for character in text.chars() {
-        match character {
-            '\\' => literal.push_str("\\\\"),
-            '"' => literal.push_str("\\\""),
-            _ => literal.push(character),
-        }
-    }
-    literal.push('"');
-    literal
 }
 
 fn insert_operator(handle: &WeakEntity<Editor>, operator: &str, window: &mut Window, cx: &mut App) {

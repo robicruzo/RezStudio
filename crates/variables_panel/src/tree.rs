@@ -2,7 +2,9 @@
 //! lazily: the session's variables arrive whole, children when expanded.
 
 use collections::{HashMap, HashSet};
-use runtime::comms::Variable;
+use runtime::comms::{Variable, VariableKind};
+use std::borrow::Cow;
+use std::cmp::Ordering;
 
 /// A variable's position: the access keys from a top-level variable down.
 pub type VariablePath = Vec<String>;
@@ -24,9 +26,92 @@ enum Children {
     Failed(String),
 }
 
+/// RStudio's sections of the Environment pane, in the order shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Group {
+    Data,
+    Values,
+    Functions,
+}
+
+impl Group {
+    const ALL: [Group; 3] = [Group::Data, Group::Values, Group::Functions];
+
+    fn of(variable: &Variable) -> Self {
+        match variable.kind {
+            // Data frames and matrices.
+            VariableKind::Table => Group::Data,
+            VariableKind::Function => Group::Functions,
+            _ => Group::Values,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Data => "Data",
+            Group::Values => "Values",
+            Group::Functions => "Functions",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SortColumn {
+    #[default]
+    Name,
+    Type,
+    Size,
+    Value,
+}
+
+/// How variables are ordered within each group. Children keep R's order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sort {
+    pub column: SortColumn,
+    pub descending: bool,
+}
+
+impl Sort {
+    /// The order after clicking `column`'s heading: the same column reverses,
+    /// another sorts ascending.
+    pub fn clicked(self, column: SortColumn) -> Self {
+        Self {
+            column,
+            descending: self.column == column && !self.descending,
+        }
+    }
+
+    fn compare(self, a: &Variable, b: &Variable) -> Ordering {
+        let by_name = |a: &Variable, b: &Variable| {
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
+        };
+        let ordering = match self.column {
+            SortColumn::Name => by_name(a, b),
+            SortColumn::Type => a
+                .display_type
+                .to_lowercase()
+                .cmp(&b.display_type.to_lowercase()),
+            SortColumn::Size => a.size.cmp(&b.size),
+            SortColumn::Value => display_value(a)
+                .to_lowercase()
+                .cmp(&display_value(b).to_lowercase()),
+        };
+        let ordering = if self.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        ordering.then_with(|| by_name(a, b))
+    }
+}
+
 /// One line of the pane.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
+    /// A section heading, before the top-level variables in it.
+    Group(Group),
     Variable {
         path: VariablePath,
         depth: usize,
@@ -60,7 +145,6 @@ impl VariableTree {
     /// children must be fetched again; returns their paths.
     pub fn refresh(&mut self, variables: Vec<Variable>) -> Vec<VariablePath> {
         self.variables = variables;
-        sort_by_name(&mut self.variables);
         self.children.clear();
         let existing: HashSet<&String> = self
             .variables
@@ -83,7 +167,6 @@ impl VariableTree {
         self.variables
             .retain(|variable| !changed.contains(&variable.access_key));
         self.variables.extend(assigned);
-        sort_by_name(&mut self.variables);
 
         let is_stale = |path: &VariablePath| path.first().is_some_and(|key| changed.contains(key));
         self.children.retain(|path, _| !is_stale(path));
@@ -127,16 +210,33 @@ impl VariableTree {
             .insert(path.clone(), Children::Failed(message));
     }
 
-    /// The lines to show. With a filter, only top-level variables whose names
-    /// contain it (ignoring case) are listed, with their expanded children.
-    pub fn rows(&self, filter: &str) -> Vec<Row> {
+    /// The lines to show: top-level variables under their group's heading,
+    /// sorted, with their expanded children. With a filter, only top-level
+    /// variables whose names contain it (ignoring case) are listed, and groups
+    /// left empty are left out.
+    pub fn rows(&self, filter: &str, sort: Sort) -> Vec<Row> {
         let filter = filter.trim().to_lowercase();
+        let mut matching: Vec<&Variable> = self
+            .variables
+            .iter()
+            .filter(|variable| {
+                filter.is_empty() || variable.display_name.to_lowercase().contains(&filter)
+            })
+            .collect();
+        matching.sort_by(|a, b| sort.compare(a, b));
         let mut rows = Vec::new();
-        for variable in &self.variables {
-            if !filter.is_empty() && !variable.display_name.to_lowercase().contains(&filter) {
+        for group in Group::ALL {
+            let mut members = matching
+                .iter()
+                .filter(|variable| Group::of(variable) == group)
+                .peekable();
+            if members.peek().is_none() {
                 continue;
             }
-            self.push_rows(vec![variable.access_key.clone()], variable, 0, &mut rows);
+            rows.push(Row::Group(group));
+            for variable in members {
+                self.push_rows(vec![variable.access_key.clone()], variable, 0, &mut rows);
+            }
         }
         rows
     }
@@ -190,8 +290,35 @@ impl VariableTree {
     }
 }
 
-fn sort_by_name(variables: &mut [Variable]) {
-    variables.sort_by_cached_key(|variable| variable.display_name.to_lowercase());
+/// A variable's value as RStudio shows it. Ark describes a data frame as
+/// `[32 rows x 11 columns] <data.frame>`, which reads "32 obs. of 11
+/// variables" in RStudio. Matrices keep Ark's description.
+pub fn display_value(variable: &Variable) -> Cow<'_, str> {
+    let value = variable.display_value.as_str();
+    if variable.kind != VariableKind::Table {
+        return Cow::Borrowed(value);
+    }
+    let summary = (|| {
+        let (shape, class) = value.strip_prefix('[')?.split_once("] <")?;
+        let class = class.strip_suffix('>')?;
+        if class == "matrix" || class == "array" {
+            return None;
+        }
+        let (rows, columns) = shape.split_once(" x ")?;
+        let count = |text: &str, unit: &str| {
+            text.strip_suffix(unit)
+                .or_else(|| text.strip_suffix(unit.trim_end_matches('s')))?
+                .trim()
+                .replace(',', "")
+                .parse::<u64>()
+                .ok()
+        };
+        let rows = count(rows, " rows")?;
+        let columns = count(columns, " columns")?;
+        let plural = if columns == 1 { "" } else { "s" };
+        Some(format!("{rows} obs. of {columns} variable{plural}"))
+    })();
+    summary.map_or(Cow::Borrowed(value), Cow::Owned)
 }
 
 /// A size in bytes the way RStudio shows it.
@@ -249,6 +376,7 @@ mod tests {
                 Row::Loading { depth } => format!("{}…", "  ".repeat(*depth)),
                 Row::Error { depth, message } => format!("{}! {message}", "  ".repeat(*depth)),
                 Row::More { depth, count } => format!("{}+{count}", "  ".repeat(*depth)),
+                Row::Group(group) => format!("[{}]", group.label()),
             })
             .collect()
     }
@@ -261,7 +389,10 @@ mod tests {
             variable("Alpha", false),
             variable("beta", false),
         ]);
-        assert_eq!(names(&tree.rows("")), ["Alpha", "beta", "zeta"]);
+        assert_eq!(
+            names(&tree.rows("", Sort::default())),
+            ["[Values]", "Alpha", "beta", "zeta"]
+        );
 
         let mut changed = variable("beta", false);
         changed.display_value = "new".to_string();
@@ -269,10 +400,10 @@ mod tests {
             vec![changed, variable("gamma", false)],
             &["zeta".to_string()],
         );
-        let rows = tree.rows("");
-        assert_eq!(names(&rows), ["Alpha", "beta", "gamma"]);
+        let rows = tree.rows("", Sort::default());
+        assert_eq!(names(&rows), ["[Values]", "Alpha", "beta", "gamma"]);
         assert!(
-            matches!(&rows[1], Row::Variable { variable, .. } if variable.display_value == "new")
+            matches!(&rows[2], Row::Variable { variable, .. } if variable.display_value == "new")
         );
     }
 
@@ -283,18 +414,24 @@ mod tests {
         let path = vec!["df".to_string()];
 
         assert!(tree.toggle(&path), "first expansion fetches");
-        assert_eq!(names(&tree.rows("")), ["df", "  …"]);
+        assert_eq!(
+            names(&tree.rows("", Sort::default())),
+            ["[Values]", "df", "  …"]
+        );
         tree.set_children(
             &path,
             vec![variable("mpg", false), variable("cyl", false)],
             11,
         );
-        assert_eq!(names(&tree.rows("")), ["df", "  mpg", "  cyl", "  +9"]);
+        assert_eq!(
+            names(&tree.rows("", Sort::default())),
+            ["[Values]", "df", "  mpg", "  cyl", "  +9"]
+        );
 
         assert!(!tree.toggle(&path), "collapsing doesn't fetch");
-        assert_eq!(names(&tree.rows("")), ["df"]);
+        assert_eq!(names(&tree.rows("", Sort::default())), ["[Values]", "df"]);
         assert!(!tree.toggle(&path), "children are kept while collapsed");
-        assert_eq!(names(&tree.rows("")).len(), 4);
+        assert_eq!(names(&tree.rows("", Sort::default())).len(), 5);
     }
 
     #[test]
@@ -310,13 +447,19 @@ mod tests {
 
         let refetch = tree.update(vec![variable("df", true)], &[]);
         assert_eq!(refetch, std::slice::from_ref(&df));
-        assert_eq!(names(&tree.rows("")), ["df", "  …", "other", "  b"]);
+        assert_eq!(
+            names(&tree.rows("", Sort::default())),
+            ["[Values]", "df", "  …", "other", "  b"]
+        );
 
         // A removed variable forgets that it was expanded.
         let refetch = tree.update(Vec::new(), &["df".to_string()]);
         assert!(refetch.is_empty());
         tree.update(vec![variable("df", true)], &[]);
-        assert_eq!(names(&tree.rows("")), ["df", "other", "  b"]);
+        assert_eq!(
+            names(&tree.rows("", Sort::default())),
+            ["[Values]", "df", "other", "  b"]
+        );
     }
 
     #[test]
@@ -327,10 +470,130 @@ mod tests {
         tree.toggle(&path);
         tree.set_children_error(&path, "object not found".to_string());
         assert_eq!(
-            names(&tree.rows("FIT")),
-            ["model_fit", "  ! object not found"]
+            names(&tree.rows("FIT", Sort::default())),
+            ["[Values]", "model_fit", "  ! object not found"]
         );
-        assert_eq!(names(&tree.rows("dat")), ["data"]);
+        assert_eq!(
+            names(&tree.rows("dat", Sort::default())),
+            ["[Values]", "data"]
+        );
+    }
+
+    fn with_kind(name: &str, kind: VariableKind, size: i64, value: &str) -> Variable {
+        Variable {
+            kind,
+            size,
+            display_value: value.to_string(),
+            ..variable(name, false)
+        }
+    }
+
+    #[test]
+    fn test_groups_and_sorting() {
+        let mut tree = VariableTree::default();
+        tree.refresh(vec![
+            with_kind("model", VariableKind::Function, 6000, "function (x)"),
+            with_kind("x", VariableKind::Number, 56, "1"),
+            with_kind(
+                "cars",
+                VariableKind::Table,
+                7208,
+                "[50 rows x 2 columns] <data.frame>",
+            ),
+            with_kind(
+                "Big",
+                VariableKind::Collection,
+                80_000,
+                "num [1:10000] 1 2 3",
+            ),
+            with_kind(
+                "m",
+                VariableKind::Table,
+                400,
+                "[3 rows x 3 columns] <matrix>",
+            ),
+        ]);
+        let sort = Sort::default();
+        assert_eq!(
+            names(&tree.rows("", sort)),
+            [
+                "[Data]",
+                "cars",
+                "m",
+                "[Values]",
+                "Big",
+                "x",
+                "[Functions]",
+                "model"
+            ]
+        );
+
+        // Sorting applies within each group; clicking again reverses.
+        let sort = sort.clicked(SortColumn::Size);
+        assert_eq!(
+            sort,
+            Sort {
+                column: SortColumn::Size,
+                descending: false
+            }
+        );
+        assert_eq!(
+            names(&tree.rows("", sort)),
+            [
+                "[Data]",
+                "m",
+                "cars",
+                "[Values]",
+                "x",
+                "Big",
+                "[Functions]",
+                "model"
+            ]
+        );
+        let sort = sort.clicked(SortColumn::Size);
+        assert!(sort.descending);
+        assert_eq!(
+            names(&tree.rows("", sort)),
+            [
+                "[Data]",
+                "cars",
+                "m",
+                "[Values]",
+                "Big",
+                "x",
+                "[Functions]",
+                "model"
+            ]
+        );
+        assert!(!sort.clicked(SortColumn::Name).descending);
+
+        // Groups the filter empties are left out.
+        assert_eq!(names(&tree.rows("x", sort)), ["[Values]", "x"]);
+    }
+
+    #[test]
+    fn test_display_value_reads_like_rstudio() {
+        let value = |kind, text: &str| display_value(&with_kind("v", kind, 0, text)).into_owned();
+        assert_eq!(
+            value(VariableKind::Table, "[32 rows x 11 columns] <data.frame>"),
+            "32 obs. of 11 variables"
+        );
+        assert_eq!(
+            value(VariableKind::Table, "[1,000 rows x 1 column] <tbl_df>"),
+            "1000 obs. of 1 variable"
+        );
+        assert_eq!(
+            value(VariableKind::Table, "[3 rows x 3 columns] <matrix>"),
+            "[3 rows x 3 columns] <matrix>"
+        );
+        assert_eq!(
+            value(VariableKind::Table, "32 obs. of 11 variables"),
+            "32 obs. of 11 variables"
+        );
+        assert_eq!(
+            value(VariableKind::String, "[1 rows x 1 columns] <x>"),
+            "[1 rows x 1 columns] <x>"
+        );
     }
 
     #[test]

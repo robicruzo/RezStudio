@@ -1139,6 +1139,7 @@
       "cmd-shift-enter": "r_markdown::RunChunk",
       "cmd-alt-p": "r_markdown::RunChunksAbove",
       "cmd-alt-r": "r_markdown::RunAllChunks",
+      "cmd-shift-k": "render_panel::Render",
     },
   },
   {

@@ -11909,6 +11909,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "render_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "project",
+ "runtime",
+ "serde_json",
+ "settings",
+ "smol",
+ "tempfile",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "viewer_panel",
+ "web_view",
+ "workspace",
+]
+
+[[package]]
 name = "renderdoc-sys"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15637,11 +15661,18 @@ dependencies = [
  "futures 0.3.34",
  "gpui",
  "jupyter-protocol",
+ "language",
  "languages",
+ "log",
+ "menu",
  "project",
+ "r_console",
  "runtime",
+ "serde",
  "serde_json",
  "settings",
+ "sysinfo 0.39.6",
+ "tempfile",
  "theme",
  "theme_settings",
  "ui",
@@ -18497,6 +18528,7 @@ dependencies = [
  "release_channel",
  "remote",
  "remote_server",
+ "render_panel",
  "repl",
  "reqwest_client",
  "rope",

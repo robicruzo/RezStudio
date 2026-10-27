@@ -141,9 +141,10 @@ packages and addins that call `rstudioapi` keep working.
 | M5 | Rmd/Quarto inline chunks *(done)* | Chunk execution with inline output. |
 | M6 | Help + Viewer *(done)* | WKWebView embedded; help, htmlwidgets, Shiny. |
 | M7 | RStudio layout *(done)* | Two stacked, tabbed panes in the right dock, with tabs dragged between them; Console, Terminal and Debug as tabs; an outline sidebar from an editor button. |
-| M8 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
-| M9 | Typst native preview | Live preview with source ↔ preview jumping. |
-| M10 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
+| M8 | Documents and Environment *(done)* | Render button for Quarto and R Markdown with output in the Viewer; Environment pane with RStudio's environment menu, grouping, memory use, workspace save/load and Import Dataset. |
+| M9 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
+| M10 | Typst native preview | Live preview with source ↔ preview jumping. |
+| M11 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
 
 ### M1 plan (done)
 
@@ -1155,6 +1156,216 @@ Done when:
 - The editor's Outline button shows an outline of an R file's sections and functions, and
   of an R Markdown file's headings and chunks, and clicking an entry jumps to it.
 - Help pages and htmlwidgets work in a half-height pane, under menus and the palette.
+
+### M8 plan (done)
+
+Decisions:
+- **Order:** this comes before Python parity, which moves to M9. Neither feature needs
+  Python, and M9 then ports a finished Environment pane once instead of twice.
+- **Environment menu:** as in RStudio, a menu at the top of the Environment pane lists
+  Global Environment and then every `package:` environment on R's search path, in
+  `search()` order. Package environments are read-only: no delete or Remove All. RStudio's
+  language picker beside it ("R") waits for M9, when there is a second language.
+- **Grouping:** RStudio's list view, with rows under Data, Values and Functions headings.
+  Data frames read "150 obs. of 5 variables". Clicking a column heading sorts by it.
+- **Memory:** RStudio's memory indicator in the pane's toolbar, showing what the R session
+  uses. Clicking it shows a report with the session's and the system's memory, and a way
+  to free unused R memory.
+- **Workspace:** buttons to save the environment to an `.RData` file and to load one. They
+  run `save.image()` and `load()` in the console, so the code shows there, as in RStudio.
+- **Import Dataset:** RStudio's menu with From Text (readr), From Excel (readxl) and From
+  SPSS, SAS and Stata (haven). A dialog picks the file, previews the first rows, sets the
+  options and shows the code. Import runs that code in the console and opens the result
+  with `View()`.
+- **Rendering:** a Render button in the editor toolbar of `.qmd` and `.Rmd` files, and
+  Cmd+Shift+K, as in RStudio.
+  - Rendering runs in its own process, not the console's R session.
+  - Its output streams to a Render tab in the bottom dock, which has a stop button.
+  - HTML opens in the Viewer pane. PDF and Word open in the system's default app.
+  - `.qmd` files use `quarto preview`, which serves the page for the Viewer. `.Rmd` files
+    use `rmarkdown::render()` in `Rscript`, and the Viewer shows the file it writes.
+  - A Render on Save toggle re-renders whenever the file is saved.
+
+To check before starting:
+- *(Checked in step 1.)* Ark's variables comm lists only the global environment (or the
+  frame being debugged), and its `inspect` paths start there too, so package environments
+  are listed by R code run with `evaluate_code`.
+- *(Checked in step 5.)* The Viewer already serves a local HTML file's folder under its
+  `rezfile://` scheme (from M6), so a rendered page's `_files/` folder loads. `quarto
+  preview` prints `Browse at <url>` once it serves, and both renderers print `Output
+  created: <file>`.
+- *(Checked in step 3.)* The R session's memory is read with `sysinfo`, from the process
+  Ark runs under, so it doesn't need R and keeps updating while R is busy.
+
+Steps:
+1. **Environment menu.** *(Done.)* A menu at the left of the Environment pane's toolbar
+   lists Global Environment and then the `package:` entries of `search()`, in order.
+   - **Search path:** fetched with `evaluate_code` after each refresh of the global
+     environment and after each execution, since `library()` and `detach()` don't touch
+     the global environment. Detaching the package being shown goes back to Global
+     Environment, as in RStudio.
+   - **Listing a package:** R code returns one record per object in the shape Ark's
+     variables comm uses, so the pane's tree shows it unchanged. `evaluate_code` turns an
+     unnamed R list into a JSON array and an empty one into null.
+     - Functions are forced, which only loads their code, and show their arguments.
+     - Lazy-loaded data stays a `<Promise>`, as in RStudio. Package environments hold
+       their data as promises (all of `package:datasets`, and `ggplot2::diamonds`), and
+       forcing them could load a large dataset.
+     - Data frames read "32 obs. of 11 variables", and other values show `str()`'s first
+       line.
+     - Timed in R: `package:base` (1,283 objects) takes 0.14 s, ggplot2 (649) 0.19 s.
+   - **Function source:** clicking a function, or its View Source button, in a package
+     or the global environment opens its source in a read-only R editor tab, as
+     RStudio's `View()` does. The tab is titled like RStudio's, for example `as_factor
+     (namespace:forcats)`. The source comes from `deparse(..., control = "useSource")`,
+     so functions defined in the session keep their comments; primitives show as
+     `.Primitive("sum")`. Added after step 5, at the user's request, with a test that
+     clicks a package function's row.
+   - **Read-only:** a package's rows have no delete button, and Remove All is off. Rows
+     don't expand. Only the last environment chosen is shown, if an earlier listing
+     arrives late.
+   - **Shared code:** `runtime::r_string` quotes R strings for the pane, the Packages
+     pane and the console, which each had their own copy.
+   - **Tests:** the search path's parsing, the listing code's quoting, choosing a
+     package, the filter, Remove All staying off, detaching the package shown, a late
+     listing, and an empty environment. The existing tests now answer the search path
+     request that follows each refresh.
+   - **Checked live:** the menu listed Global Environment and the seven default
+     packages in search order, and choosing one listed its functions with their
+     arguments. Not checked live, since the machine was in use: `library()` adding a
+     package to the menu, and detaching the package shown. Unit tests cover both.
+2. **Grouping and sorting.** *(Done.)* Top-level rows sit under Data, Values and Functions
+   headings, in both the global environment and package environments.
+   - **Groups:** Data holds what Ark calls a table (data frames and two-dimensional
+     matrices), Functions its functions, and Values everything else. A group the filter
+     empties is left out. Children keep R's order under their parent.
+   - **Data frames:** Ark's `[32 rows x 11 columns] <data.frame>` reads "32 obs. of 11
+     variables", as in RStudio. Matrices keep Ark's text, since RStudio doesn't describe
+     them that way.
+   - **Sorting:** clicking Name, Type, Size or Value sorts each group by that column, and
+     clicking it again reverses the order. An arrow marks the column. Ties fall back to
+     the name, and the order is kept across environments.
+   - **Tests:** grouping, sorting by size both ways, the filter dropping empty groups, the
+     data frame text (including one column and a count with commas), and clicking
+     the headings in the pane.
+   - **Not checked live:** the machine was in use. The headings and group rows reuse
+     the pane's existing row layout.
+3. **Memory and workspace.** *(Done.)* The pane's toolbar now has two rows, as in
+   RStudio: Load, Save, the memory reading and Remove All above, and the environment
+   menu and filter below.
+   - **Memory:** every five seconds the pane sums the resident memory of the process R
+     runs under (the shell supervising Ark), Ark, and any processes R started.
+     `RSession::process_id` gives the shell's id. The toolbar shows the total, and its
+     menu shows the session's and the system's memory and Free Unused R Memory, which
+     runs `gc()` in the console. The reading is hidden while R isn't running.
+   - **Workspace:** Save Workspace As asks for a file in R's working directory,
+     suggesting `.RData`, and runs `save.image("…")` in the console. Load Workspace asks
+     for a file and runs `load("…")`. Paths under the home folder are written with `~`,
+     as in RStudio. Both are also actions, for the command palette.
+   - **Tests:** the memory reader finds a real shell's child process and the system
+     totals, nested and cyclic parent tables, the save and load code from simulated
+     dialogs, cancelling a dialog, and path quoting.
+   - **Not checked live:** the machine was in use.
+4. **Import Dataset.** *(Done.)* An Import Dataset menu in the toolbar's top row offers
+   From Text (readr), From Excel, From SPSS, From SAS and From Stata. Each opens a dialog
+   that starts by asking for a file.
+   - **Fields:** the file's path (or a URL, which readr reads too), with Browse; the
+     name, suggested from the file's name with characters R doesn't allow in names
+     replaced by `_`, until it's typed over; and Open Data Viewer. Text and Excel also
+     have Skip, Missing Values and First Row as Names. Text has a Delimiter (comma,
+     tab, semicolon, whitespace) and Excel a Sheet, listed from the file.
+   - **Preview:** the first 50 rows, read with the chosen options by R code run with
+     `evaluate_code` 300 ms after the last change. It returns each column's name,
+     class and values formatted as text, and an Excel file's sheets. A newer change
+     drops a preview still waiting. R's errors, such as a missing package, show in the
+     preview's place.
+   - **Code:** shown in a read-only editor, so it can be selected and copied, with a
+     Copy button as in RStudio (added after step 5). It's written as RStudio writes it,
+     with only the arguments that differ from the reader's defaults, for example `library(readr)`, `cars <- read_csv("~/cars.csv")`
+     and `View(cars)`. Names R doesn't accept as they are go in backticks. Import runs
+     it in the console and closes the dialog.
+   - **Checked in R:** the preview and import code for a CSV with row names, a
+     semicolon file with a skipped line and a custom missing value, readxl's example
+     workbook with and without a sheet, and haven's SPSS, SAS and Stata examples.
+   - **Tests:** the code for each format and option, the preview code, names, the
+     preview's parsing (including R's one-value and empty vectors), and the dialog
+     from choosing a file through a preview, a delimiter change and importing.
+   - **Not checked live:** the machine was in use.
+5. **Rendering.** *(Done.)* A new `render_panel` crate adds the Render tab, after
+   Terminal in the bottom dock, and the actions behind the editor's Render button.
+   - **Starting:** the Render button (an arrow in a `.qmd` or `.Rmd` editor's toolbar)
+     and Cmd+Shift+K in those editors save the document if needed, then render it. A
+     new render stops the one running, as only one runs at a time.
+   - **Quarto:** `quarto preview <file> --no-browser --no-watch-inputs` in the
+     document's folder. `QUARTO_R` points Quarto at the project's R. When it prints
+     `Browse at <url>`, the Viewer shows the page. Rendering the same document again
+     replaces the Viewer's entry rather than adding one, though the port changes. The
+     server keeps running until stopped or replaced, and stopping kills its process
+     group, since `quarto` starts `deno`, which outlives a plain kill. Quitting the app
+     stops it too. A crash would leave it running, since it has no supervisor like
+     Ark's.
+   - **R Markdown:** `Rscript -e 'rmarkdown::render("<file>", encoding = "UTF-8")'`
+     with the project's R. When it exits successfully, the file named by `Output
+     created:` shows in the Viewer.
+   - **Other formats:** the Viewer shows HTML and PDF. Word, PowerPoint and the like
+     open in their own apps. The web view now serves PDFs as `application/pdf`.
+   - **Environment:** the R session's environment (the project's shell environment),
+     with `NO_COLOR=1`, since escape codes would show as text. Without pandoc on the
+     path, R Markdown gets `RSTUDIO_PANDOC` pointing at the pandoc bundled with Quarto.
+     Quarto is looked for on the path, then where its installers, RStudio and Positron
+     put it.
+   - **The Render tab:** the command and its output (up to 5,000 lines), a status line
+     (rendering, previewing at the address, rendered, stopped, or failed with the exit
+     code), a stop button, and Clear.
+   - **Render on Save:** in the menu beside the Render button. While it's on, each save
+     renders the document. Render's own save doesn't render twice.
+   - **Tests:** finding Quarto and R, the commands and environments, quoting, pandoc
+     from Quarto, reading output lines with escape codes, which results show in the
+     Viewer, and the Render tab running scripts that act like Quarto (serving until
+     stopped), R Markdown (finishing), a failing render, and a render replacing one
+     still running. The Viewer replaces a re-rendered document's entry. Render on Save
+     toggles for a Quarto file and isn't offered for Markdown. The app's action and
+     keymap tests pass with the new actions and Cmd+Shift+K.
+   - **Checked by hand:** `quarto preview` and `rmarkdown::render` on small documents,
+     with Quarto 1.9.36, including a Word document.
+   - **Not checked live:** the machine was in use.
+6. **Tests and live checks.** *(Done.)* Unit tests for each step, a real-R test for package
+   listings and imports, and live checks of rendering a Quarto and an R Markdown document.
+   - **Shared Ark client:** the runtime crate's real-Ark test client is now
+     `runtime::test_support` (behind `test-support`), with `Kernel::start`,
+     `open_ui_comm`, `evaluate` (as `evaluate_code`), `run` and `shut_down`, so other
+     crates' real-R tests drive Ark the same way.
+   - **Real-R test for the Environment pane** (`cargo test -p variables_panel --
+     --ignored`): the search path before and after `library(forcats)`, `package:stats`
+     and `package:datasets` listings (a function, and a lazy dataset as `<Promise>`),
+     function source for a package function, a session function (comments kept) and a
+     primitive, the session's memory, previews and imports of a CSV, a semicolon file, an
+     Excel sheet and a Stata file, and a workspace saved, cleared and loaded back.
+   - **Real render test** (`cargo test -p render_panel -- --ignored`): the commands
+     Render builds, run with real Quarto and `rmarkdown::render`. The Quarto preview
+     serves a page with the chunk's output, and the R Markdown HTML holds it too.
+   - **Checked live:** the environment menu on `package:forcats` (Values and Functions
+     groups, a lazy dataset as `<Promise>`), function source tabs with R highlighting, the
+     Global Environment's Data, Values and Functions groups with `3 obs. of 2 variables`,
+     the memory indicator, the Import Dataset dialog's typed preview and code, and Render
+     on a `.qmd` (Quarto preview in the Viewer, output in the Render tab) and an `.Rmd`
+     (the HTML in the Viewer as its second entry).
+   - **Found live and fixed:** the Render tab's rows are one line high, so a long line
+     such as pandoc's command wrapped over the lines below it. Lines now stay on one row
+     and the list scrolls sideways. The fix has a unit test but wasn't seen live, since
+     the machine was in use.
+   - **Not checked live:** sorting, workspace save and load, Render on Save, and
+     clicking Import (the real-R test covers the import code).
+
+Done when:
+- The Environment menu switches between Global Environment and attached packages, and
+  `library()` adds a package to it.
+- Rows are grouped as in RStudio and sort by column.
+- The memory indicator shows the session's memory, and saving and loading a workspace
+  works.
+- Import Dataset brings in a CSV, an Excel sheet and a Stata file.
+- Render on a `.qmd` and an `.Rmd` file shows the HTML in the Viewer, with output in the
+  Render tab.
 
 ## Risks
 

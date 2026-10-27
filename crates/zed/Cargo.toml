@@ -144,6 +144,7 @@ onboarding.workspace = true
 outline.workspace = true
 outline_panel.workspace = true
 outline_sidebar.workspace = true
+render_panel.workspace = true
 r_console.workspace = true
 variables_panel.workspace = true
 plots_panel.workspace = true
