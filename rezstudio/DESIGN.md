@@ -62,6 +62,10 @@ merges stay tractable.
   the About window's copied details. `script/bundle-rezstudio` writes it into the bundle's
   `CFBundleShortVersionString` and `CFBundleVersion` before signing, and names the DMG
   `RezStudio-<version>-<arch>.dmg`.
+- Release builds use the stable channel: `script/bundle-rezstudio -c stable`, which the
+  workflow's release build passes, makes "RezStudio.app" (`io.github.robicruzo.RezStudio`).
+  Without `-c`, the channel comes from `crates/zed/RELEASE_CHANNEL`, which stays `dev` on main,
+  so the first CI release build made "RezStudio Dev.app".
 - Zed's release workflows stay as generated: every job in `release.yml` and
   `after_release.yml` runs only in Zed's repositories or depends on one that does, so a
   `v0.0.1` tag or a published release here starts them but every job is skipped.

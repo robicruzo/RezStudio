@@ -16,6 +16,7 @@ zed_features=""
 make_dmg=false
 install_app=false
 open_app=false
+channel=""
 
 help_info() {
   echo "
@@ -25,13 +26,15 @@ Build RezStudio.app for macOS.
 Options:
   -d    Build in debug mode (faster to compile, slower to run).
   -m    Also create a .dmg next to the bundle (release builds only).
+  -c    The release channel: stable, preview, nightly or dev. Defaults to
+        crates/zed/RELEASE_CHANNEL, which is dev on main; releases use stable.
   -i    Install the bundle into /Applications.
   -o    Open the bundle when done.
   -h    Display this help and exit.
 "
 }
 
-while getopts 'dmioh' flag; do
+while getopts 'dmioc:h' flag; do
     case "${flag}" in
         d)
             build_flag=""
@@ -39,6 +42,7 @@ while getopts 'dmioh' flag; do
             zed_features="--features util/debug-embed"
             ;;
         m) make_dmg=true ;;
+        c) channel="${OPTARG}" ;;
         i) install_app=true ;;
         o) open_app=true ;;
         h)
@@ -58,7 +62,16 @@ if [[ "$(uname)" != "Darwin" ]]; then
     exit 1
 fi
 
-channel=$(<crates/zed/RELEASE_CHANNEL)
+if [[ -z "$channel" ]]; then
+    channel=$(<crates/zed/RELEASE_CHANNEL)
+fi
+case "$channel" in
+    stable | preview | nightly | dev) ;;
+    *)
+        echo "Unknown release channel: ${channel}" >&2
+        exit 1
+        ;;
+esac
 export ZED_RELEASE_CHANNEL="${channel}"
 export ZED_BUNDLE=true
 export CARGO_BUNDLE_SKIP_BUILD=true

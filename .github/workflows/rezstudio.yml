@@ -88,7 +88,7 @@ jobs:
 
       - name: Bundle (release)
         if: ${{ inputs.release }}
-        run: script/bundle-rezstudio -m
+        run: script/bundle-rezstudio -m -c stable
 
       - name: Check the bundled Ark
         run: |
