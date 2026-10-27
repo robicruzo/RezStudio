@@ -6,7 +6,7 @@ mod search_path;
 mod tree;
 
 use anyhow::{Context as _, Result};
-use editor::Editor;
+use editor::{Editor, MultiBuffer};
 use gpui::{
     Action, Anchor, App, AsyncWindowContext, Empty, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, PathPromptOptions, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window,
@@ -15,7 +15,7 @@ use gpui::{
 use import_dataset::{ImportDataset, Source};
 use memory::{MemorySampler, MemoryUsage, format_memory};
 use r_console::ConsolePanel;
-use runtime::comms::{InspectedVariable, VariablesEvent};
+use runtime::comms::{InspectedVariable, VariableKind, VariablesEvent};
 use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use std::ops::Range;
 use std::path::Path;
@@ -631,6 +631,68 @@ impl EnvironmentPanel {
         }
     }
 
+    /// Opens a function's source in a read-only editor tab, as RStudio's
+    /// `View()` of a function does.
+    fn view_function_source(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let search_name = self
+            .package
+            .as_ref()
+            .map(|package| package.search_name.clone());
+        let code = search_path::function_source_code(search_name.as_deref(), &name);
+        let reply = session.update(cx, |session, cx| session.evaluate_code(&code, cx));
+        let workspace = self.workspace.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let source = match reply
+                .await
+                .and_then(|reply| search_path::parse_function_source(reply.result))
+            {
+                Ok(source) => source,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.error = Some(format!("{error:#}"));
+                        cx.notify();
+                    })
+                    .log_err();
+                    return;
+                }
+            };
+            let language = workspace
+                .read_with(cx, |workspace, cx| {
+                    workspace
+                        .project()
+                        .read(cx)
+                        .languages()
+                        .language_for_name(runtime::R_LANGUAGE_NAME)
+                })
+                .ok();
+            let language = match language {
+                Some(language) => language.await.log_err(),
+                None => None,
+            };
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    let title = source.title(&name);
+                    let buffer = cx.new(|cx| {
+                        let mut buffer = language::Buffer::local(source.source, cx);
+                        buffer.set_language(language, cx);
+                        buffer
+                    });
+                    let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title));
+                    let editor = cx.new(|cx| {
+                        let mut editor = Editor::for_multibuffer(buffer, None, window, cx);
+                        editor.set_read_only(true);
+                        editor
+                    });
+                    workspace.add_item_to_active_pane(Box::new(editor), None, true, window, cx);
+                })
+                .log_err();
+        })
+        .detach();
+    }
+
     /// Opens the variable in the data viewer; Ark answers by opening a data explorer.
     fn view(&mut self, path: VariablePath, cx: &mut Context<Self>) {
         self.send_and_report("view", serde_json::json!({ "path": path }), cx);
@@ -761,7 +823,18 @@ impl EnvironmentPanel {
                         .into_any_element()
                 });
                 let mut actions = h_flex().gap_0p5().justify_end();
-                if variable.has_viewer {
+                let is_function = *depth == 0 && variable.kind == VariableKind::Function;
+                if is_function {
+                    let name = variable.display_name.clone();
+                    actions = actions.child(
+                        IconButton::new(("view-source", index), IconName::FileCode)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("View Source"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.view_function_source(name.clone(), window, cx)
+                            })),
+                    );
+                } else if variable.has_viewer {
                     let view_path = path.clone();
                     actions = actions.child(
                         IconButton::new(("view-variable", index), IconName::Table)
@@ -783,7 +856,7 @@ impl EnvironmentPanel {
                             ),
                     );
                 }
-                row_layout(
+                let row = row_layout(
                     ("environment-row", index),
                     *depth,
                     disclosure,
@@ -795,7 +868,21 @@ impl EnvironmentPanel {
                         actions.into_any_element(),
                         cx.theme().colors().panel_background,
                     )),
-                )
+                );
+                if !is_function {
+                    return row;
+                }
+                // As in RStudio, clicking a function shows its source.
+                let name = variable.display_name.clone();
+                div()
+                    .id(("function-row", index))
+                    .debug_selector(move || format!("function-row-{index}"))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.view_function_source(name.clone(), window, cx)
+                    }))
+                    .child(row)
+                    .into_any_element()
             }
         }
     }
@@ -1395,8 +1482,13 @@ mod tests {
             "{code}"
         );
 
-        // Changing an option reads the preview again with it.
         let dialog = modal(cx).unwrap();
+        assert_eq!(
+            dialog.read_with(cx, |dialog, cx| dialog.code_text(cx)),
+            "library(readr)\ncars <- read_csv(\"~/data/cars.csv\")\nView(cars)"
+        );
+
+        // Changing an option reads the preview again with it.
         dialog.update(cx, |dialog, cx| {
             dialog.set_delimiter(import_dataset::Delimiter::Semicolon, cx)
         });
@@ -1659,6 +1751,59 @@ mod tests {
                 .read_with(cx, |panel, _| panel.attached_packages.clone()),
             ["package:base"]
         );
+    }
+
+    #[gpui::test]
+    async fn test_clicking_a_function_opens_its_source(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        harness.send_variables_event(
+            json!({ "method": "refresh", "params": { "variables": [], "length": 0, "version": 1 }}),
+            cx,
+        );
+        harness.answer_search_path(&["package:forcats"], cx);
+        harness.panel.update(cx, |panel, cx| {
+            panel.select_environment(Some("package:forcats".to_string()), cx)
+        });
+        harness.answer(
+            json!({ "result": [function_record("as_factor")], "output": "" }),
+            cx,
+        );
+        assert_eq!(harness.row_names(cx), ["[Functions]", "as_factor"]);
+
+        let bounds = cx.debug_bounds("function-row-1").expect("a function row");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        cx.run_until_parked();
+        let (method, params) = harness.answer(
+            json!({ "result": {
+                "source": "function (x, ...) \n{\n    check_dots_used()\n    UseMethod(\"as_factor\")\n}",
+                "namespace": "forcats"
+            }, "output": "" }),
+            cx,
+        );
+        assert_eq!(method, "evaluate_code");
+        assert!(
+            params["code"].as_str().is_some_and(|code| code.contains(
+                r#"get("as_factor", envir = as.environment("package:forcats"), inherits = FALSE)"#
+            )),
+            "{params}"
+        );
+        cx.run_until_parked();
+
+        let workspace = harness
+            .panel
+            .read_with(cx, |panel, _| panel.workspace.upgrade())
+            .unwrap();
+        let editor = workspace
+            .read_with(cx, |workspace, cx| workspace.active_item_as::<Editor>(cx))
+            .expect("the source opens in an editor");
+        editor.read_with(cx, |editor, cx| {
+            assert!(editor.read_only(cx));
+            assert_eq!(
+                editor.buffer().read(cx).title(cx),
+                "as_factor (namespace:forcats)"
+            );
+            assert!(editor.text(cx).contains("UseMethod(\"as_factor\")"));
+        });
     }
 
     #[gpui::test]

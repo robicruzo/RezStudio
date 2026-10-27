@@ -5,13 +5,13 @@ use crate::{EnvironmentPanel, display_path};
 use anyhow::{Context as _, Result, bail};
 use editor::Editor;
 use gpui::{
-    Anchor, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, PathPromptOptions,
-    Subscription, Task, WeakEntity, Window,
+    Anchor, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    PathPromptOptions, Subscription, Task, WeakEntity, Window,
 };
 use runtime::{RSession, r_string};
 use serde_json::Value;
 use std::time::Duration;
-use ui::{Checkbox, ContextMenu, PopoverMenu, ToggleState, Tooltip, prelude::*};
+use ui::{Checkbox, ContextMenu, IconButton, PopoverMenu, ToggleState, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::ModalView;
 
@@ -347,6 +347,10 @@ pub struct ImportDataset {
     name: Entity<Editor>,
     skip: Entity<Editor>,
     na: Entity<Editor>,
+    /// The code Import runs, read-only so it can be selected and copied.
+    code: Entity<Editor>,
+    /// What `code` shows, to update it only when the options change.
+    shown_code: String,
     delimiter: Delimiter,
     first_row_as_names: bool,
     open_viewer: bool,
@@ -381,6 +385,12 @@ impl ImportDataset {
         let name = editor("Name", window, cx);
         let skip = editor("0", window, cx);
         let na = editor("Default", window, cx);
+        let code = cx.new(|cx| {
+            let mut editor = Editor::auto_height(3, 8, window, cx);
+            editor.set_read_only(true);
+            editor.set_show_gutter(false, cx);
+            editor
+        });
         let is_edit =
             |event: &editor::EditorEvent| matches!(event, editor::EditorEvent::BufferEdited);
         let subscriptions = vec![
@@ -417,6 +427,8 @@ impl ImportDataset {
             name,
             skip,
             na,
+            code,
+            shown_code: String::new(),
             delimiter: Delimiter::default(),
             first_row_as_names: true,
             open_viewer: true,
@@ -552,6 +564,11 @@ impl ImportDataset {
 
     fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissEvent);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn code_text(&self, cx: &App) -> String {
+        self.code.read(cx).text(cx)
     }
 
     fn render_field(
@@ -692,7 +709,7 @@ impl Focusable for ImportDataset {
 impl ModalView for ImportDataset {}
 
 impl Render for ImportDataset {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let options = self.options(cx);
         let this = cx.weak_entity();
         let reading_options = self.source.has_reading_options();
@@ -785,6 +802,11 @@ impl Render for ImportDataset {
         } else {
             options.import_code()
         };
+        if code != self.shown_code {
+            self.code
+                .update(cx, |editor, cx| editor.set_text(code.clone(), window, cx));
+            self.shown_code = code.clone();
+        }
         let can_import = self.can_import(cx);
 
         v_flex()
@@ -827,23 +849,33 @@ impl Render for ImportDataset {
                         .min_w_0()
                         .gap_0p5()
                         .child(
-                            Label::new("Code Preview")
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
+                            h_flex()
+                                .justify_between()
+                                .child(
+                                    Label::new("Code Preview")
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    IconButton::new("copy-import-code", IconName::Copy)
+                                        .icon_size(IconSize::Small)
+                                        .disabled(code.is_empty())
+                                        .tooltip(Tooltip::text("Copy Code"))
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                code.clone(),
+                                            ))
+                                        }),
+                                ),
                         )
                         .child(
                             div()
-                                .min_h(px(72.))
                                 .p_1p5()
                                 .border_1()
                                 .border_color(cx.theme().colors().border)
                                 .rounded_sm()
                                 .bg(cx.theme().colors().editor_background)
-                                .children(code.lines().map(|line| {
-                                    Label::new(line.to_string())
-                                        .size(LabelSize::Small)
-                                        .buffer_font(cx)
-                                })),
+                                .child(self.code.clone()),
                         ),
                 ),
             )

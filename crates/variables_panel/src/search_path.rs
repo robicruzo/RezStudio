@@ -93,6 +93,50 @@ pub fn parse_listing(result: Value) -> Result<Vec<Variable>> {
     }
 }
 
+/// A function's source, as RStudio's `View()` shows it.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct FunctionSource {
+    pub source: String,
+    /// The package namespace the function belongs to, empty for the global
+    /// environment's own functions and primitives.
+    pub namespace: String,
+}
+
+impl FunctionSource {
+    /// The editor tab's title, as RStudio names it.
+    pub fn title(&self, name: &str) -> String {
+        match self.namespace.as_str() {
+            "" | "R_GlobalEnv" => name.to_string(),
+            namespace => format!("{name} (namespace:{namespace})"),
+        }
+    }
+}
+
+/// R code returning the source of the function `name` in `search_name`, or
+/// in the global environment for `None`. Source references are kept, so
+/// functions defined in the session show as written, comments included.
+pub fn function_source_code(search_name: Option<&str>, name: &str) -> String {
+    let environment = match search_name {
+        Some(search_name) => format!("as.environment({})", runtime::r_string(search_name)),
+        None => "globalenv()".to_string(),
+    };
+    format!(
+        r#"local({{
+    value <- get({name}, envir = {environment}, inherits = FALSE)
+    enclosing <- environment(value)
+    list(
+        source = paste(deparse(value, control = "useSource"), collapse = "\n"),
+        namespace = if (is.environment(enclosing)) environmentName(enclosing) else ""
+    )
+}})"#,
+        name = runtime::r_string(name),
+    )
+}
+
+pub fn parse_function_source(result: Value) -> Result<FunctionSource> {
+    serde_json::from_value(result).context("unexpected reply for a function's source")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +164,31 @@ mod tests {
         let code = listing_code("package:my\"pkg");
         assert!(code.contains(r#"search_name <- "package:my\"pkg""#));
         assert!(!code.contains("SEARCH_NAME"));
+    }
+
+    #[test]
+    fn test_function_source() {
+        let code = function_source_code(Some("package:forcats"), "as_factor");
+        assert!(code.contains(
+            r#"get("as_factor", envir = as.environment("package:forcats"), inherits = FALSE)"#
+        ));
+        assert!(
+            function_source_code(None, "greet")
+                .contains(r#"get("greet", envir = globalenv(), inherits = FALSE)"#)
+        );
+
+        let source = parse_function_source(json!({
+            "source": "function (x, ...) \n{\n    UseMethod(\"as_factor\")\n}",
+            "namespace": "forcats"
+        }))
+        .unwrap();
+        assert_eq!(source.title("as_factor"), "as_factor (namespace:forcats)");
+        let source = parse_function_source(
+            json!({ "source": "function(name) 1", "namespace": "R_GlobalEnv" }),
+        )
+        .unwrap();
+        assert_eq!(source.title("greet"), "greet");
+        assert!(parse_function_source(json!("oops")).is_err());
     }
 
     #[test]

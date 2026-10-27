@@ -1214,6 +1214,13 @@ Steps:
      - Data frames read "32 obs. of 11 variables", and other values show `str()`'s first
        line.
      - Timed in R: `package:base` (1,283 objects) takes 0.14 s, ggplot2 (649) 0.19 s.
+   - **Function source:** clicking a function, or its View Source button, in a package
+     or the global environment opens its source in a read-only R editor tab, as
+     RStudio's `View()` does. The tab is titled like RStudio's, for example `as_factor
+     (namespace:forcats)`. The source comes from `deparse(..., control = "useSource")`,
+     so functions defined in the session keep their comments; primitives show as
+     `.Primitive("sum")`. Added after step 5, at the user's request, with a test that
+     clicks a package function's row.
    - **Read-only:** a package's rows have no delete button, and Remove All is off. Rows
      don't expand. Only the last environment chosen is shown, if an earlier listing
      arrives late.
@@ -1272,8 +1279,9 @@ Steps:
      class and values formatted as text, and an Excel file's sheets. A newer change
      drops a preview still waiting. R's errors, such as a missing package, show in the
      preview's place.
-   - **Code:** as RStudio writes it, with only the arguments that differ from the
-     reader's defaults, for example `library(readr)`, `cars <- read_csv("~/cars.csv")`
+   - **Code:** shown in a read-only editor, so it can be selected and copied, with a
+     Copy button as in RStudio (added after step 5). It's written as RStudio writes it,
+     with only the arguments that differ from the reader's defaults, for example `library(readr)`, `cars <- read_csv("~/cars.csv")`
      and `View(cars)`. Names R doesn't accept as they are go in backticks. Import runs
      it in the console and closes the dialog.
    - **Checked in R:** the preview and import code for a CSV with row names, a
