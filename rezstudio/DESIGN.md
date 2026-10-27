@@ -142,9 +142,10 @@ packages and addins that call `rstudioapi` keep working.
 | M6 | Help + Viewer *(done)* | WKWebView embedded; help, htmlwidgets, Shiny. |
 | M7 | RStudio layout *(done)* | Two stacked, tabbed panes in the right dock, with tabs dragged between them; Console, Terminal and Debug as tabs; an outline sidebar from an editor button. |
 | M8 | Documents and Environment *(done)* | Render button for Quarto and R Markdown with output in the Viewer; Environment pane with RStudio's environment menu, grouping, memory use, workspace save/load and Import Dataset. |
-| M9 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
-| M10 | Typst native preview | Live preview with source ↔ preview jumping. |
-| M11 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
+| M9 | Dark plots and Viewer | A moon toggle in the Plots and Viewer toolbars darkens plots and pages to match a dark theme; Copy, Save and Open in Browser keep the originals. |
+| M10 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
+| M11 | Typst native preview | Live preview with source ↔ preview jumping. |
+| M12 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
 
 ### M1 plan (done)
 
@@ -1160,12 +1161,14 @@ Done when:
 ### M8 plan (done)
 
 Decisions:
-- **Order:** this comes before Python parity, which moves to M9. Neither feature needs
-  Python, and M9 then ports a finished Environment pane once instead of twice.
+- **Order:** this comes before Python parity, which moved to M9 (now M10). Neither
+  feature needs Python, and Python parity then ports a finished Environment pane once
+  instead of twice.
 - **Environment menu:** as in RStudio, a menu at the top of the Environment pane lists
   Global Environment and then every `package:` environment on R's search path, in
   `search()` order. Package environments are read-only: no delete or Remove All. RStudio's
-  language picker beside it ("R") waits for M9, when there is a second language.
+  language picker beside it ("R") waits for Python parity (M10), when there is a
+  second language.
 - **Grouping:** RStudio's list view, with rows under Data, Values and Functions headings.
   Data frames read "150 obs. of 5 variables". Clicking a column heading sorts by it.
 - **Memory:** RStudio's memory indicator in the pane's toolbar, showing what the R session
@@ -1366,6 +1369,83 @@ Done when:
 - Import Dataset brings in a CSV, an Excel sheet and a Stata file.
 - Render on a `.qmd` and an `.Rmd` file shows the HTML in the Viewer, with output in the
   Render tab.
+
+### M9 plan
+
+Dark mode for what R draws: plots in the Plots pane, and pages in the Viewer. R's plots
+and most rendered documents have white backgrounds, which glare in a dark theme.
+RStudio leaves them white; Positron offers a dark filter for plots.
+
+Decisions:
+- **Darken what's shown, never what's kept.** R draws as it always does, and RezStudio
+  darkens the result on screen. Copy Plot, Save Plot (R draws again at the chosen size),
+  the Viewer's Open in Browser, and rendered files on disk are always the originals. The
+  other way, theming R itself with `par(bg = ...)` or a dark ggplot theme, would change
+  the user's graphics settings and their exports, and packages override it (ggplot2
+  ignores `par()`).
+- **A toggle in each toolbar.** A moon button in the Plots toolbar and another in the
+  Viewer toolbar, each with a tooltip saying what it does. Each pane has its own
+  setting, `plots.dark_mode` and `viewer.dark_mode`, with the values `off`, `on` and
+  `follow_theme` (on while the app's theme is dark). The button toggles its pane between
+  on and off and saves that to the settings file; `follow_theme` is set there.
+- **Off by default.** RStudio never changes a plot's colors, and darkened colors are not
+  the true ones, so it's a choice. The toggle is one click away to check the real colors
+  before exporting.
+- **Plots:** each pixel's lightness is flipped while its hue and saturation stay, so red
+  stays red and a dark line on white becomes a light line on dark. Lightness is scaled
+  to run from the pane's background color to its text color, so a white plot background
+  becomes the pane's own background. Known effects: a palette that runs light to dark,
+  such as viridis, runs dark to light, and a photo drawn into a plot looks like a
+  negative.
+- **Viewer:** two layers under the one toggle.
+  - Pages are told the app is dark, through the web view's appearance, so pages with a
+    dark design of their own (`prefers-color-scheme: dark`), such as some Quarto themes,
+    pkgdown sites and htmlwidgets, switch to it.
+  - Pages that are still light once loaded get a filter: CSS that inverts the page and
+    turns its hues back, the usual way to darken a page that has no dark design. A
+    script checks the page's background after it loads, so a page that's already dark
+    is left alone rather than turned light.
+  - Under the filter, JPEG and WebP images and videos are turned back, so photos look
+    right. PNG and SVG images stay darkened, since in R output they are mostly plots,
+    which then match the Plots pane. Leaflet's map tiles are PNGs, so maps darken too.
+  - The Help pane is already themed (M6) and is not part of this.
+
+To check before starting:
+- Whether setting a `WKWebView`'s own `appearance` to dark makes its pages see
+  `prefers-color-scheme: dark` while the window and system are light, as when the app's
+  theme is dark on a light Mac.
+- How a RezStudio crate registers its own settings with Zed's settings system, keeping
+  the change to Zed's settings crates small, and that a toolbar button can write the
+  setting to the settings file, as Zed's own toggles do.
+- Whether Ark's plots have a white or a transparent background, which decides what the
+  flipped background becomes.
+
+Steps:
+1. **Settings.** `plots.dark_mode` and `viewer.dark_mode`, each `off`, `on` or
+   `follow_theme`, defaulting to `off`, with the effective on or off worked out from the
+   theme's appearance.
+2. **Dark plots.** Darken the decoded image the pane draws, keeping the PNG that Copy
+   uses. Toggling or a theme change redoes it from the kept PNG, without asking R to
+   draw again. Everywhere the pane draws a plot is darkened: the pane, its history and
+   the zoom window. The moon button goes in the Plots toolbar.
+3. **Dark Viewer.** Set the web view's appearance from the setting, and add the filter
+   script, which runs on each page as it loads and again when the toggle changes, with
+   no reload. The moon button goes in the Viewer toolbar.
+4. **Tests and live checks.**
+   - Unit tests for the setting, the lightness flip (white to the pane's background,
+     black to its text color, a pure red staying red), and the Viewer's script and CSS.
+   - Live checks of a base plot and a ggplot2 plot, a rendered Quarto and R Markdown
+     document, a plotly widget, a leaflet map and a Shiny app, with the theme dark and
+     light.
+
+Done when:
+- With the toggle on, plots in the Plots pane and the zoom window match a dark theme,
+  and Copy Plot and Save Plot still give the original light plot.
+- A rendered document, an htmlwidget and a Shiny app in the Viewer are dark, a page with
+  its own dark design uses it, and photos aren't inverted.
+- `follow_theme` darkens both panes when the theme switches to dark and restores them
+  when it switches back.
+- With both settings `off`, nothing looks different from today.
 
 ## Risks
 
