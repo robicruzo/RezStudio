@@ -1025,6 +1025,7 @@ mod tests {
                             },
                         ],
                         divider: 0.5,
+                        collapsed: None,
                     },
                     window,
                     cx,

@@ -1526,6 +1526,38 @@ Done when:
   when it switches back.
 - With both settings `off`, nothing looks different from today.
 
+### Minimizing and maximizing the right panes (after M9, done)
+
+RStudio's minimize and maximize buttons for the two stacked panes of the right dock, at the
+right end of each pane's tab row.
+- **Behavior:** minimize collapses a pane to its tab row and the other fills the column;
+  maximize collapses the other. While one is collapsed, both panes show a restore button.
+  Clicking a tab of the collapsed pane, revealing one of its panels (as when R draws a plot or
+  shows a widget), or dragging or double-clicking the divider shows both again.
+- **Where:** `DockLayout::collapsed`, the collapsed pane by its index, saved with the rest of
+  the layout (`#[serde(default)]`, so older saved layouts load). Only split side docks
+  collapse a pane. Moving a tab keeps the collapse while the dock keeps its two panes.
+- **Hiding:** a collapsed pane's panel is left out of what the dock shows, so it's told it's
+  hidden like any panel that stops showing. Help and Viewer hide their web views that way.
+  The dock's active panel moves to the pane still showing.
+- **Tab rows:** a split side dock's panes always show their tab row, which holds the buttons,
+  even with one panel.
+- **Fixed along the way:**
+  - Making room for a widget measured the divider's share against the dock less the
+    divider, so the lower pane came out the divider's width short. The single-panel pane's
+    missing tab row had hidden this.
+  - The dock's width jumped when the active panel moved between panes, as each panel kept
+    its own width and one added after the layout kept its default. A split dock now keeps
+    its width when the active panel changes.
+- **Tests:** minimizing hides the panel and leaves the tabs under the other pane; a tab click
+  restores; maximizing, then revealing a panel, restores; the width stays when switching
+  panes and minimizing (checked to fail without the fix). The make-room tests now count the
+  tab rows.
+- **Checked live** with a plotly widget in the Viewer, each step captured by window ID:
+  both panes with the buttons; the lower pane minimized with the page's web view hidden;
+  restored; the lower pane maximized with the widget redrawn to fill the column; and
+  revealing the Viewer restoring both. The dock's edge stayed put throughout.
+
 ## Risks
 
 - **Ark's comm protocol is Positron-driven and may change.** Mitigation: bundle a pinned Ark

@@ -394,6 +394,10 @@ pub struct DockLayout {
     pub panes: Vec<DockPaneLayout>,
     /// The first pane's share of the dock when it has two.
     pub divider: f32,
+    /// The pane, by its index in `panes`, minimized to its tab row in a split
+    /// side dock, as RStudio minimizes a pane and maximizes the other.
+    #[serde(default)]
+    pub collapsed: Option<usize>,
 }
 
 impl Default for DockLayout {
@@ -401,6 +405,7 @@ impl Default for DockLayout {
         Self {
             panes: Vec::new(),
             divider: DEFAULT_DIVIDER,
+            collapsed: None,
         }
     }
 }
@@ -811,15 +816,109 @@ impl Dock {
     }
 
     /// The panel each pane shows, as indices, whether or not the dock is open.
+    /// A minimized pane shows only its tabs, so its panel isn't shown.
     fn shown_indices(&self) -> Vec<usize> {
         let panes = self.panes();
         if panes.len() < 2 {
             return self.active_panel_index.into_iter().collect();
         }
+        let collapsed = self.collapsed_pane_pos(&panes);
         panes
             .iter()
-            .filter_map(|(pane_ix, panels)| self.shown_in_pane(*pane_ix, panels))
+            .enumerate()
+            .filter(|(pane_pos, _)| collapsed != Some(*pane_pos))
+            .filter_map(|(_, (pane_ix, panels))| self.shown_in_pane(*pane_ix, panels))
             .collect()
+    }
+
+    /// The pane minimized to its tab row, by its position among `panes`.
+    /// Only a split side dock minimizes a pane, as its panes are stacked.
+    fn collapsed_pane_pos(&self, panes: &[(usize, Vec<usize>)]) -> Option<usize> {
+        if panes.len() < 2 || self.position.axis() != Axis::Horizontal {
+            return None;
+        }
+        let collapsed = self.layout.collapsed?;
+        panes.iter().position(|(pane_ix, _)| *pane_ix == collapsed)
+    }
+
+    /// Minimizes the pane at `pane_pos` to its tab row, giving the other the
+    /// whole dock, or shows both panes again for `None`.
+    pub fn set_collapsed_pane(
+        &mut self,
+        pane_pos: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panes = self.panes();
+        let collapsed = pane_pos
+            .and_then(|pane_pos| panes.get(pane_pos))
+            .map(|(pane_ix, _)| *pane_ix);
+        if collapsed == self.layout.collapsed {
+            return;
+        }
+        let before = self.shown_panel_ids();
+        self.layout.collapsed = collapsed;
+        // The dock's active panel stays in the pane that still shows.
+        if let Some(pane_pos) = pane_pos
+            && let Some((_, collapsed_panels)) = panes.get(pane_pos)
+            && self
+                .active_panel_index
+                .is_some_and(|ix| collapsed_panels.contains(&ix))
+            && let Some((pane_ix, panels)) = panes
+                .iter()
+                .enumerate()
+                .find(|(other_pos, _)| *other_pos != pane_pos)
+                .map(|(_, pane)| pane)
+        {
+            let previous = self.active_panel_index;
+            self.active_panel_index = self.shown_in_pane(*pane_ix, panels);
+            self.keep_split_width(previous, window, cx);
+        }
+        self.update_shown(&before, None, window, cx);
+        self.persist_layout(cx);
+        cx.notify();
+    }
+
+    /// Keeps the dock's width when the active panel changes in a split dock.
+    /// Both panes share one width, but each panel stores its own, and one
+    /// added after the layout was applied still has its default.
+    fn keep_split_width(
+        &mut self,
+        previous: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_split() || previous == self.active_panel_index {
+            return;
+        }
+        let width = |dock: &Self, ix: Option<usize>, window: &Window, cx: &App| {
+            ix.and_then(|ix| dock.panel_entries.get(ix)).map(|entry| {
+                entry
+                    .size_state
+                    .size
+                    .unwrap_or_else(|| entry.panel.default_size(window, cx))
+            })
+        };
+        let kept = width(self, previous, window, cx);
+        if kept.is_some() && kept != width(self, self.active_panel_index, window, cx) {
+            self.resize_all_panels(kept, None, window, cx);
+        }
+    }
+
+    /// Shows a minimized pane again if it holds `panel_ix`, as when a tab in
+    /// it is clicked or its panel is revealed. Returns whether it did.
+    fn restore_pane_of(&mut self, panel_ix: usize) -> bool {
+        let panes = self.panes();
+        let Some(pane_pos) = self.collapsed_pane_pos(&panes) else {
+            return false;
+        };
+        let holds_panel = panes
+            .get(pane_pos)
+            .is_some_and(|(_, panels)| panels.contains(&panel_ix));
+        if holds_panel {
+            self.layout.collapsed = None;
+        }
+        holds_panel
     }
 
     fn shown_in_pane(&self, pane_ix: usize, panels: &[usize]) -> Option<usize> {
@@ -968,12 +1067,18 @@ impl Dock {
         } else {
             self.layout.divider
         };
+        // A pane stays minimized while the dock keeps its two panes in place.
+        let collapsed = self
+            .layout
+            .collapsed
+            .filter(|_| was_split && panes.len() == self.layout.panes.len());
         let layout = DockLayout {
             panes: panes
                 .into_iter()
                 .map(|(panels, active)| DockPaneLayout { panels, active })
                 .collect(),
             divider,
+            collapsed,
         };
         self.apply_layout(layout, window, cx);
         if let Some(ix) = self
@@ -1012,11 +1117,19 @@ impl Dock {
                     area.height
                 } else {
                     area.width
-                } - DIVIDER_SIZE;
+                };
                 if length <= Pixels::ZERO {
                     return;
                 }
-                f32::from(size + TAB_ROW_HEIGHT) / f32::from(length)
+                // The divider's share is of the whole dock, so the first pane
+                // gets exactly its share and the second what's left after the
+                // divider.
+                let divider = if pane_pos == 0 {
+                    Pixels::ZERO
+                } else {
+                    DIVIDER_SIZE
+                };
+                f32::from(size + TAB_ROW_HEIGHT + divider) / f32::from(length)
             }
         }
         .clamp(MIN_PANE_SHARE, 1. - MIN_PANE_SHARE);
@@ -1423,8 +1536,10 @@ impl Dock {
         // Only the panel the other pane shows stays shown.
         let shown_before = self.shown_panel_ids();
         let index_changed = Some(panel_ix) != self.active_panel_index;
-        self.active_panel_index = Some(panel_ix);
-        let layout_changed = self.remember_shown(panel_ix);
+        let previous = self.active_panel_index.replace(panel_ix);
+        self.keep_split_width(previous, window, cx);
+        let restored = self.restore_pane_of(panel_ix);
+        let layout_changed = self.remember_shown(panel_ix) || restored;
         let chosen = self
             .panel_entries
             .get(panel_ix)
@@ -1776,13 +1891,19 @@ impl Dock {
                 })
                 .unwrap_or_else(|| gpui::Empty.into_any_element());
         }
+        let collapsed = self.collapsed_pane_pos(&panes);
         let mut pane_elements =
             panes
                 .iter()
                 .enumerate()
                 .filter_map(|(pane_pos, (pane_ix, panels))| {
                     let shown = self.shown_in_pane(*pane_ix, panels)?;
-                    Some(self.render_pane(pane_pos, panels, shown, true, window, cx))
+                    Some(if collapsed == Some(pane_pos) {
+                        self.render_tab_row(pane_pos, panels, shown, window, cx)
+                            .into_any_element()
+                    } else {
+                        self.render_pane(pane_pos, panels, shown, true, window, cx)
+                    })
                 });
         let (Some(first), Some(second)) = (pane_elements.next(), pane_elements.next()) else {
             return gpui::Empty.into_any_element();
@@ -1819,9 +1940,10 @@ impl Dock {
                 cx.stop_propagation();
                 cx.new(|_| divider.clone())
             })
-            .on_click(cx.listener(|dock, event: &gpui::ClickEvent, _, cx| {
+            .on_click(cx.listener(|dock, event: &gpui::ClickEvent, window, cx| {
                 if event.click_count() == 2 {
                     dock.layout.divider = DEFAULT_DIVIDER;
+                    dock.set_collapsed_pane(None, window, cx);
                     dock.persist_layout(cx);
                     cx.notify();
                 }
@@ -1850,10 +1972,12 @@ impl Dock {
                 .size_full(),
             )
             .on_drag_move(cx.listener(
-                move |dock, event: &gpui::DragMoveEvent<DraggedDockDivider>, _, cx| {
+                move |dock, event: &gpui::DragMoveEvent<DraggedDockDivider>, window, cx| {
                     if event.drag(cx).0 != dock.position {
                         return;
                     }
+                    // Dragging the divider shows a minimized pane again.
+                    dock.set_collapsed_pane(None, window, cx);
                     let bounds = event.bounds;
                     let share = if stacked {
                         f32::from(event.event.position.y - bounds.top())
@@ -1873,26 +1997,28 @@ impl Dock {
             }))
             .child(
                 div()
-                    .flex_none()
                     .min_h_0()
                     .min_w_0()
                     .overflow_hidden()
-                    .map(|this| {
-                        if stacked {
-                            this.w_full().h(relative(share))
-                        } else {
-                            this.h_full().w(relative(share))
-                        }
+                    .map(|this| match collapsed {
+                        // A minimized pane is its tab row; the other fills the rest.
+                        Some(0) => this.flex_none().w_full().h(TAB_ROW_HEIGHT),
+                        Some(_) => this.flex_1().w_full(),
+                        None if stacked => this.flex_none().w_full().h(relative(share)),
+                        None => this.flex_none().h_full().w(relative(share)),
                     })
                     .child(first),
             )
             .child(divider)
             .child(
                 div()
-                    .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .overflow_hidden()
+                    .map(|this| match collapsed {
+                        Some(1) => this.flex_none().w_full().h(TAB_ROW_HEIGHT),
+                        _ => this.flex_1(),
+                    })
                     .child(second),
             )
             .into_any_element()
@@ -1936,7 +2062,7 @@ impl Dock {
         v_flex()
             .size_full()
             .min_h_0()
-            .when(panels.len() > 1, |this| {
+            .when(panels.len() > 1 || (split && stacked), |this| {
                 this.child(self.render_tab_row(pane_pos, panels, shown, window, cx))
             })
             .child(
@@ -2088,6 +2214,58 @@ impl Dock {
                         }
                     })),
             )
+            .children(self.render_pane_buttons(pane_pos, cx))
+    }
+
+    /// RStudio's buttons for a pane of a split side dock: minimize it to its
+    /// tabs, maximize it over the other, or restore both once either is.
+    fn render_pane_buttons(&self, pane_pos: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let panes = self.panes();
+        if panes.len() < 2 || self.position.axis() != Axis::Horizontal {
+            return None;
+        }
+        let other_pos = usize::from(pane_pos == 0);
+        let button = |id: &'static str, icon: IconName, tooltip: &'static str| {
+            IconButton::new((id, pane_pos), icon)
+                .icon_size(IconSize::XSmall)
+                .icon_color(Color::Muted)
+                .tooltip(Tooltip::text(tooltip))
+        };
+        let buttons = if self.collapsed_pane_pos(&panes).is_some() {
+            h_flex().child(
+                button(
+                    "dock-pane-restore",
+                    IconName::GenericRestore,
+                    "Restore Panes",
+                )
+                .on_click(
+                    cx.listener(|dock, _, window, cx| dock.set_collapsed_pane(None, window, cx)),
+                ),
+            )
+        } else {
+            h_flex()
+                .child(
+                    button(
+                        "dock-pane-minimize",
+                        IconName::GenericMinimize,
+                        "Minimize Pane",
+                    )
+                    .on_click(cx.listener(move |dock, _, window, cx| {
+                        dock.set_collapsed_pane(Some(pane_pos), window, cx)
+                    })),
+                )
+                .child(
+                    button(
+                        "dock-pane-maximize",
+                        IconName::GenericMaximize,
+                        "Maximize Pane",
+                    )
+                    .on_click(cx.listener(move |dock, _, window, cx| {
+                        dock.set_collapsed_pane(Some(other_pos), window, cx)
+                    })),
+                )
+        };
+        Some(buttons.flex_none().gap_0p5().into_any_element())
     }
 
     pub(crate) fn show_panel_from_tab(
