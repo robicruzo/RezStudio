@@ -277,6 +277,11 @@ impl RSession {
         self.working_directory.as_ref()
     }
 
+    /// The environment R runs with: the project's shell environment.
+    pub fn environment(&self) -> &HashMap<String, String> {
+        &self.env
+    }
+
     /// The id of the process R runs under while it's running. Ark is a child
     /// of it, and processes R starts are below Ark.
     pub fn process_id(&self) -> Option<u32> {

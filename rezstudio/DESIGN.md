@@ -1190,8 +1190,10 @@ To check before starting:
 - *(Checked in step 1.)* Ark's variables comm lists only the global environment (or the
   frame being debugged), and its `inspect` paths start there too, so package environments
   are listed by R code run with `evaluate_code`.
-- How the Viewer opens a local HTML file (a `file://` URL in WKWebView needs read access
-  to its folder), and what `quarto preview` prints when it's ready to serve.
+- *(Checked in step 5.)* The Viewer already serves a local HTML file's folder under its
+  `rezfile://` scheme (from M6), so a rendered page's `_files/` folder loads. `quarto
+  preview` prints `Browse at <url>` once it serves, and both renderers print `Output
+  created: <file>`.
 - *(Checked in step 3.)* The R session's memory is read with `sysinfo`, from the process
   Ark runs under, so it doesn't need R and keeps updating while R is busy.
 
@@ -1281,8 +1283,44 @@ Steps:
      preview's parsing (including R's one-value and empty vectors), and the dialog
      from choosing a file through a preview, a delimiter change and importing.
    - **Not checked live:** the machine was in use.
-5. **Rendering.** The Render button and shortcut, the Render tab, the Viewer for `.qmd`
-   and `.Rmd`, other formats, and Render on Save.
+5. **Rendering.** *(Done.)* A new `render_panel` crate adds the Render tab, after
+   Terminal in the bottom dock, and the actions behind the editor's Render button.
+   - **Starting:** the Render button (an arrow in a `.qmd` or `.Rmd` editor's toolbar)
+     and Cmd+Shift+K in those editors save the document if needed, then render it. A
+     new render stops the one running, as only one runs at a time.
+   - **Quarto:** `quarto preview <file> --no-browser --no-watch-inputs` in the
+     document's folder. `QUARTO_R` points Quarto at the project's R. When it prints
+     `Browse at <url>`, the Viewer shows the page. Rendering the same document again
+     replaces the Viewer's entry rather than adding one, though the port changes. The
+     server keeps running until stopped or replaced, and stopping kills its process
+     group, since `quarto` starts `deno`, which outlives a plain kill. Quitting the app
+     stops it too. A crash would leave it running, since it has no supervisor like
+     Ark's.
+   - **R Markdown:** `Rscript -e 'rmarkdown::render("<file>", encoding = "UTF-8")'`
+     with the project's R. When it exits successfully, the file named by `Output
+     created:` shows in the Viewer.
+   - **Other formats:** the Viewer shows HTML and PDF. Word, PowerPoint and the like
+     open in their own apps. The web view now serves PDFs as `application/pdf`.
+   - **Environment:** the R session's environment (the project's shell environment),
+     with `NO_COLOR=1`, since escape codes would show as text. Without pandoc on the
+     path, R Markdown gets `RSTUDIO_PANDOC` pointing at the pandoc bundled with Quarto.
+     Quarto is looked for on the path, then where its installers, RStudio and Positron
+     put it.
+   - **The Render tab:** the command and its output (up to 5,000 lines), a status line
+     (rendering, previewing at the address, rendered, stopped, or failed with the exit
+     code), a stop button, and Clear.
+   - **Render on Save:** in the menu beside the Render button. While it's on, each save
+     renders the document. Render's own save doesn't render twice.
+   - **Tests:** finding Quarto and R, the commands and environments, quoting, pandoc
+     from Quarto, reading output lines with escape codes, which results show in the
+     Viewer, and the Render tab running scripts that act like Quarto (serving until
+     stopped), R Markdown (finishing), a failing render, and a render replacing one
+     still running. The Viewer replaces a re-rendered document's entry. Render on Save
+     toggles for a Quarto file and isn't offered for Markdown. The app's action and
+     keymap tests pass with the new actions and Cmd+Shift+K.
+   - **Checked by hand:** `quarto preview` and `rmarkdown::render` on small documents,
+     with Quarto 1.9.36, including a Word document.
+   - **Not checked live:** the machine was in use.
 6. **Tests and live checks.** Unit tests for each step, a real-R test for package
    listings and imports, and live checks of rendering a Quarto and an R Markdown document.
 

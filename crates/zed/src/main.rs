@@ -690,6 +690,7 @@ fn main() {
         help_panel::init(cx);
         viewer_panel::init(cx);
         outline_sidebar::init(cx);
+        render_panel::init(cx);
         r_markdown::init(cx);
         data_explorer::init(cx);
         recent_projects::init(cx);

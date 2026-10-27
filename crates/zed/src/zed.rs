@@ -724,7 +724,12 @@ fn rstudio_dock_layouts() -> workspace::dock::DefaultDockLayouts {
             ..DockLayout::default()
         }),
         bottom: Some(DockLayout {
-            panes: vec![pane(&["R Console", "TerminalPanel", "DebugPanel"])],
+            panes: vec![pane(&[
+                "R Console",
+                "TerminalPanel",
+                "Render",
+                "DebugPanel",
+            ])],
             ..DockLayout::default()
         }),
     }
@@ -743,6 +748,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             packages_panel::PackagesPanel::load(workspace_handle.clone(), cx.clone());
         let help_panel = help_panel::HelpPanel::load(workspace_handle.clone(), cx.clone());
         let viewer_panel = viewer_panel::ViewerPanel::load(workspace_handle.clone(), cx.clone());
+        let render_panel = render_panel::RenderPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -771,6 +777,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(packages_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(help_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(viewer_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(render_panel, workspace_handle.clone(), cx.clone()),
         );
 
         workspace_handle.update(cx, |workspace, cx| {
@@ -5885,6 +5892,7 @@ mod tests {
                 "r_markdown",
                 "recent_projects",
                 "remote_debug",
+                "render_panel",
                 "repl",
                 "search",
                 "settings_editor",
@@ -6099,6 +6107,7 @@ mod tests {
             project_panel::init(cx);
             outline_panel::init(cx);
             outline_sidebar::init(cx);
+            render_panel::init(cx);
             terminal_view::init(cx);
             image_viewer::init(cx);
 

@@ -49,6 +49,9 @@ enum Content {
     },
     /// A web app on this machine, such as Shiny's.
     App { url: String },
+    /// A rendered document served on this machine, as `quarto preview`
+    /// serves one. It isn't R's to stop.
+    Preview { document: PathBuf, url: String },
 }
 
 impl Content {
@@ -57,7 +60,7 @@ impl Content {
             Content::File { path, .. } => url::Url::from_file_path(path)
                 .ok()
                 .map(|url| url.to_string()),
-            Content::App { url } => Some(url.clone()),
+            Content::App { url } | Content::Preview { url, .. } => Some(url.clone()),
         }
     }
 }
@@ -99,6 +102,13 @@ impl History {
             self.index -= 1;
         }
         true
+    }
+
+    fn replace_current(&mut self, content: Content) {
+        match self.contents.get_mut(self.index) {
+            Some(current) => *current = content,
+            None => self.push(content),
+        }
     }
 
     fn remove_current(&mut self) {
@@ -282,6 +292,43 @@ impl ViewerPanel {
         }
     }
 
+    /// Shows a document rendered to an HTML or PDF file.
+    pub fn show_rendered_file(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content = Content::File {
+            path,
+            title: String::new(),
+            height: 0,
+        };
+        self.show(content, window, cx);
+    }
+
+    /// Shows a document served at `url`. Rendering the same document again
+    /// replaces it, though the server's address may have changed.
+    pub fn show_rendered_url(
+        &mut self,
+        document: PathBuf,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content = Content::Preview { document, url };
+        if let (Some(Content::Preview { document, .. }), Content::Preview { document: new, .. }) =
+            (self.history.current(), &content)
+            && document == new
+        {
+            self.history.replace_current(content);
+            self.load_current(cx);
+            self.reveal(None, window, cx);
+            return;
+        }
+        self.show(content, window, cx);
+    }
+
     fn forget_contents(&mut self, cx: &mut Context<Self>) {
         self.history.clear();
         self.load_current(cx);
@@ -292,7 +339,7 @@ impl ViewerPanel {
         if !self.web_view.read(cx).is_available() {
             match &content {
                 Content::File { path, .. } => cx.open_with_system(path),
-                Content::App { url } => cx.open_url(url),
+                Content::App { url } | Content::Preview { url, .. } => cx.open_url(url),
             }
             return;
         }
@@ -317,7 +364,9 @@ impl ViewerPanel {
         let current = self.history.current().cloned();
         self.web_view.update(cx, |web_view, cx| match &current {
             Some(Content::File { path, .. }) => web_view.load_file(path, cx),
-            Some(Content::App { url }) => web_view.load_url(url.clone(), cx),
+            Some(Content::App { url } | Content::Preview { url, .. }) => {
+                web_view.load_url(url.clone(), cx)
+            }
             None => {}
         });
         self.update_shown(cx);
@@ -403,6 +452,12 @@ impl ViewerPanel {
                 }
             }
             Content::App { url } => page_title.unwrap_or_else(|| url.clone()),
+            Content::Preview { document, .. } => page_title.unwrap_or_else(|| {
+                document
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            }),
         })
     }
 
@@ -762,7 +817,7 @@ mod tests {
                 .map(|(position, content)| {
                     let name = match content {
                         Content::File { path, .. } => path.display().to_string(),
-                        Content::App { url } => url.clone(),
+                        Content::App { url } | Content::Preview { url, .. } => url.clone(),
                     };
                     if position == index {
                         format!("[{name}]")
@@ -894,6 +949,41 @@ mod tests {
         reset(cx);
         harness.show_widget_with_height("/tmp/RtmpX/viewhtml3/index.html", -1, cx);
         assert!((divider(cx) - 0.1).abs() < 0.001, "{}", divider(cx));
+    }
+
+    #[gpui::test]
+    async fn test_rendering_a_document_again_replaces_its_entry(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::new(cx).await;
+        let report = PathBuf::from("/work/report.qmd");
+        let show = |document: &PathBuf, url: &str, cx: &mut VisualTestContext| {
+            harness.panel.update_in(cx, |panel, window, cx| {
+                panel.show_rendered_url(document.clone(), url.to_string(), window, cx)
+            });
+            cx.run_until_parked();
+        };
+        show(&report, "http://localhost:1111/report.html", cx);
+        show(&report, "http://localhost:2222/report.html", cx);
+        let (contents, index) = harness.panel.read_with(cx, |panel, _| panel.contents());
+        assert_eq!(
+            contents,
+            [Content::Preview {
+                document: report,
+                url: "http://localhost:2222/report.html".to_string()
+            }]
+        );
+        assert_eq!(index, 0);
+
+        show(
+            &PathBuf::from("/work/other.qmd"),
+            "http://localhost:3333/other.html",
+            cx,
+        );
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.show_rendered_file(PathBuf::from("/work/notes.html"), window, cx)
+        });
+        let (contents, index) = harness.panel.read_with(cx, |panel, _| panel.contents());
+        assert_eq!(contents.len(), 3);
+        assert_eq!(index, 2);
     }
 
     #[gpui::test]

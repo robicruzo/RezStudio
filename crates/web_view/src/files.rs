@@ -52,6 +52,7 @@ pub fn content_type(path: &Path) -> &'static str {
         Some("woff2") => "font/woff2",
         Some("ttf") => "font/ttf",
         Some("wasm") => "application/wasm",
+        Some("pdf") => "application/pdf",
         _ => "application/octet-stream",
     }
 }

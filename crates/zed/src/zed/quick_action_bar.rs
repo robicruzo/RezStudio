@@ -21,6 +21,7 @@ use ui::{
     ButtonStyle, ContextMenu, ContextMenuEntry, DocumentationSide, IconButton, IconName, IconSize,
     PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
 };
+use util::ResultExt as _;
 use vim_mode_setting::{HelixModeSetting, VimModeSetting};
 use workspace::item::ItemBufferKind;
 use workspace::{
@@ -59,6 +60,7 @@ impl QuickActionBar {
         cx.observe_global::<SettingsStore>(|this, cx| this.apply_settings(cx))
             .detach();
         outline_sidebar::observe_toggles(cx, |_, cx| cx.notify()).detach();
+        render_panel::observe_render_on_save(cx, |_, cx| cx.notify()).detach();
         this
     }
 
@@ -136,6 +138,61 @@ impl Render for QuickActionBar {
                 },
             )
         });
+
+        // RStudio's Render, with Render on Save in its menu.
+        let render_buttons = render_panel::renderable_path(&editor, cx)
+            .is_some()
+            .then(|| {
+                let workspace = self.workspace.clone();
+                let render_editor = editor.clone();
+                let options_editor = editor.clone();
+                let render_on_save = render_panel::is_render_on_save(&editor, cx);
+                h_flex()
+                    .child(QuickActionBarButton::new(
+                        "render document",
+                        IconName::ArrowRight,
+                        false,
+                        Box::new(render_panel::Render),
+                        focus_handle.clone(),
+                        "Render",
+                        move |_, window, cx| {
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    render_panel::render_editor(
+                                        workspace,
+                                        render_editor.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                })
+                                .log_err();
+                        },
+                    ))
+                    .child(
+                        PopoverMenu::new("render-options")
+                            .trigger_with_tooltip(
+                                IconButton::new("render options", IconName::ChevronDown)
+                                    .icon_size(IconSize::XSmall)
+                                    .style(ButtonStyle::Subtle),
+                                Tooltip::text("Render Options"),
+                            )
+                            .anchor(Anchor::TopRight)
+                            .menu(move |window, cx| {
+                                let editor = options_editor.clone();
+                                Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                                    menu.toggleable_entry(
+                                        "Render on Save",
+                                        render_on_save,
+                                        IconPosition::Start,
+                                        Some(Box::new(render_panel::ToggleRenderOnSave)),
+                                        move |window, cx| {
+                                            render_panel::toggle_render_on_save(&editor, window, cx)
+                                        },
+                                    )
+                                }))
+                            }),
+                    )
+            });
 
         let search_button = (editor.buffer_kind(cx) == ItemBufferKind::Singleton).then(|| {
             QuickActionBarButton::new(
@@ -677,6 +734,7 @@ impl Render for QuickActionBar {
         h_flex()
             .id("quick action bar")
             .gap(DynamicSpacing::Base01.rems(cx))
+            .children(render_buttons)
             .children(self.render_repl_menu(cx))
             .children(self.render_preview_button(cx))
             .children(search_button)
