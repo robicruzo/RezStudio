@@ -1,12 +1,18 @@
 //! The web view on macOS: a WKWebView, made and driven through `wry`.
 
 use crate::files::{FILE_SCHEME, respond};
-use crate::{NativeEvent, NativeView, PageStyle, is_allowed_url, page_style_script};
+use crate::{
+    NativeEvent, NativeView, PageDarkening, PageStyle, dark_mode_script, is_allowed_url,
+    page_style_script,
+};
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc;
 use gpui::{Bounds, Pixels, Rgba, Window};
 use objc2::{MainThreadMarker, MainThreadOnly as _};
-use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSView};
+use objc2_app_kit::{
+    NSAppearance, NSAppearanceCustomization as _, NSAppearanceNameDarkAqua, NSBitmapImageFileType,
+    NSBitmapImageRep, NSImage, NSView,
+};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGMutablePath;
 use objc2_foundation::{NSDictionary, NSError, NSString};
@@ -22,6 +28,26 @@ use wry::{NewWindowResponse, PageLoadEvent, RGBA, Rect, WebViewBuilder, WebViewE
 struct WryView {
     view: wry::WebView,
     events: mpsc::UnboundedSender<NativeEvent>,
+}
+
+impl WryView {
+    /// Runs `script` on the page shown and at the start of every page after
+    /// it. wry only takes page scripts as the view is made, so this adds one
+    /// to WebKit directly. Each call adds another, and they run in order, so
+    /// the newest wins. Removing the old ones would remove wry's own.
+    fn run_on_every_page(&self, script: &str) -> Result<()> {
+        let main_thread = MainThreadMarker::new().context("not on the main thread")?;
+        let user_script = unsafe {
+            WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(main_thread),
+                &NSString::from_str(script),
+                WKUserScriptInjectionTime::AtDocumentStart,
+                true,
+            )
+        };
+        unsafe { self.view.manager().addUserScript(&user_script) };
+        Ok(self.view.evaluate_script(script)?)
+    }
 }
 
 fn rect(bounds: Bounds<Pixels>) -> Rect {
@@ -244,21 +270,21 @@ impl NativeView for WryView {
     }
 
     fn set_page_style(&self, style: &PageStyle) -> Result<()> {
-        let script = page_style_script(&style.css)?;
-        // wry only takes page scripts as the view is made, so this adds one to
-        // WebKit directly. Each change adds another; they run in order, so the
-        // newest style wins. Removing the old ones would remove wry's own.
-        let main_thread = MainThreadMarker::new().context("not on the main thread")?;
-        let user_script = unsafe {
-            WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
-                WKUserScript::alloc(main_thread),
-                &NSString::from_str(&script),
-                WKUserScriptInjectionTime::AtDocumentStart,
-                true,
-            )
-        };
-        unsafe { self.view.manager().addUserScript(&user_script) };
-        self.view.evaluate_script(&script)?;
+        self.run_on_every_page(&page_style_script(&style.css)?)?;
         Ok(self.view.set_background_color(rgba(style.background))?)
+    }
+
+    fn set_dark_mode(&self, darkening: Option<PageDarkening>) -> Result<()> {
+        // A view's own appearance decides what its pages see as
+        // `prefers-color-scheme`; with none, it follows the system's.
+        let appearance = match darkening {
+            Some(_) => {
+                let appearance = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua });
+                Some(appearance.context("macOS has no dark appearance")?)
+            }
+            None => None,
+        };
+        self.view.webview().setAppearance(appearance.as_deref());
+        self.run_on_every_page(&dark_mode_script(darkening))
     }
 }

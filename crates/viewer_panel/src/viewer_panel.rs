@@ -10,7 +10,7 @@ use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionStat
 use std::path::PathBuf;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
-use web_view::{WebView, WebViewEvent, watch_cover};
+use web_view::{PageDarkening, WebView, WebViewEvent, watch_cover};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, PaneRoom, Panel, PanelEvent};
 
@@ -19,6 +19,9 @@ actions!(
     [
         /// Opens the Viewer pane and moves focus to it.
         ToggleFocus,
+        /// Turns darkening light pages to suit a dark theme on or off. Pages
+        /// opened in a browser keep their own colors.
+        ToggleDarkMode,
     ]
 );
 
@@ -51,11 +54,46 @@ pub fn is_dark_mode_on(cx: &App) -> bool {
         .is_on(!cx.theme().appearance.is_light())
 }
 
+/// How pages are darkened now, or `None` when dark mode is off. With a
+/// light theme and dark mode on, pages go dark gray rather than taking the
+/// theme's light background.
+fn page_darkening(cx: &App) -> Option<PageDarkening> {
+    if !is_dark_mode_on(cx) {
+        return None;
+    }
+    let theme = cx.theme();
+    Some(PageDarkening::for_background(
+        if theme.appearance.is_light() {
+            gpui::rgb(0x1e1e1e)
+        } else {
+            theme.colors().panel_background.into()
+        },
+    ))
+}
+
+/// The setting that flips dark mode from `is_on`. An explicit value replaces
+/// `follow_theme`, as the toggle is the user's choice for now.
+fn toggled_dark_mode(is_on: bool) -> settings::DarkModeContent {
+    if is_on {
+        settings::DarkModeContent::Off
+    } else {
+        settings::DarkModeContent::On
+    }
+}
+
+fn toggle_dark_mode(cx: &mut App) {
+    let dark_mode = toggled_dark_mode(is_dark_mode_on(cx));
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        settings.viewer.get_or_insert_default().dark_mode = Some(dark_mode);
+    });
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<ViewerPanel>(window, cx);
         });
+        workspace.register_action(|_, _: &ToggleDarkMode, _, cx| toggle_dark_mode(cx));
     })
     .detach();
 }
@@ -505,6 +543,7 @@ impl ViewerPanel {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dark_mode = is_dark_mode_on(cx);
         let has_content = self.history.current().is_some();
         let running_app =
             matches!(self.history.current(), Some(Content::App { .. })) && self.is_busy(cx);
@@ -549,6 +588,24 @@ impl ViewerPanel {
                 )
             })
             .child(
+                IconButton::new("dark-pages", IconName::Moon)
+                    .icon_size(IconSize::Small)
+                    .toggle_state(dark_mode)
+                    .tooltip(move |_, cx| {
+                        Tooltip::with_meta(
+                            if dark_mode {
+                                "Show Pages in Their Colors"
+                            } else {
+                                "Darken Pages"
+                            },
+                            Some(&ToggleDarkMode),
+                            "Pages opened in a browser keep their colors",
+                            cx,
+                        )
+                    })
+                    .on_click(|_, _, cx| toggle_dark_mode(cx)),
+            )
+            .child(
                 IconButton::new("reload-content", IconName::RotateCw)
                     .icon_size(IconSize::Small)
                     .disabled(!has_content)
@@ -586,6 +643,10 @@ impl ViewerPanel {
 
 impl Render for ViewerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Setting and theme changes redraw every window, so this follows them.
+        let darkening = page_darkening(cx);
+        self.web_view
+            .update(cx, |web_view, cx| web_view.set_dark_mode(darkening, cx));
         let has_content = self.history.current().is_some();
         v_flex()
             .key_context("ViewerPanel")
@@ -1003,6 +1064,52 @@ mod tests {
         reset(cx);
         harness.show_widget_with_height("/tmp/RtmpX/viewhtml3/index.html", -1, cx);
         assert!((divider(cx) - 0.1).abs() < 0.001, "{}", divider(cx));
+    }
+
+    #[test]
+    fn test_toggling_dark_mode_sets_it_explicitly() {
+        assert_eq!(toggled_dark_mode(true), settings::DarkModeContent::Off);
+        assert_eq!(toggled_dark_mode(false), settings::DarkModeContent::On);
+    }
+
+    #[gpui::test]
+    async fn test_dark_mode_reaches_the_page(cx: &mut TestAppContext) {
+        let (harness, cx) = Harness::new(cx).await;
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.show_rendered_file(PathBuf::from("/work/notes.html"), window, cx)
+        });
+        cx.run_until_parked();
+        let dark_mode_calls = |harness: &Harness| {
+            take_calls(&harness.calls)
+                .into_iter()
+                .filter(|call| call.starts_with("dark mode"))
+                .collect::<Vec<_>>()
+        };
+        assert!(dark_mode_calls(&harness).is_empty(), "off by default");
+
+        let set_dark_mode = |mode, harness: &Harness, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                cx.update_global::<SettingsStore, _>(|store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.viewer = Some(settings::ViewerSettingsContent {
+                            dark_mode: Some(mode),
+                        });
+                    });
+                });
+            });
+            harness.panel.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        };
+        set_dark_mode(settings::DarkModeContent::On, &harness, cx);
+        let expected = cx
+            .update(|_, cx| page_darkening(cx))
+            .expect("dark mode is on");
+        assert_eq!(
+            dark_mode_calls(&harness),
+            [format!("dark mode {:.3}", expected.contrast)]
+        );
+        set_dark_mode(settings::DarkModeContent::Off, &harness, cx);
+        assert_eq!(dark_mode_calls(&harness), ["dark mode off"]);
     }
 
     #[gpui::test]

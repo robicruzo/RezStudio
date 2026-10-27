@@ -1458,9 +1458,32 @@ Steps:
    - **Tests:** the pixel flip (white, black, red, gray, alpha, a light blue turning dark
      blue), the toggle's setting, and the pane decoding a plot darkened with Copy still
      giving R's PNG, then redrawing R's colors when turned off without asking R.
-3. **Dark Viewer.** Set the web view's appearance from the setting, and add the filter
-   script, which runs on each page as it loads and again when the toggle changes, with
-   no reload. The moon button goes in the Viewer toolbar.
+3. **Dark Viewer.** *(Done.)* Set the web view's appearance from the setting, and add the
+   filter script, which runs on each page as it loads and again when the toggle
+   changes, with no reload. The moon button goes in the Viewer toolbar.
+   - **Web view:** `WebView::set_dark_mode(Option<PageDarkening>)` sets the view's
+     appearance to dark while on (and back to the system's when off) and runs
+     `dark_mode.js` on the page shown and at the start of every later page, as page
+     styles are added. Set before the view exists, it's applied as the view is made.
+   - **The filter:** `invert(1) hue-rotate(180deg) contrast(c)`, with `c` chosen so
+     white becomes about as light as the panel's background (`#1e1e1e` with a light
+     theme). Photos (JPEG and WebP images, and videos) get `hue-rotate(180deg)
+     invert(1)`, which undoes the inversion, so they look right, slightly dimmed.
+   - **Checked in a WebKit probe:** the filter reaches the page's canvas, so a page
+     without a background darkens too. Inverting and turning hues back keeps hues only
+     roughly: a pure red becomes a light red, unlike the Plots pane's exact flip.
+   - **Which pages:** a page is darkened as it starts, before it draws, and checked once
+     its styles and scripts have run. It's left alone when its background is dark, or,
+     without a background, when its text is light, which is how a dark color scheme
+     shows, whether set in CSS or by `<meta name="color-scheme">` (a probe found the
+     computed `color-scheme` misses the meta tag).
+   - **Toggle:** the moon button and the `viewer_panel: toggle dark mode` action write
+     `on` or `off` to the settings file, as the Plots pane's do.
+   - **Tests:** the script's contrast and the contrast from a background; the web view
+     sending dark mode as it's made and on changes only; the Viewer passing the setting
+     to the page and turning it off. The script itself was checked in the probe on a
+     plain page, a page with its own dark background, pages following a dark color
+     scheme, a JPEG beside a PNG, and turning it off.
 4. **Tests and live checks.**
    - Unit tests for the setting, the lightness flip (white to the pane's background,
      black to its text color, a pure red staying red), and the Viewer's script and CSS.

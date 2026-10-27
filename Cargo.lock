@@ -15699,6 +15699,7 @@ name = "viewer_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fs",
  "futures 0.3.34",
  "gpui",
  "jupyter-protocol",

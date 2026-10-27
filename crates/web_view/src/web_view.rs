@@ -77,6 +77,36 @@ pub fn page_style_script(css: &str) -> Result<String> {
     ))
 }
 
+/// How a view darkens light pages to suit a dark theme.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PageDarkening {
+    /// The contrast an inverted page is drawn at, so its white becomes about
+    /// the theme's background rather than black.
+    pub contrast: f32,
+}
+
+impl PageDarkening {
+    /// Darkens pages so their white becomes about as light as `background`.
+    pub fn for_background(background: Rgba) -> Self {
+        let brightest = background.r.max(background.g).max(background.b);
+        let darkest = background.r.min(background.g).min(background.b);
+        let lightness = (brightest + darkest) / 2.;
+        Self {
+            contrast: (1. - 2. * lightness).clamp(0.5, 1.),
+        }
+    }
+}
+
+/// The script that darkens light pages with `darkening`, or stops darkening
+/// them for `None`. Pages that are already dark are left alone.
+pub fn dark_mode_script(darkening: Option<PageDarkening>) -> String {
+    let contrast = match darkening {
+        Some(darkening) => format!("{:.3}", darkening.contrast),
+        None => "null".to_string(),
+    };
+    include_str!("dark_mode.js").replace("REZSTUDIO_CONTRAST", &contrast)
+}
+
 /// The native view, behind a trait so tests don't need WebKit.
 pub trait NativeView {
     fn set_bounds(&self, bounds: Bounds<Pixels>) -> Result<()>;
@@ -86,6 +116,10 @@ pub trait NativeView {
     fn reload(&self) -> Result<()>;
     /// Restyles the page shown and every page after it.
     fn set_page_style(&self, style: &PageStyle) -> Result<()>;
+    /// Darkens the page shown and every page after it, or stops for `None`.
+    /// While darkening, pages are told the app is dark, through
+    /// `prefers-color-scheme`; otherwise they follow the system.
+    fn set_dark_mode(&self, darkening: Option<PageDarkening>) -> Result<()>;
     /// Gives keyboard input back to the window's GPUI view if the page has
     /// it. Hiding the view does this too.
     fn release_keyboard(&self) -> Result<()>;
@@ -139,6 +173,7 @@ pub struct WebView {
     covered: bool,
     snapshot: Option<Arc<RenderImage>>,
     page_style: Option<PageStyle>,
+    dark_mode: Option<PageDarkening>,
     /// The element's bounds, and where the native view was last put.
     bounds: Option<Bounds<Pixels>>,
     native_bounds: Option<Bounds<Pixels>>,
@@ -191,6 +226,7 @@ impl WebView {
             covered: false,
             snapshot: None,
             page_style: None,
+            dark_mode: None,
             bounds: None,
             native_bounds: None,
             native_visible: None,
@@ -265,6 +301,18 @@ impl WebView {
         }
         self.page_style = Some(style);
         // As when previewing themes under the theme picker.
+        self.request_snapshot();
+    }
+
+    /// Darkens every page from now on, and the one shown now, or stops.
+    pub fn set_dark_mode(&mut self, darkening: Option<PageDarkening>, _cx: &mut Context<Self>) {
+        if self.dark_mode == darkening {
+            return;
+        }
+        if let Some(native) = &self.native {
+            native.set_dark_mode(darkening).log_err();
+        }
+        self.dark_mode = darkening;
         self.request_snapshot();
     }
 
@@ -346,7 +394,12 @@ impl WebView {
                 self.file_root.clone(),
                 self.page_style.clone(),
             ) {
-                Ok(native) => self.native = Some(native),
+                Ok(native) => {
+                    if self.dark_mode.is_some() {
+                        native.set_dark_mode(self.dark_mode).log_err();
+                    }
+                    self.native = Some(native)
+                }
                 Err(error) => {
                     log::error!("couldn't make a web view: {error:#}");
                     self.unavailable = Some(format!("Couldn't show the page: {error:#}"));
@@ -618,6 +671,13 @@ impl NativeView for FakeNative {
     }
     fn set_page_style(&self, style: &PageStyle) -> Result<()> {
         self.0.borrow_mut().push(format!("style {}", style.css));
+        Ok(())
+    }
+    fn set_dark_mode(&self, darkening: Option<PageDarkening>) -> Result<()> {
+        self.0.borrow_mut().push(match darkening {
+            Some(darkening) => format!("dark mode {:.3}", darkening.contrast),
+            None => "dark mode off".into(),
+        });
         Ok(())
     }
     fn release_keyboard(&self) -> Result<()> {
@@ -912,6 +972,62 @@ mod tests {
         // The CSS reaches the page as a string, quotes and all.
         let script = page_style_script("a::before { content: \"</style>\" }").unwrap();
         assert!(script.contains(r#"style.textContent = "a::before { content: \"</style>\" }";"#));
+    }
+
+    #[gpui::test]
+    fn test_dark_mode(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let calls: Rc<RefCell<Vec<String>>> = Rc::default();
+        let factory = fake_factory(calls.clone());
+        let darkening = PageDarkening { contrast: 0.76 };
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let view = cx.new(|cx| {
+                let mut view = WebView::with_factory(Some(factory), cx);
+                view.set_dark_mode(Some(darkening), cx);
+                view
+            });
+            Host { view }
+        });
+        cx.run_until_parked();
+        // Dark mode set before the view exists reaches it as it's made.
+        let made = take_calls(&calls);
+        assert_eq!(made.first().map(String::as_str), Some("create"));
+        assert!(
+            made.iter().any(|call| call == "dark mode 0.760"),
+            "{made:?}"
+        );
+
+        let view = host.read_with(cx, |host, _| host.view.clone());
+        view.update(cx, |view, cx| {
+            view.set_dark_mode(Some(darkening), cx);
+            view.set_dark_mode(None, cx);
+        });
+        let calls_made = take_calls(&calls);
+        assert_eq!(
+            calls_made
+                .iter()
+                .filter(|call| call.starts_with("dark mode"))
+                .collect::<Vec<_>>(),
+            ["dark mode off"],
+            "an unchanged setting isn't sent again"
+        );
+    }
+
+    #[test]
+    fn test_dark_mode_script() {
+        let on = dark_mode_script(Some(PageDarkening { contrast: 0.76 }));
+        assert!(on.contains("const contrast = 0.760;"));
+        assert!(!on.contains("REZSTUDIO_CONTRAST"));
+        assert!(dark_mode_script(None).contains("const contrast = null;"));
+
+        // White becomes about as light as the background.
+        let darkening = PageDarkening::for_background(gpui::rgb(0x1e1e1e));
+        assert!((darkening.contrast - (1. - 2. * 30. / 255.)).abs() < 0.001);
+        // A light background can't darken pages, so they're dimmed at most.
+        assert_eq!(
+            PageDarkening::for_background(gpui::rgb(0xffffff)).contrast,
+            0.5
+        );
     }
 
     #[gpui::test]
