@@ -2,6 +2,8 @@
 //! for Positron, and exposes the session to the panes that use it.
 
 mod ark;
+#[cfg(any(test, feature = "test-support"))]
+pub use ark::test_support;
 pub mod comms;
 mod lsp;
 mod session;

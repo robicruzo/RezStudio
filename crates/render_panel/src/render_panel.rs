@@ -14,8 +14,8 @@ use futures::StreamExt as _;
 use futures::channel::mpsc;
 use gpui::{
     Action, App, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Global, Pixels, ScrollStrategy, Subscription, Task, UniformListScrollHandle, WeakEntity,
-    Window, actions, px, uniform_list,
+    Global, ListHorizontalSizingBehavior, Pixels, ScrollStrategy, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, actions, px, uniform_list,
 };
 use runtime::SessionRegistry;
 use smol::io::{AsyncBufReadExt as _, BufReader};
@@ -629,11 +629,18 @@ impl gpui::Render for RenderPanel {
                         range
                             .filter_map(|index| {
                                 let line = this.lines.get(index)?.clone();
+                                // Rows are all one line high, so a long line
+                                // scrolls sideways rather than wrapping over the
+                                // rows below it.
                                 Some(
                                     div()
                                         .px_2()
+                                        .whitespace_nowrap()
                                         .child(
-                                            Label::new(line).size(LabelSize::Small).buffer_font(cx),
+                                            Label::new(line)
+                                                .size(LabelSize::Small)
+                                                .buffer_font(cx)
+                                                .single_line(),
                                         )
                                         .into_any_element(),
                                 )
@@ -642,9 +649,19 @@ impl gpui::Render for RenderPanel {
                     }),
                 )
                 .track_scroll(&self.scroll_handle)
+                .with_width_from_item(widest_line(&self.lines))
+                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
                 .flex_1(),
             )
     }
+}
+
+fn widest_line(lines: &[SharedString]) -> Option<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, line)| line.chars().count())
+        .map(|(index, _)| index)
 }
 
 impl Focusable for RenderPanel {
@@ -790,7 +807,17 @@ mod tests {
         cx: &mut VisualTestContext,
         condition: impl Fn(&RenderPanel) -> bool,
     ) {
-        for _ in 0..1000 {
+        wait_for_within(Duration::from_secs(10), panel, cx, condition)
+    }
+
+    fn wait_for_within(
+        timeout: Duration,
+        panel: &Entity<RenderPanel>,
+        cx: &mut VisualTestContext,
+        condition: impl Fn(&RenderPanel) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
             cx.run_until_parked();
             if panel.read_with(cx, |panel, _| condition(panel)) {
                 return;
@@ -800,6 +827,14 @@ mod tests {
         let (status, lines) =
             panel.read_with(cx, |panel, _| (panel.status.clone(), panel.lines.clone()));
         panic!("timed out with status {status:?} and output {lines:?}");
+    }
+
+    #[test]
+    fn test_widest_line() {
+        assert_eq!(widest_line(&[]), None);
+        let lines: Vec<SharedString> =
+            vec!["short".into(), "the longest line".into(), "mid".into()];
+        assert_eq!(widest_line(&lines), Some(1));
     }
 
     fn has_line(panel: &RenderPanel, text: &str) -> bool {
@@ -929,5 +964,85 @@ mod tests {
         assert!(!cx.update(|_, cx| is_render_on_save(&notes, cx)));
         cx.update(|window, cx| toggle_render_on_save(&report, window, cx));
         assert!(!cx.update(|_, cx| is_render_on_save(&report, cx)));
+    }
+
+    /// A page's body, fetched over plain HTTP from a server on this machine.
+    fn http_get(url: &str) -> String {
+        use std::io::{Read as _, Write as _};
+
+        let rest = url.strip_prefix("http://").unwrap();
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let mut stream = std::net::TcpStream::connect(authority).unwrap();
+        stream
+            .write_all(format!("GET /{path} HTTP/1.0\r\nHost: {authority}\r\n\r\n").as_bytes())
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    /// Renders a Quarto and an R Markdown document with the real tools,
+    /// through the commands Render builds. Needs R with rmarkdown, and
+    /// Quarto: `cargo test -p render_panel -- --ignored`.
+    #[gpui::test]
+    #[ignore = "needs R, rmarkdown and Quarto"]
+    #[allow(clippy::disallowed_methods)]
+    async fn test_real_render(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (harness, cx) = new_panel(cx).await;
+        let panel = harness.panel.clone();
+        let folder = tempfile::tempdir().unwrap();
+        let r_home = std::process::Command::new("R")
+            .arg("RHOME")
+            .output()
+            .expect("R must be on PATH");
+        let r_home = PathBuf::from(String::from_utf8(r_home.stdout).unwrap().trim());
+        let env: HashMap<String, String> = std::env::vars().collect();
+        let chunk = "```{r}\ncat('The answer is', 40 + 2)\n```\n";
+
+        let report = folder.path().join("report.qmd");
+        std::fs::write(&report, format!("---\ntitle: Report\n---\n\n{chunk}")).unwrap();
+        let command =
+            render_command(&report, &env, Some(&r_home), util::paths::home_dir()).unwrap();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.start(report.clone(), window, cx);
+            panel.run(report.clone(), command, window, cx);
+        });
+        wait_for_within(Duration::from_secs(120), &panel, cx, |panel| {
+            matches!(panel.status, Status::Serving(_) | Status::Failed(_))
+        });
+        let Status::Serving(url) = panel.read_with(cx, |panel, _| panel.status.clone()) else {
+            panic!("{:?}", panel.read_with(cx, |panel, _| panel.lines.clone()));
+        };
+        assert_eq!(loads(&harness), [format!("load {url}")]);
+        let page = http_get(&url);
+        assert!(page.contains("The answer is 42"), "{page:.2000}");
+        panel.update(cx, |panel, cx| panel.stop(cx));
+        wait_for(&panel, cx, |panel| panel.status == Status::Stopped);
+
+        let notes = folder.path().join("notes.Rmd");
+        std::fs::write(
+            &notes,
+            format!("---\ntitle: Notes\noutput: html_document\n---\n\n{chunk}"),
+        )
+        .unwrap();
+        let command = render_command(&notes, &env, Some(&r_home), util::paths::home_dir()).unwrap();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.start(notes.clone(), window, cx);
+            panel.run(notes.clone(), command, window, cx);
+        });
+        wait_for_within(Duration::from_secs(120), &panel, cx, |panel| {
+            matches!(panel.status, Status::Rendered | Status::Failed(_))
+        });
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.status, Status::Rendered, "{:?}", panel.lines);
+        });
+        let html = folder.path().join("notes.html");
+        assert_eq!(
+            loads(&harness),
+            [format!("load {}", web_view::file_url(&html))]
+        );
+        let page = std::fs::read_to_string(&html).unwrap();
+        assert!(page.contains("The answer is 42"), "{page:.2000}");
     }
 }

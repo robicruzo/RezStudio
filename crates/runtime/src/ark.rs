@@ -424,24 +424,28 @@ mod supervisor_tests {
     }
 }
 
-/// Drives a real Ark with a real R through the requests RezStudio relies on.
-/// Needs R (`R` on PATH) and Ark (`REZSTUDIO_ARK`, `ark` on PATH, or Positron's
-/// copy in debug builds): `cargo test -p runtime -- --ignored`.
-#[cfg(test)]
+/// A plain Jupyter client for a real Ark, for tests that run R code the way
+/// RezStudio's panes do. Needs R (`R` on PATH) and Ark (`REZSTUDIO_ARK`, `ark`
+/// on PATH, or Positron's copy in debug builds).
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::disallowed_methods)]
-mod integration_tests {
+pub mod test_support {
     use super::*;
-    use crate::comms::{LspCommMessage, UiFrontendEvent, parse_method};
     use async_dispatcher::{Dispatcher, Runnable};
     use futures::FutureExt as _;
     use jupyter_protocol::{
-        CommId, CommOpen, ExecuteRequest, InputReply, InterruptRequest, IsCompleteReplyStatus,
-        IsCompleteRequest, JupyterMessage, JupyterMessageContent, KernelInfoRequest, ReplyStatus,
-        ShutdownRequest,
+        CommId, CommOpen, ExecuteRequest, JupyterMessage, JupyterMessageContent, KernelInfoRequest,
+        ReplyStatus, ShutdownRequest,
     };
     use std::time::{Duration, Instant};
 
-    struct SmolDispatcher;
+    /// Runs a test's async body with the dispatcher Ark's connections need.
+    pub fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        async_dispatcher::set_dispatcher(SmolDispatcher);
+        smol::block_on(future)
+    }
+
+    pub struct SmolDispatcher;
 
     impl Dispatcher for SmolDispatcher {
         fn dispatch(&self, runnable: Runnable) {
@@ -460,13 +464,13 @@ mod integration_tests {
         }
     }
 
-    struct Kernel {
-        _process: ArkProcess,
-        connections: ArkConnections,
+    pub struct Kernel {
+        pub process: ArkProcess,
+        pub connections: ArkConnections,
     }
 
     impl Kernel {
-        async fn send_shell(
+        pub async fn send_shell(
             &mut self,
             content: impl Into<JupyterMessageContent>,
         ) -> JupyterMessage {
@@ -477,7 +481,7 @@ mod integration_tests {
 
         /// Reads every channel until `done` returns true for a message, and
         /// returns everything read along the way.
-        async fn read_until(
+        pub async fn read_until(
             &mut self,
             mut done: impl FnMut(&str, &JupyterMessage) -> bool,
         ) -> Vec<(&'static str, JupyterMessage)> {
@@ -506,7 +510,7 @@ mod integration_tests {
         }
 
         /// Sends a comm RPC and waits for Ark's reply, returning its result.
-        async fn comm_rpc(
+        pub async fn comm_rpc(
             &mut self,
             comm_id: &CommId,
             method: &str,
@@ -518,7 +522,7 @@ mod integration_tests {
         }
 
         /// Like [`Self::comm_rpc`], returning Ark's error rather than panicking.
-        async fn try_comm_rpc(
+        pub async fn try_comm_rpc(
             &mut self,
             comm_id: &CommId,
             method: &str,
@@ -547,7 +551,7 @@ mod integration_tests {
             crate::comms::rpc_reply_result(reply)
         }
 
-        async fn execute(
+        pub async fn execute(
             &mut self,
             code: &str,
         ) -> (JupyterMessage, Vec<(&'static str, JupyterMessage)>) {
@@ -564,7 +568,7 @@ mod integration_tests {
 
         /// Outputs travel on iopub and the reply on shell, so neither alone
         /// means an execution is over: wait for both the reply and iopub idle.
-        async fn read_until_finished(
+        pub async fn read_until_finished(
             &mut self,
             request: &JupyterMessage,
         ) -> Vec<(&'static str, JupyterMessage)> {
@@ -579,14 +583,14 @@ mod integration_tests {
         }
     }
 
-    fn is_reply_to(message: &JupyterMessage, request: &JupyterMessage, msg_type: &str) -> bool {
+    pub fn is_reply_to(message: &JupyterMessage, request: &JupyterMessage, msg_type: &str) -> bool {
         message.header.msg_type == msg_type
             && message.parent_header.as_ref().map(|header| &header.msg_id)
                 == Some(&request.header.msg_id)
     }
 
     /// A page's body, fetched over plain HTTP from a server on this machine.
-    fn http_get(url: &str) -> String {
+    pub fn http_get(url: &str) -> String {
         use std::io::{Read as _, Write as _};
         use std::net::TcpStream;
 
@@ -606,7 +610,7 @@ mod integration_tests {
     }
 
     /// A PNG's width and height, from its header.
-    fn png_size(bytes: &[u8]) -> (u32, u32) {
+    pub fn png_size(bytes: &[u8]) -> (u32, u32) {
         assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
         let read = |start: usize| {
             u32::from_be_bytes(bytes.get(start..start + 4).unwrap().try_into().unwrap())
@@ -614,11 +618,11 @@ mod integration_tests {
         (read(16), read(20))
     }
 
-    fn is_child_of(message: &JupyterMessage, request: &JupyterMessage) -> bool {
+    pub fn is_child_of(message: &JupyterMessage, request: &JupyterMessage) -> bool {
         message.parent_header.as_ref().map(|header| &header.msg_id) == Some(&request.header.msg_id)
     }
 
-    fn is_idle_for(message: &JupyterMessage, request: &JupyterMessage) -> bool {
+    pub fn is_idle_for(message: &JupyterMessage, request: &JupyterMessage) -> bool {
         matches!(
             &message.content,
             JupyterMessageContent::Status(status) if status.execution_state == jupyter_protocol::ExecutionState::Idle
@@ -626,7 +630,7 @@ mod integration_tests {
             == Some(&request.header.msg_id)
     }
 
-    fn summarize(messages: &[(&'static str, JupyterMessage)]) -> Vec<String> {
+    pub fn summarize(messages: &[(&'static str, JupyterMessage)]) -> Vec<String> {
         messages
             .iter()
             .map(|(channel, message)| {
@@ -639,7 +643,7 @@ mod integration_tests {
             .collect()
     }
 
-    fn stdout_text(messages: &[(&'static str, JupyterMessage)]) -> String {
+    pub fn stdout_text(messages: &[(&'static str, JupyterMessage)]) -> String {
         messages
             .iter()
             .filter_map(|(_, message)| match &message.content {
@@ -652,7 +656,7 @@ mod integration_tests {
             .collect()
     }
 
-    fn execute_reply_status(messages: &[(&'static str, JupyterMessage)]) -> ReplyStatus {
+    pub fn execute_reply_status(messages: &[(&'static str, JupyterMessage)]) -> ReplyStatus {
         messages
             .iter()
             .find_map(|(_, message)| match &message.content {
@@ -662,7 +666,7 @@ mod integration_tests {
             .expect("an execute_reply")
     }
 
-    fn r_home() -> PathBuf {
+    pub fn r_home() -> PathBuf {
         let output = std::process::Command::new("R")
             .arg("RHOME")
             .output()
@@ -670,7 +674,7 @@ mod integration_tests {
         PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
     }
 
-    fn data_object(message: &JupyterMessage) -> Option<serde_json::Value> {
+    pub fn data_object(message: &JupyterMessage) -> Option<serde_json::Value> {
         match &message.content {
             JupyterMessageContent::CommMsg(comm) => {
                 Some(serde_json::Value::Object(comm.data.clone()))
@@ -678,6 +682,119 @@ mod integration_tests {
             _ => None,
         }
     }
+
+    impl Kernel {
+        /// Starts Ark in `working_directory` and waits until it answers.
+        pub async fn start(working_directory: &Path) -> Kernel {
+            let env: HashMap<String, String> = std::env::vars().collect();
+            let ark = locate_ark(None, &env).unwrap();
+            let (process, connections) = launch_ark(ArkLaunch {
+                ark: &ark,
+                r_home: &r_home(),
+                working_directory,
+                env,
+                log_file: Some(working_directory.join("ark.log")),
+            })
+            .await
+            .unwrap();
+            let mut kernel = Kernel {
+                process,
+                connections,
+            };
+            let kernel_info = kernel.send_shell(KernelInfoRequest {}).await;
+            kernel
+                .read_until(|_, message| is_reply_to(message, &kernel_info, "kernel_info_reply"))
+                .await;
+            kernel
+        }
+
+        /// Opens the UI comm, through which code runs silently, and waits
+        /// for the prompt Ark reports once it's open.
+        pub async fn open_ui_comm(&mut self) -> CommId {
+            let comm_id = CommId(uuid::Uuid::new_v4().to_string());
+            self.send_shell(CommOpen {
+                comm_id: comm_id.clone(),
+                target_name: crate::comms::UI_COMM_TARGET.to_string(),
+                data: serde_json::from_value(serde_json::json!({ "console_width": 80 })).unwrap(),
+                target_module: None,
+            })
+            .await;
+            self.read_until(|_, message| {
+                data_object(message)
+                    .and_then(|data| {
+                        crate::comms::parse_method::<crate::comms::UiFrontendEvent>(data).ok()
+                    })
+                    .is_some_and(|event| {
+                        matches!(event, crate::comms::UiFrontendEvent::PromptState(_))
+                    })
+            })
+            .await;
+            comm_id
+        }
+
+        /// Runs `code` silently, as `RSession::evaluate_code` does, and
+        /// returns its value as JSON.
+        pub async fn evaluate(&mut self, ui_comm: &CommId, code: &str) -> serde_json::Value {
+            let reply = self
+                .comm_rpc(
+                    ui_comm,
+                    "evaluate_code",
+                    serde_json::json!({ "code": code }),
+                )
+                .await;
+            let evaluated: crate::comms::EvalResult = serde_json::from_value(reply).unwrap();
+            evaluated.result
+        }
+
+        /// Runs `code` as the console does, failing the test if R reports an
+        /// error, and returns what it printed.
+        pub async fn run(&mut self, code: &str) -> String {
+            let (_, messages) = self.execute(code).await;
+            assert_eq!(
+                execute_reply_status(&messages),
+                ReplyStatus::Ok,
+                "{code}: {:#?}",
+                summarize(&messages)
+            );
+            stdout_text(&messages)
+        }
+
+        /// Asks Ark to quit and waits for it to exit.
+        pub async fn shut_down(mut self) {
+            self.connections
+                .control
+                .send(JupyterMessage::new(
+                    ShutdownRequest { restart: false },
+                    None,
+                ))
+                .await
+                .unwrap();
+            let exited = futures::future::select(
+                Box::pin(self.process.status()),
+                smol::Timer::after(Duration::from_secs(10)),
+            )
+            .await;
+            assert!(
+                matches!(exited, futures::future::Either::Left(_)),
+                "Ark did not exit after shutdown"
+            );
+        }
+    }
+}
+
+/// Drives a real Ark with a real R through the requests RezStudio relies on.
+/// Needs R (`R` on PATH) and Ark (`REZSTUDIO_ARK`, `ark` on PATH, or Positron's
+/// copy in debug builds): `cargo test -p runtime -- --ignored`.
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)]
+mod integration_tests {
+    use super::test_support::*;
+    use crate::comms::{LspCommMessage, parse_method};
+    use jupyter_protocol::{
+        CommId, CommOpen, ExecuteRequest, InputReply, InterruptRequest, IsCompleteReplyStatus,
+        IsCompleteRequest, JupyterMessage, JupyterMessageContent, ReplyStatus,
+    };
+    use std::time::{Duration, Instant};
 
     /// Talks to Ark's language server the way a plain LSP client does and
     /// returns the completion labels offered at `line`/`character` in `text`.
@@ -769,48 +886,10 @@ mod integration_tests {
     #[test]
     #[ignore = "needs R and Ark"]
     fn test_real_ark_session() {
-        async_dispatcher::set_dispatcher(SmolDispatcher);
-        smol::block_on(async {
-            let env: HashMap<String, String> = std::env::vars().collect();
-            let ark = locate_ark(None, &env).unwrap();
+        block_on(async {
             let working_directory = tempfile::tempdir().unwrap();
-            let (process, connections) = launch_ark(ArkLaunch {
-                ark: &ark,
-                r_home: &r_home(),
-                working_directory: working_directory.path(),
-                env,
-                log_file: Some(working_directory.path().join("ark.log")),
-            })
-            .await
-            .unwrap();
-            let mut kernel = Kernel {
-                _process: process,
-                connections,
-            };
-
-            let kernel_info = kernel.send_shell(KernelInfoRequest {}).await;
-            kernel
-                .read_until(|_, message| is_reply_to(message, &kernel_info, "kernel_info_reply"))
-                .await;
-
-            // Opening the UI comm makes Ark report its prompt.
-            let ui_comm = CommId(uuid::Uuid::new_v4().to_string());
-            kernel
-                .send_shell(CommOpen {
-                    comm_id: ui_comm.clone(),
-                    target_name: crate::comms::UI_COMM_TARGET.to_string(),
-                    data: serde_json::from_value(serde_json::json!({ "console_width": 80 }))
-                        .unwrap(),
-                    target_module: None,
-                })
-                .await;
-            kernel
-                .read_until(|_, message| {
-                    data_object(message)
-                        .and_then(|data| parse_method::<UiFrontendEvent>(data).ok())
-                        .is_some_and(|event| matches!(event, UiFrontendEvent::PromptState(_)))
-                })
-                .await;
+            let mut kernel = Kernel::start(working_directory.path()).await;
+            let ui_comm = kernel.open_ui_comm().await;
 
             let lsp_comm = CommId(uuid::Uuid::new_v4().to_string());
             kernel
@@ -1539,17 +1618,10 @@ mod integration_tests {
                 )
                 .await;
             assert_eq!(missing, serde_json::Value::Null);
-            let evaluated: crate::comms::EvalResult = serde_json::from_value(
-                kernel
-                    .comm_rpc(
-                        &ui_comm,
-                        "evaluate_code",
-                        serde_json::json!({ "code": "nzchar(Sys.getenv('RENV_PROJECT'))" }),
-                    )
-                    .await,
-            )
-            .unwrap();
-            assert_eq!(evaluated.result, serde_json::json!(false));
+            let evaluated = kernel
+                .evaluate(&ui_comm, "nzchar(Sys.getenv('RENV_PROJECT'))")
+                .await;
+            assert_eq!(evaluated, serde_json::json!(false));
             let unknown = kernel
                 .try_comm_rpc(
                     &ui_comm,
@@ -1564,25 +1636,7 @@ mod integration_tests {
                 "{unknown:?}"
             );
 
-            kernel
-                .connections
-                .control
-                .send(JupyterMessage::new(
-                    ShutdownRequest { restart: false },
-                    None,
-                ))
-                .await
-                .unwrap();
-            let exited = kernel._process.status();
-            let exited = futures::future::select(
-                Box::pin(exited),
-                smol::Timer::after(Duration::from_secs(10)),
-            )
-            .await;
-            assert!(
-                matches!(exited, futures::future::Either::Left(_)),
-                "Ark did not exit after shutdown"
-            );
+            kernel.shut_down().await;
         });
     }
 }

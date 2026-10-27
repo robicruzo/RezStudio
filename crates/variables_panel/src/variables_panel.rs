@@ -374,9 +374,7 @@ impl EnvironmentPanel {
         cx.spawn_in(window, async move |this, cx| {
             let path = path.await;
             this.update_in(cx, |this, window, cx| match path {
-                Ok(Ok(Some(path))) => {
-                    this.run_in_console(format!("save.image({})", r_path(&path)), window, cx)
-                }
+                Ok(Ok(Some(path))) => this.run_in_console(save_workspace_code(&path), window, cx),
                 Ok(Ok(None)) | Err(_) => {}
                 Ok(Err(error)) => {
                     this.error = Some(format!("{error:#}"));
@@ -403,7 +401,7 @@ impl EnvironmentPanel {
             this.update_in(cx, |this, window, cx| match paths {
                 Ok(Ok(Some(paths))) => {
                     if let Some(path) = paths.first() {
-                        this.run_in_console(format!("load({})", r_path(path)), window, cx)
+                        this.run_in_console(load_workspace_code(path), window, cx)
                     }
                 }
                 Ok(Ok(None)) | Err(_) => {}
@@ -932,6 +930,14 @@ fn display_path(path: &Path) -> String {
 /// `path` as an R string, with the home folder written `~`.
 fn r_path(path: &Path) -> String {
     runtime::r_string(&display_path(path))
+}
+
+fn save_workspace_code(path: &Path) -> String {
+    format!("save.image({})", r_path(path))
+}
+
+fn load_workspace_code(path: &Path) -> String {
+    format!("load({})", r_path(path))
 }
 
 struct PackageEnvironment {
@@ -1847,5 +1853,238 @@ mod tests {
                 .read_with(cx, |panel, cx| panel.placeholder(cx)),
             Some("Variables you create in R appear here.")
         );
+    }
+}
+
+/// Runs the pane's R code in a real R through Ark, checking that R's replies
+/// parse as the pane expects. Needs R with forcats, readr, readxl and haven,
+/// and Ark: `cargo test -p variables_panel -- --ignored`.
+#[cfg(test)]
+mod real_r_tests {
+    use super::*;
+    use crate::import_dataset::{Delimiter, ImportOptions, Source, parse_preview};
+    use crate::memory::MemorySampler;
+    use crate::search_path::{
+        SEARCH_PATH_CODE, attached_packages, function_source_code, listing_code,
+        parse_function_source, parse_listing,
+    };
+    use runtime::comms::VariableKind;
+    use runtime::test_support::{Kernel, block_on};
+    use serde_json::json;
+
+    fn import_options(source: Source, path: &Path, name: &str) -> ImportOptions {
+        ImportOptions {
+            source,
+            path: path.to_string_lossy().into_owned(),
+            name: name.to_string(),
+            delimiter: Delimiter::Comma,
+            first_row_as_names: true,
+            skip: 0,
+            na: String::new(),
+            sheet: None,
+            open_viewer: false,
+        }
+    }
+
+    #[test]
+    #[ignore = "needs R and Ark"]
+    fn test_real_r_environment_pane() {
+        block_on(async {
+            let folder = tempfile::tempdir().unwrap();
+            let mut kernel = Kernel::start(folder.path()).await;
+            let ui_comm = kernel.open_ui_comm().await;
+
+            // The environment menu follows the search path, and `library()`
+            // puts a package first.
+            let packages =
+                attached_packages(kernel.evaluate(&ui_comm, SEARCH_PATH_CODE).await).unwrap();
+            assert!(
+                packages.contains(&"package:stats".to_string()),
+                "{packages:?}"
+            );
+            assert_eq!(packages.last().map(String::as_str), Some("package:base"));
+            assert!(!packages.contains(&"package:forcats".to_string()));
+            kernel.run("library(forcats)").await;
+            let packages =
+                attached_packages(kernel.evaluate(&ui_comm, SEARCH_PATH_CODE).await).unwrap();
+            assert_eq!(
+                packages.first().map(String::as_str),
+                Some("package:forcats")
+            );
+
+            let stats = parse_listing(
+                kernel
+                    .evaluate(&ui_comm, &listing_code("package:stats"))
+                    .await,
+            )
+            .unwrap();
+            let lm = stats
+                .iter()
+                .find(|variable| variable.display_name == "lm")
+                .unwrap();
+            assert_eq!(lm.kind, VariableKind::Function);
+            assert!(
+                lm.display_value.starts_with("function (formula, data"),
+                "{lm:?}"
+            );
+            assert!(lm.size > 0);
+            let datasets = parse_listing(
+                kernel
+                    .evaluate(&ui_comm, &listing_code("package:datasets"))
+                    .await,
+            )
+            .unwrap();
+            let iris = datasets
+                .iter()
+                .find(|variable| variable.display_name == "iris")
+                .unwrap();
+            assert_eq!(iris.kind, VariableKind::Lazy);
+            assert_eq!(iris.display_value, "<Promise>");
+
+            // Function source, for a package's function, one defined in the
+            // session (comments kept) and a primitive.
+            let as_factor = parse_function_source(
+                kernel
+                    .evaluate(
+                        &ui_comm,
+                        &function_source_code(Some("package:forcats"), "as_factor"),
+                    )
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(
+                as_factor.title("as_factor"),
+                "as_factor (namespace:forcats)"
+            );
+            assert!(
+                as_factor.source.contains("UseMethod(\"as_factor\")"),
+                "{as_factor:?}"
+            );
+            kernel
+                .run("greet <- function(name) {\n  # Says hello\n  paste('Hello', name)\n}")
+                .await;
+            let greet = parse_function_source(
+                kernel
+                    .evaluate(&ui_comm, &function_source_code(None, "greet"))
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(greet.title("greet"), "greet");
+            assert!(greet.source.contains("# Says hello"), "{greet:?}");
+            let sum = parse_function_source(
+                kernel
+                    .evaluate(&ui_comm, &function_source_code(Some("package:base"), "sum"))
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(sum.title("sum"), "sum");
+            assert!(sum.source.contains(".Primitive(\"sum\")"), "{sum:?}");
+
+            let memory = MemorySampler::new().sample(kernel.process.id());
+            assert!(memory.session > 20 * 1024 * 1024, "{memory:?}");
+            assert!(memory.system_used > memory.session, "{memory:?}");
+            assert!(memory.system_total > memory.system_used, "{memory:?}");
+
+            // Import Dataset: the preview reads each kind of file, and the
+            // import code brings it into the global environment.
+            let csv = folder.path().join("scores.csv");
+            let semicolons = folder.path().join("scores-semicolons.csv");
+            let stata = folder.path().join("people.dta");
+            kernel
+                .run(&format!(
+                    "scores <- data.frame(name = c('a', 'b', 'c'), score = c(1.5, 2, NA))
+write.csv(scores, {csv}, row.names = FALSE)
+write.table(scores, {semicolons}, sep = ';', row.names = FALSE, quote = FALSE)
+haven::write_dta(data.frame(age = c(30, 40), group = c('x', 'y')), {stata})
+rm(scores)",
+                    csv = r_path(&csv),
+                    semicolons = r_path(&semicolons),
+                    stata = r_path(&stata),
+                ))
+                .await;
+            let excel: std::path::PathBuf = serde_json::from_value(
+                kernel
+                    .evaluate(&ui_comm, "readxl::readxl_example('datasets.xlsx')")
+                    .await,
+            )
+            .unwrap();
+
+            let mut semicolon_options = import_options(Source::Text, &semicolons, "semicolons");
+            semicolon_options.delimiter = Delimiter::Semicolon;
+            let mut excel_options = import_options(Source::Excel, &excel, "quakes");
+            excel_options.sheet = Some("quakes".to_string());
+            let imports = [
+                (
+                    import_options(Source::Text, &csv, "scores"),
+                    vec!["name", "score"],
+                    3,
+                ),
+                (semicolon_options, vec!["name", "score"], 3),
+                (
+                    excel_options,
+                    vec!["lat", "long", "depth", "mag", "stations"],
+                    1000,
+                ),
+                (
+                    import_options(Source::Stata, &stata, "people"),
+                    vec!["age", "group"],
+                    2,
+                ),
+            ];
+            for (options, columns, rows) in imports {
+                let preview =
+                    parse_preview(kernel.evaluate(&ui_comm, &options.preview_code()).await)
+                        .unwrap();
+                let names: Vec<&str> = preview
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect();
+                assert_eq!(names, columns, "{options:?}");
+                assert_eq!(preview.rows, rows.min(50), "{options:?}");
+                kernel.run(&options.import_code()).await;
+                let imported = kernel
+                    .evaluate(&ui_comm, &format!("nrow({})", options.name))
+                    .await;
+                assert_eq!(imported, json!(rows), "{options:?}");
+            }
+            let excel_preview = parse_preview(
+                kernel
+                    .evaluate(
+                        &ui_comm,
+                        &import_options(Source::Excel, &excel, "mtcars").preview_code(),
+                    )
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(excel_preview.sheets, ["mtcars", "chickwts", "quakes"]);
+            let scores = parse_preview(
+                kernel
+                    .evaluate(
+                        &ui_comm,
+                        &import_options(Source::Text, &csv, "scores").preview_code(),
+                    )
+                    .await,
+            )
+            .unwrap();
+            assert_eq!(scores.columns[1].type_name, "numeric");
+            assert_eq!(scores.columns[1].cells, ["1.5", "2.0", "NA"]);
+
+            // Saving and loading the workspace.
+            let workspace = folder.path().join("saved.RData");
+            kernel.run(&save_workspace_code(&workspace)).await;
+            kernel.run("rm(list = ls())").await;
+            assert_eq!(
+                kernel.evaluate(&ui_comm, "exists('greet')").await,
+                json!(false)
+            );
+            kernel.run(&load_workspace_code(&workspace)).await;
+            assert_eq!(
+                kernel.evaluate(&ui_comm, "sort(ls())").await,
+                json!(["greet", "people", "quakes", "scores", "semicolons"])
+            );
+
+            kernel.shut_down().await;
+        });
     }
 }

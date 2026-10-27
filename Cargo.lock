@@ -15672,6 +15672,7 @@ dependencies = [
  "serde_json",
  "settings",
  "sysinfo 0.39.6",
+ "tempfile",
  "theme",
  "theme_settings",
  "ui",

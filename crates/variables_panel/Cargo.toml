@@ -38,6 +38,7 @@ languages.workspace = true
 project = { workspace = true, features = ["test-support"] }
 runtime = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
 theme = { workspace = true, features = ["test-support"] }
 theme_settings.workspace = true
 workspace = { workspace = true, features = ["test-support"] }

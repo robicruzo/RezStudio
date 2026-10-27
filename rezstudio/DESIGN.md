@@ -141,7 +141,7 @@ packages and addins that call `rstudioapi` keep working.
 | M5 | Rmd/Quarto inline chunks *(done)* | Chunk execution with inline output. |
 | M6 | Help + Viewer *(done)* | WKWebView embedded; help, htmlwidgets, Shiny. |
 | M7 | RStudio layout *(done)* | Two stacked, tabbed panes in the right dock, with tabs dragged between them; Console, Terminal and Debug as tabs; an outline sidebar from an editor button. |
-| M8 | Documents and Environment | Render button for Quarto and R Markdown with output in the Viewer; Environment pane with RStudio's environment menu, grouping, memory use, workspace save/load and Import Dataset. |
+| M8 | Documents and Environment *(done)* | Render button for Quarto and R Markdown with output in the Viewer; Environment pane with RStudio's environment menu, grouping, memory use, workspace save/load and Import Dataset. |
 | M9 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
 | M10 | Typst native preview | Live preview with source ↔ preview jumping. |
 | M11 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
@@ -1157,7 +1157,7 @@ Done when:
   of an R Markdown file's headings and chunks, and clicking an entry jumps to it.
 - Help pages and htmlwidgets work in a half-height pane, under menus and the palette.
 
-### M8 plan
+### M8 plan (done)
 
 Decisions:
 - **Order:** this comes before Python parity, which moves to M9. Neither feature needs
@@ -1329,8 +1329,33 @@ Steps:
    - **Checked by hand:** `quarto preview` and `rmarkdown::render` on small documents,
      with Quarto 1.9.36, including a Word document.
    - **Not checked live:** the machine was in use.
-6. **Tests and live checks.** Unit tests for each step, a real-R test for package
+6. **Tests and live checks.** *(Done.)* Unit tests for each step, a real-R test for package
    listings and imports, and live checks of rendering a Quarto and an R Markdown document.
+   - **Shared Ark client:** the runtime crate's real-Ark test client is now
+     `runtime::test_support` (behind `test-support`), with `Kernel::start`,
+     `open_ui_comm`, `evaluate` (as `evaluate_code`), `run` and `shut_down`, so other
+     crates' real-R tests drive Ark the same way.
+   - **Real-R test for the Environment pane** (`cargo test -p variables_panel --
+     --ignored`): the search path before and after `library(forcats)`, `package:stats`
+     and `package:datasets` listings (a function, and a lazy dataset as `<Promise>`),
+     function source for a package function, a session function (comments kept) and a
+     primitive, the session's memory, previews and imports of a CSV, a semicolon file, an
+     Excel sheet and a Stata file, and a workspace saved, cleared and loaded back.
+   - **Real render test** (`cargo test -p render_panel -- --ignored`): the commands
+     Render builds, run with real Quarto and `rmarkdown::render`. The Quarto preview
+     serves a page with the chunk's output, and the R Markdown HTML holds it too.
+   - **Checked live:** the environment menu on `package:forcats` (Values and Functions
+     groups, a lazy dataset as `<Promise>`), function source tabs with R highlighting, the
+     Global Environment's Data, Values and Functions groups with `3 obs. of 2 variables`,
+     the memory indicator, the Import Dataset dialog's typed preview and code, and Render
+     on a `.qmd` (Quarto preview in the Viewer, output in the Render tab) and an `.Rmd`
+     (the HTML in the Viewer as its second entry).
+   - **Found live and fixed:** the Render tab's rows are one line high, so a long line
+     such as pandoc's command wrapped over the lines below it. Lines now stay on one row
+     and the list scrolls sideways. The fix has a unit test but wasn't seen live, since
+     the machine was in use.
+   - **Not checked live:** sorting, workspace save and load, Render on Save, and
+     clicking Import (the real-R test covers the import code).
 
 Done when:
 - The Environment menu switches between Global Environment and attached packages, and
