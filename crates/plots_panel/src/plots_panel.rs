@@ -7,7 +7,9 @@ mod save_dialog;
 mod zoom_window;
 
 use anyhow::{Context as _, Result};
-use fitting::{PlotImage, Viewport, ViewportChange, decode_plot, describe_render_error};
+use fitting::{
+    Darkening, PlotImage, Viewport, ViewportChange, decode_plot, describe_render_error, redraw_plot,
+};
 use gpui::{
     Action, App, AsyncWindowContext, ClipboardItem, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, Pixels, PromptLevel, Size, Subscription, Task, WeakEntity, Window, actions, px,
@@ -18,6 +20,7 @@ use runtime::comms::{
 };
 use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry};
 use std::path::PathBuf;
+use std::sync::Arc;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::Workspace;
@@ -44,16 +47,62 @@ actions!(
         ZoomPlot,
         /// Closes a plot's zoom window.
         CloseZoomWindow,
+        /// Turns darkening plots to suit a dark theme on or off. Copied and saved
+        /// plots keep R's colors.
+        ToggleDarkMode,
     ]
 );
 
 const PANEL_KEY: &str = "PlotsPanel";
+
+#[derive(Clone, Copy, Debug, PartialEq, settings::RegisterSetting)]
+pub struct PlotsSettings {
+    pub dark_mode: settings::DarkModeContent,
+}
+
+impl settings::Settings for PlotsSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            dark_mode: content
+                .plots
+                .as_ref()
+                .and_then(|plots| plots.dark_mode)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Whether the Plots pane darkens plots now, from its setting and the theme.
+pub fn is_dark_mode_on(cx: &App) -> bool {
+    use settings::Settings as _;
+    PlotsSettings::get_global(cx)
+        .dark_mode
+        .is_on(!cx.theme().appearance.is_light())
+}
+
+/// The setting that flips dark mode from `is_on`. An explicit value replaces
+/// `follow_theme`, as the toggle is the user's choice for now.
+fn toggled_dark_mode(is_on: bool) -> settings::DarkModeContent {
+    if is_on {
+        settings::DarkModeContent::Off
+    } else {
+        settings::DarkModeContent::On
+    }
+}
+
+fn toggle_dark_mode(cx: &mut App) {
+    let dark_mode = toggled_dark_mode(is_dark_mode_on(cx));
+    settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
+        settings.plots.get_or_insert_default().dark_mode = Some(dark_mode);
+    });
+}
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<PlotsPanel>(window, cx);
         });
+        workspace.register_action(|_, _: &ToggleDarkMode, _, cx| toggle_dark_mode(cx));
     })
     .detach();
 }
@@ -81,6 +130,10 @@ pub struct PlotsPanel {
     render_sequence: u64,
     /// The render of the shown plot being drawn or decoded, so it isn't asked for twice.
     pending_render: Option<(String, PlotRenderSettings)>,
+    /// Redrawing the shown plot's image for dark mode: the plot, the
+    /// darkening asked for, and the work. Kept after a failure so it isn't
+    /// tried again on every frame.
+    darkening_task: Option<(String, Option<Darkening>, Task<()>)>,
     _render_task: Option<Task<()>>,
     _resize_task: Option<Task<()>>,
     _session_subscription: Option<Subscription>,
@@ -124,6 +177,7 @@ impl PlotsPanel {
             error: None,
             render_sequence: 0,
             pending_render: None,
+            darkening_task: None,
             _render_task: None,
             _resize_task: None,
             _session_subscription: None,
@@ -320,7 +374,7 @@ impl PlotsPanel {
         {
             self.pending_render = Some((comm_id.clone(), settings));
         }
-        let decode = decode_plot(result, cx);
+        let decode = decode_plot(result, self.darkening(cx), cx);
         cx.spawn(async move |this, cx| {
             let decoded = decode.await;
             this.update(cx, |this, cx| {
@@ -354,6 +408,60 @@ impl PlotsPanel {
         {
             self.pending_render = None;
         }
+    }
+
+    fn darkening(&self, cx: &App) -> Option<Darkening> {
+        Darkening::current(cx.theme().colors().panel_background, cx)
+    }
+
+    /// Redraws the shown plot's image from its PNG when dark mode or the
+    /// theme changed since it was decoded. Runs as the pane renders, since
+    /// setting and theme changes redraw every window.
+    fn ensure_darkening(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.darkening(cx);
+        let Some(plot) = self.history.current() else {
+            return;
+        };
+        let Some(image) = &plot.image else {
+            return;
+        };
+        if image.darkening == wanted
+            || self
+                .darkening_task
+                .as_ref()
+                .is_some_and(|(comm_id, darkening, _)| {
+                    *comm_id == plot.comm_id && *darkening == wanted
+                })
+        {
+            return;
+        }
+        let comm_id = plot.comm_id.clone();
+        let png = image.png.clone();
+        let redraw = redraw_plot(png.clone(), wanted, cx);
+        let task = cx.spawn({
+            let comm_id = comm_id.clone();
+            async move |this, cx| {
+                let redrawn = redraw.await;
+                this.update(cx, |this, cx| {
+                    match redrawn {
+                        Ok(redrawn) => {
+                            this.darkening_task = None;
+                            // A newer render may have replaced the image meanwhile.
+                            if let Some(image) = this.history.image_mut(&comm_id)
+                                && Arc::ptr_eq(&image.png, &png)
+                            {
+                                let replaced = std::mem::replace(image, redrawn);
+                                cx.drop_image(replaced.render, None);
+                            }
+                        }
+                        Err(error) => this.error = Some(describe_render_error(&error)),
+                    }
+                    cx.notify();
+                })
+                .log_err();
+            }
+        });
+        self.darkening_task = Some((comm_id, wanted, task));
     }
 
     fn go(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -519,6 +627,7 @@ impl PlotsPanel {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dark_mode = is_dark_mode_on(cx);
         let is_empty = self.history.is_empty();
         let not_live = self.history.current().is_some_and(|plot| !plot.live);
         let has_image = self
@@ -565,6 +674,24 @@ impl PlotsPanel {
                 )
             })
             .child(div().flex_1())
+            .child(
+                IconButton::new("dark-plots", IconName::Moon)
+                    .icon_size(IconSize::Small)
+                    .toggle_state(dark_mode)
+                    .tooltip(move |_, cx| {
+                        Tooltip::with_meta(
+                            if dark_mode {
+                                "Show Plots in R's Colors"
+                            } else {
+                                "Darken Plots"
+                            },
+                            Some(&ToggleDarkMode),
+                            "Copied and saved plots keep R's colors",
+                            cx,
+                        )
+                    })
+                    .on_click(|_, _, cx| toggle_dark_mode(cx)),
+            )
             .child(
                 IconButton::new("zoom-plot", IconName::Maximize)
                     .icon_size(IconSize::Small)
@@ -644,6 +771,7 @@ async fn write_plot(path: PathBuf, result: PlotResult, cx: &mut gpui::AsyncApp) 
 
 impl Render for PlotsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_darkening(cx);
         let entity = cx.entity();
         let image = self
             .history
@@ -756,6 +884,35 @@ mod tests {
     use settings::SettingsStore;
     use std::path::PathBuf;
     use workspace::MultiWorkspace;
+
+    #[gpui::test]
+    fn test_dark_mode_setting(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let set = |mode: settings::DarkModeContent, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                cx.update_global::<SettingsStore, _>(|store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.plots = Some(settings::PlotsSettingsContent {
+                            dark_mode: Some(mode),
+                        });
+                    });
+                });
+                is_dark_mode_on(cx)
+            })
+        };
+        assert!(!cx.update(|cx| is_dark_mode_on(cx)), "off by default");
+        assert!(set(settings::DarkModeContent::On, cx));
+        assert!(!set(settings::DarkModeContent::Off, cx));
+        let theme_is_dark = cx.update(|cx| !cx.theme().appearance.is_light());
+        assert_eq!(
+            set(settings::DarkModeContent::FollowTheme, cx),
+            theme_is_dark
+        );
+    }
 
     /// A 1×1 PNG, base64-encoded without padding as Ark sends it.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg";
@@ -1230,6 +1387,76 @@ mod tests {
         harness.resize(150., cx);
         harness.settle(cx);
         assert!(harness.requests().is_empty());
+    }
+
+    #[test]
+    fn test_toggling_dark_mode_sets_it_explicitly() {
+        assert_eq!(toggled_dark_mode(true), settings::DarkModeContent::Off);
+        assert_eq!(toggled_dark_mode(false), settings::DarkModeContent::On);
+    }
+
+    #[gpui::test]
+    async fn test_dark_mode_darkens_only_whats_shown(cx: &mut TestAppContext) {
+        let (mut harness, cx) = Harness::new(cx).await;
+        let set_dark_mode = |mode, harness: &Harness, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                cx.update_global::<SettingsStore, _>(|store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.plots = Some(settings::PlotsSettingsContent {
+                            dark_mode: Some(mode),
+                        });
+                    });
+                });
+            });
+            harness
+                .panel
+                .update(cx, |panel, cx| panel.ensure_darkening(cx));
+            cx.run_until_parked();
+        };
+        let shown = |harness: &Harness, cx: &mut VisualTestContext| {
+            harness.panel.read_with(cx, |panel, _| {
+                panel
+                    .history
+                    .current()
+                    .and_then(|plot| plot.image.clone())
+                    .expect("an image")
+            })
+        };
+
+        // A plot drawn while dark mode is on is decoded darkened.
+        set_dark_mode(settings::DarkModeContent::On, &harness, cx);
+        harness.open_plot("plot-1", ark_default(), cx);
+        harness.answer_render("plot-1", cx);
+        let image = shown(&harness, cx);
+        let expected_darkening = harness
+            .panel
+            .read_with(cx, |panel, cx| panel.darkening(cx))
+            .expect("dark mode is on");
+        assert_eq!(image.darkening, Some(expected_darkening));
+        let svg_renderer = cx.update(|_, cx| cx.svg_renderer());
+        let original = image.png.to_image_data(svg_renderer).unwrap();
+        let original = original.as_bytes(0).unwrap().to_vec();
+        let mut darkened = original.clone();
+        expected_darkening.darken_pixels(&mut darkened);
+        assert_eq!(image.render.as_bytes(0).unwrap(), darkened.as_slice());
+
+        // Copy still gives R's PNG.
+        harness.panel.update_in(cx, |panel, window, cx| {
+            panel.copy_plot(&CopyPlot, window, cx)
+        });
+        let copied = cx.read_from_clipboard().expect("something copied");
+        let Some(gpui::ClipboardEntry::Image(copied)) = copied.entries().first() else {
+            panic!("expected an image, got {copied:?}");
+        };
+        assert_eq!(copied.bytes, image.png.bytes);
+
+        // Turning it off redraws R's colors from the kept PNG, without R.
+        harness.drain();
+        set_dark_mode(settings::DarkModeContent::Off, &harness, cx);
+        let image = shown(&harness, cx);
+        assert_eq!(image.darkening, None);
+        assert_eq!(image.render.as_bytes(0).unwrap(), original.as_slice());
+        assert!(harness.requests().is_empty(), "R isn't asked to draw");
     }
 
     #[gpui::test]

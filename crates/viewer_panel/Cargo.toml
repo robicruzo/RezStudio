@@ -14,8 +14,11 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+fs.workspace = true
 gpui.workspace = true
 runtime.workspace = true
+settings.workspace = true
+theme.workspace = true
 ui.workspace = true
 url.workspace = true
 util.workspace = true

@@ -79,6 +79,13 @@ impl<I> PlotHistory<I> {
         plot.image.replace(image)
     }
 
+    pub fn image_mut(&mut self, comm_id: &str) -> Option<&mut I> {
+        self.plots
+            .iter_mut()
+            .find(|plot| plot.comm_id == comm_id)
+            .and_then(|plot| plot.image.as_mut())
+    }
+
     /// Shows the plot; returns whether it exists.
     pub fn show(&mut self, comm_id: &str) -> bool {
         match self.plots.iter().position(|plot| plot.comm_id == comm_id) {

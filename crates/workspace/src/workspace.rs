@@ -16965,6 +16965,7 @@ mod tests {
                         pane(&["Files", "Plots"], Some("Plots")),
                     ],
                     divider: 0.4,
+                    collapsed: None,
                 },
                 window,
                 cx,
@@ -17036,6 +17037,7 @@ mod tests {
                 dock::DockLayout {
                     panes: vec![pane(&[], None), pane(&[], None)],
                     divider: 0.5,
+                    collapsed: None,
                 },
                 window,
                 cx,
@@ -17217,6 +17219,7 @@ mod tests {
                             pane(&["Files", "Plots"], None),
                         ],
                         divider: 0.5,
+                        collapsed: None,
                     },
                     window,
                     cx,
@@ -17260,6 +17263,146 @@ mod tests {
         assert_eq!(panes, ["Plots Environment Git", "Files"]);
         assert_eq!(visible, ["Plots", "Files"]);
         assert!(plots.read_with(cx, |panel, _| panel.active));
+    }
+
+    #[gpui::test]
+    async fn test_minimizing_and_maximizing_dock_panes(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        let (environment, files) = workspace.update_in(cx, |workspace, window, cx| {
+            let environment = cx.new(EnvironmentPanel::new);
+            workspace.add_panel(environment.clone(), window, cx);
+            workspace.add_panel(cx.new(GitPanel::new), window, cx);
+            let files = cx.new(FilesPanel::new);
+            workspace.add_panel(files.clone(), window, cx);
+            workspace.add_panel(cx.new(PlotsPanel::new), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.set_layout(
+                    dock::DockLayout {
+                        panes: vec![
+                            pane(&["Environment", "Git"], None),
+                            pane(&["Files", "Plots"], None),
+                        ],
+                        divider: 0.5,
+                        collapsed: None,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            (environment, files)
+        });
+        cx.run_until_parked();
+        let dock = workspace.read_with(cx, |workspace, _| workspace.right_dock().clone());
+        let visible = |cx: &mut VisualTestContext| {
+            dock.read_with(cx, |dock, _| {
+                dock.visible_panels()
+                    .iter()
+                    .map(|panel| panel.persistent_name())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(visible(cx), ["Environment", "Files"]);
+
+        // Minimizing the lower pane leaves its tabs, and hides its panel.
+        dock.update_in(cx, |dock, window, cx| {
+            dock.set_collapsed_pane(Some(1), window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(visible(cx), ["Environment"]);
+        assert!(!files.read_with(cx, |panel, _| panel.active));
+        assert_eq!(
+            dock.read_with(cx, |dock, _| dock.layout().collapsed),
+            Some(1)
+        );
+        assert!(cx.debug_bounds("dock-pane-1").is_none());
+        let upper = cx.debug_bounds("dock-pane-0").expect("the upper pane");
+        let plots_tab = cx
+            .debug_bounds("dock-tab-Plots")
+            .expect("the lower pane's tabs");
+        assert!(
+            plots_tab.top() > upper.bottom() - px(1.),
+            "the tabs sit under the upper pane"
+        );
+
+        // Clicking a tab of the minimized pane shows both panes again.
+        cx.simulate_click(plots_tab.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(visible(cx), ["Environment", "Plots"]);
+        assert_eq!(dock.read_with(cx, |dock, _| dock.layout().collapsed), None);
+
+        // Maximizing the lower pane minimizes the upper one; revealing a panel
+        // in the upper pane, as when R draws a plot, shows it again.
+        dock.update_in(cx, |dock, window, cx| {
+            dock.set_collapsed_pane(Some(0), window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(visible(cx), ["Plots"]);
+        assert!(!environment.read_with(cx, |panel, _| panel.active));
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_panel::<EnvironmentPanel>(window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(visible(cx), ["Environment", "Plots"]);
+        assert!(environment.read_with(cx, |panel, _| panel.active));
+        assert_eq!(dock.read_with(cx, |dock, _| dock.layout().collapsed), None);
+    }
+
+    #[gpui::test]
+    async fn test_split_dock_keeps_its_width(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(cx.new(EnvironmentPanel::new), window, cx);
+            workspace.add_panel(cx.new(GitPanel::new), window, cx);
+            workspace.add_panel(cx.new(FilesPanel::new), window, cx);
+            workspace.toggle_dock(DockPosition::Right, window, cx);
+            workspace.right_dock().update(cx, |dock, cx| {
+                dock.set_layout(
+                    dock::DockLayout {
+                        panes: vec![
+                            pane(&["Environment", "Git"], None),
+                            pane(&["Files", "Plots"], None),
+                        ],
+                        divider: 0.5,
+                        collapsed: None,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            // Added after the layout, Plots still has its own default width.
+            workspace.add_panel(cx.new(PlotsPanel::new), window, cx);
+        });
+        cx.run_until_parked();
+        let width = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("dock-pane-0")
+                .expect("the upper pane")
+                .size
+                .width
+        };
+        let before = width(cx);
+
+        let plots_tab = cx.debug_bounds("dock-tab-Plots").unwrap().center();
+        cx.simulate_click(plots_tab, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(width(cx), before, "switching panes keeps the width");
+
+        let dock = workspace.read_with(cx, |workspace, _| workspace.right_dock().clone());
+        dock.update_in(cx, |dock, window, cx| {
+            dock.set_collapsed_pane(Some(1), window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(width(cx), before, "minimizing a pane keeps the width");
     }
 
     #[gpui::test]
@@ -17361,6 +17504,7 @@ mod tests {
                     dock::DockLayout {
                         panes: vec![pane(&["Environment"], None), pane(&["Plots"], None)],
                         divider: 0.5,
+                        collapsed: None,
                     },
                     window,
                     cx,
@@ -17370,7 +17514,12 @@ mod tests {
         });
         cx.run_until_parked();
         let dock = workspace.read_with(cx, |workspace, _| workspace.right_dock().clone());
-        let area = cx.debug_bounds("dock-pane-1").unwrap().size.height * 2.;
+        // Both panes and their tab rows, which split side docks always show,
+        // without the divider.
+        let tab_rows = px(28.) * 2.;
+        let area = cx.debug_bounds("dock-pane-0").unwrap().size.height
+            + cx.debug_bounds("dock-pane-1").unwrap().size.height
+            + tab_rows;
         let divider =
             |cx: &mut VisualTestContext| dock.read_with(cx, |dock, _| dock.layout().divider);
 
@@ -17412,6 +17561,7 @@ mod tests {
                 pane(&["Files", "Plots"], None),
             ],
             divider: 0.3,
+            collapsed: None,
         };
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.add_panel(cx.new(EnvironmentPanel::new), window, cx);

@@ -2713,6 +2713,21 @@
   // Example: {"log": {"client": "warn"}}
   "log": {},
 
+  // RezStudio's Plots pane.
+  "plots": {
+    // Whether plots are darkened to suit a dark theme: "off", "on", or
+    // "follow_theme" (on while the theme is dark). Copied and saved plots keep
+    // R's own colors.
+    "dark_mode": "off",
+  },
+  // RezStudio's Viewer pane.
+  "viewer": {
+    // Whether pages are darkened to suit a dark theme: "off", "on", or
+    // "follow_theme" (on while the theme is dark). Pages opened in a browser
+    // keep their own colors.
+    "dark_mode": "off",
+  },
+
   // Configuration for developer-oriented instrumentation tools that can be
   // toggled at runtime.
   "instrumentation": {

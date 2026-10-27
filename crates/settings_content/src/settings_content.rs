@@ -6,6 +6,7 @@ mod fallible_options;
 mod language;
 pub mod merge_from;
 mod project;
+mod rezstudio;
 mod serde_helper;
 mod terminal;
 mod theme;
@@ -21,6 +22,7 @@ pub use fallible_options::*;
 pub use language::*;
 pub use merge_from::MergeFrom as MergeFromTrait;
 pub use project::*;
+pub use rezstudio::*;
 use serde::de::DeserializeOwned;
 pub use serde_helper::{
     serialize_f32_with_two_decimal_places, serialize_optional_f32_with_two_decimal_places,
@@ -195,6 +197,12 @@ pub struct SettingsContent {
     pub file_finder: Option<FileFinderSettingsContent>,
 
     pub call_hierarchy: Option<CallHierarchySettingsContent>,
+
+    /// RezStudio's Plots pane.
+    pub plots: Option<PlotsSettingsContent>,
+
+    /// RezStudio's Viewer pane.
+    pub viewer: Option<ViewerSettingsContent>,
 
     pub git_panel: Option<GitPanelSettingsContent>,
 
@@ -401,7 +409,7 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, command_palette, file_finder, git_panel, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
+        call_hierarchy, plots, viewer, command_palette, file_finder, git_panel, tabs, tab_bar, tab_switcher, status_bar, preview_tabs, agent,
         agent_servers, audio, auto_update, base_keymap, collaboration_panel, debugger, diagnostics,
         git,
         global_lsp_settings, image_viewer, markdown_preview, repl, helix_mode, hide_mouse,
