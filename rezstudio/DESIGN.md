@@ -1411,19 +1411,30 @@ Decisions:
   - The Help pane is already themed (M6) and is not part of this.
 
 To check before starting:
-- Whether setting a `WKWebView`'s own `appearance` to dark makes its pages see
-  `prefers-color-scheme: dark` while the window and system are light, as when the app's
-  theme is dark on a light Mac.
-- How a RezStudio crate registers its own settings with Zed's settings system, keeping
-  the change to Zed's settings crates small, and that a toolbar button can write the
-  setting to the settings file, as Zed's own toggles do.
-- Whether Ark's plots have a white or a transparent background, which decides what the
-  flipped background becomes.
+- *(Checked.)* A `WKWebView`'s own `appearance` decides what its pages see as
+  `prefers-color-scheme`, whatever the system's: on a dark Mac, a web view set to light
+  reported light. Left unset, it follows the system, not the app's theme, so today
+  pages with a dark design already go dark whenever macOS is dark. With the setting
+  off, the Viewer keeps doing that.
+- *(Checked.)* Every setting is a field of Zed's `SettingsContent`, with its default in
+  `assets/settings/default.json`, and a crate reads it with a `Settings` type that
+  `#[derive(RegisterSetting)]` registers. RezStudio's content types go in their own
+  module, `settings_content/src/rezstudio.rs`, so Zed's files change by a few lines.
+  Settings needn't appear in the settings UI. Toggles write the file with
+  `settings::update_settings_file`, as Zed's do.
+- *(Checked.)* Ark's PNG devices (`grDevices::png` and `ragg::agg_png`) get no `bg`, so
+  plots have R's default opaque white background. Only plots that ask for it, as with
+  `par(bg = "transparent")`, have transparent pixels, which stay transparent.
 
 Steps:
-1. **Settings.** `plots.dark_mode` and `viewer.dark_mode`, each `off`, `on` or
+1. **Settings.** *(Done.)* `plots.dark_mode` and `viewer.dark_mode`, each `off`, `on` or
    `follow_theme`, defaulting to `off`, with the effective on or off worked out from the
    theme's appearance.
+   - `DarkModeContent` and the two content types are in `settings_content`'s `rezstudio`
+     module. `PlotsSettings` and `ViewerSettings` read them, and each crate's
+     `is_dark_mode_on(cx)` resolves `follow_theme` against the theme.
+   - **Tests:** parsing `follow_theme`, the three values against a dark and a light
+     theme, and each pane's setting off by default and following changes.
 2. **Dark plots.** Darken the decoded image the pane draws, keeping the PNG that Copy
    uses. Toggling or a theme change redoes it from the kept PNG, without asking R to
    draw again. Everywhere the pane draws a plot is darkened: the pane, its history and

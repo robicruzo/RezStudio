@@ -26,6 +26,31 @@ const PANEL_KEY: &str = "ViewerPanel";
 /// The height of the toolbar above a widget, roughly.
 const TOOLBAR_HEIGHT: Pixels = px(32.);
 
+#[derive(Clone, Copy, Debug, PartialEq, settings::RegisterSetting)]
+pub struct ViewerSettings {
+    pub dark_mode: settings::DarkModeContent,
+}
+
+impl settings::Settings for ViewerSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        Self {
+            dark_mode: content
+                .viewer
+                .as_ref()
+                .and_then(|viewer| viewer.dark_mode)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Whether the Viewer darkens pages now, from its setting and the theme.
+pub fn is_dark_mode_on(cx: &App) -> bool {
+    use settings::Settings as _;
+    ViewerSettings::get_global(cx)
+        .dark_mode
+        .is_on(!cx.theme().appearance.is_light())
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
@@ -667,6 +692,35 @@ mod tests {
     use web_view::{fake_factory, take_calls};
     use workspace::MultiWorkspace;
     use workspace::dock::{DockLayout, DockPaneLayout, test::TestPanel};
+
+    #[gpui::test]
+    fn test_dark_mode_setting(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings = SettingsStore::test(cx);
+            cx.set_global(settings);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let set = |mode: settings::DarkModeContent, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                cx.update_global::<SettingsStore, _>(|store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.viewer = Some(settings::ViewerSettingsContent {
+                            dark_mode: Some(mode),
+                        });
+                    });
+                });
+                is_dark_mode_on(cx)
+            })
+        };
+        assert!(!cx.update(|cx| is_dark_mode_on(cx)), "off by default");
+        assert!(set(settings::DarkModeContent::On, cx));
+        assert!(!set(settings::DarkModeContent::Off, cx));
+        let theme_is_dark = cx.update(|cx| !cx.theme().appearance.is_light());
+        assert_eq!(
+            set(settings::DarkModeContent::FollowTheme, cx),
+            theme_is_dark
+        );
+    }
 
     const WIDGET: &str = "/tmp/RtmpX/viewhtml1/index.html";
     const APP: &str = "http://127.0.0.1:7654/";
