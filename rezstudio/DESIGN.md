@@ -142,7 +142,7 @@ packages and addins that call `rstudioapi` keep working.
 | M6 | Help + Viewer *(done)* | WKWebView embedded; help, htmlwidgets, Shiny. |
 | M7 | RStudio layout *(done)* | Two stacked, tabbed panes in the right dock, with tabs dragged between them; Console, Terminal and Debug as tabs; an outline sidebar from an editor button. |
 | M8 | Documents and Environment *(done)* | Render button for Quarto and R Markdown with output in the Viewer; Environment pane with RStudio's environment menu, grouping, memory use, workspace save/load and Import Dataset. |
-| M9 | Dark plots and Viewer | A moon toggle in the Plots and Viewer toolbars darkens plots and pages to match a dark theme; Copy, Save and Open in Browser keep the originals. |
+| M9 | Dark plots and Viewer *(done)* | A moon toggle in the Plots and Viewer toolbars darkens plots and pages to match a dark theme; Copy, Save and Open in Browser keep the originals. |
 | M10 | Python parity | ipykernel add-on implements the comms; all panes work for Python. |
 | M11 | Typst native preview | Live preview with source ↔ preview jumping. |
 | M12 | Debugger | Ark DAP through Zed's `debugger_ui`: breakpoints, `browser()`, stepping. |
@@ -1370,7 +1370,7 @@ Done when:
 - Render on a `.qmd` and an `.Rmd` file shows the HTML in the Viewer, with output in the
   Render tab.
 
-### M9 plan
+### M9 plan (done)
 
 Dark mode for what R draws: plots in the Plots pane, and pages in the Viewer. R's plots
 and most rendered documents have white backgrounds, which glare in a dark theme.
@@ -1484,12 +1484,38 @@ Steps:
      to the page and turning it off. The script itself was checked in the probe on a
      plain page, a page with its own dark background, pages following a dark color
      scheme, a JPEG beside a PNG, and turning it off.
-4. **Tests and live checks.**
+4. **Tests and live checks.** *(Done.)*
    - Unit tests for the setting, the lightness flip (white to the pane's background,
-     black to its text color, a pure red staying red), and the Viewer's script and CSS.
+     black to its text color, a pure red staying red), and the Viewer's script and CSS,
+     from steps 1 to 3.
    - Live checks of a base plot and a ggplot2 plot, a rendered Quarto and R Markdown
      document, a plotly widget, a leaflet map and a Shiny app, with the theme dark and
      light.
+   - **How:** a temporary sequence in the app ran R code, renders and settings changes,
+     with settings and the theme changed in memory through `SettingsStore::
+     set_user_settings` so the user's settings file wasn't written. Each step was
+     captured by window ID (`screencapture -l`), which takes only RezStudio's window
+     even when others cover it, so the app needn't come to the front.
+   - **Checked live:**
+     - A base plot with dark mode off, then on: the background becomes the pane's, blue
+       points stay blue and the red line stays red. The moon button shows as on.
+     - A ggplot2 plot: the gray panel turns dark gray and each group keeps its hue.
+       ggplot's medium-light default colors come out darker and duller than on white,
+       as a lightness flip makes them.
+     - The zoom window: the plot darkens to the window's own background.
+     - A plotly widget in the Viewer, darkened in place when turned on, with no reload.
+     - A rendered Quarto document, darkened, with its plot image darkened to match; a
+       Quarto document with its own dark theme (`light: flatly, dark: darkly`,
+       `respect-user-color-scheme: true`), which used its theme rather than being
+       inverted; and a rendered R Markdown document, darkened.
+     - With a light theme and both panes on `follow_theme`: the page and the plot show
+       their own colors again, without a reload. With the light theme and the Plots
+       pane on `on`: the plot goes dark gray.
+     - A Shiny app in the Viewer, darkened, its blue slider keeping its hue.
+     - The Render tab's long pandoc line stays on one row (the M8 fix, now seen live).
+   - **Not checked:** a leaflet map (leaflet isn't installed here), and clicking the
+     moon buttons, which write the settings file; the live checks changed settings in
+     memory instead, and the buttons' action is unit-tested.
 
 Done when:
 - With the toggle on, plots in the Plots pane and the zoom window match a dark theme,
