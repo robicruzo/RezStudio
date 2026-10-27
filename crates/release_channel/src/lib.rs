@@ -9,6 +9,12 @@ use semver::Version;
 
 const ZED_DOCS_URL: &str = "https://zed.dev/docs";
 
+/// RezStudio's own version, shown in the About window, the CLI and the app
+/// bundle. The crates keep Zed's version, which the extension registry and
+/// remote servers use to stay compatible. `script/bundle-rezstudio` reads it
+/// from this line.
+pub const REZSTUDIO_VERSION: &str = "0.0.1";
+
 /// stable | dev | nightly | preview
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {

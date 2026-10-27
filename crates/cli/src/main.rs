@@ -944,7 +944,7 @@ mod linux {
                 } else {
                     format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
                 },
-                option_env!("RELEASE_VERSION").unwrap_or_default(),
+                release_channel::REZSTUDIO_VERSION,
                 match option_env!("ZED_COMMIT_SHA") {
                     Some(commit_sha) => format!(" {commit_sha} "),
                     None => "".to_string(),
@@ -1388,7 +1388,7 @@ mod mac_os {
 
     impl InstalledApp for Bundle {
         fn zed_version_string(&self) -> String {
-            format!("Zed {} – {}", self.version(), self.path().display(),)
+            format!("RezStudio {} – {}", self.version(), self.path().display(),)
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {

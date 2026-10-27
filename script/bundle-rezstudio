@@ -16,6 +16,7 @@ zed_features=""
 make_dmg=false
 install_app=false
 open_app=false
+channel=""
 
 help_info() {
   echo "
@@ -25,13 +26,15 @@ Build RezStudio.app for macOS.
 Options:
   -d    Build in debug mode (faster to compile, slower to run).
   -m    Also create a .dmg next to the bundle (release builds only).
+  -c    The release channel: stable, preview, nightly or dev. Defaults to
+        crates/zed/RELEASE_CHANNEL, which is dev on main; releases use stable.
   -i    Install the bundle into /Applications.
   -o    Open the bundle when done.
   -h    Display this help and exit.
 "
 }
 
-while getopts 'dmioh' flag; do
+while getopts 'dmioc:h' flag; do
     case "${flag}" in
         d)
             build_flag=""
@@ -39,6 +42,7 @@ while getopts 'dmioh' flag; do
             zed_features="--features util/debug-embed"
             ;;
         m) make_dmg=true ;;
+        c) channel="${OPTARG}" ;;
         i) install_app=true ;;
         o) open_app=true ;;
         h)
@@ -58,7 +62,16 @@ if [[ "$(uname)" != "Darwin" ]]; then
     exit 1
 fi
 
-channel=$(<crates/zed/RELEASE_CHANNEL)
+if [[ -z "$channel" ]]; then
+    channel=$(<crates/zed/RELEASE_CHANNEL)
+fi
+case "$channel" in
+    stable | preview | nightly | dev) ;;
+    *)
+        echo "Unknown release channel: ${channel}" >&2
+        exit 1
+        ;;
+esac
 export ZED_RELEASE_CHANNEL="${channel}"
 export ZED_BUNDLE=true
 export CARGO_BUNDLE_SKIP_BUILD=true
@@ -107,6 +120,16 @@ mv Cargo.toml.backup Cargo.toml
 trap - EXIT
 popd > /dev/null
 
+# cargo-bundle writes the crate's version, which stays at Zed's; the bundle
+# shows RezStudio's own. This has to happen before signing.
+rezstudio_version=$(sed -n 's/^pub const REZSTUDIO_VERSION: &str = "\(.*\)";$/\1/p' crates/release_channel/src/lib.rs)
+if [[ -z "$rezstudio_version" ]]; then
+    echo "Couldn't read REZSTUDIO_VERSION from crates/release_channel/src/lib.rs" >&2
+    exit 1
+fi
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${rezstudio_version}" "${app_path}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${rezstudio_version}" "${app_path}/Contents/Info.plist"
+
 # DocumentTypes.plist references CFBundleTypeIconFile "Document".
 cp crates/zed/resources/Document.icns "${app_path}/Contents/Resources/Document.icns"
 
@@ -140,7 +163,7 @@ if [[ "$make_dmg" == true ]]; then
         echo "Skipping DMG for a debug build"
     else
         dmg_source="${binary_dir}/dmg"
-        dmg_path="${binary_dir}/RezStudio-${arch_suffix}.dmg"
+        dmg_path="${binary_dir}/RezStudio-${rezstudio_version}-${arch_suffix}.dmg"
         rm -rf "$dmg_source"
         mkdir -p "$dmg_source"
         cp -R "$app_path" "$dmg_source/"
