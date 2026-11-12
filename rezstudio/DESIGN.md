@@ -1570,6 +1570,35 @@ right end of each pane's tab row.
   restored; the lower pane maximized with the widget redrawn to fill the column; and
   revealing the Viewer restoring both. The dock's edge stayed put throughout.
 
+## Gaps for people switching from RStudio or Positron (candidates, after 0.0.1)
+
+These are what a statistician who uses RStudio or Positron daily would miss in 0.0.1, in roughly
+the order they'd hit them. None of them is scheduled yet. Each would become a milestone or join
+one when it's planned.
+
+| # | Gap | What RStudio and Positron do | Notes |
+|---|---|---|---|
+| C1 | **Data viewer filters and summaries** | Positron's Data Explorer filters rows, searches, and shows a summary panel with column statistics and histograms. RStudio filters and searches. | `View()` here pages and sorts only. M2 left row filters and column summaries for later. Ark's data explorer comm already has filter and summary requests. |
+| C2 | **Debugger** | Breakpoints, stepping, and the call stack and frame variables while stopped. | Planned as M12. |
+| C3 | **Python** | Positron runs Python sessions with every pane. `reticulate` users switch between R and Python. | Planned as M10. |
+| C4 | **History pane** | RStudio's History tab lists past commands, searches them, and sends them to the console or a script. | Console up-arrow history works. The planned layout's Environment · History has no History yet. |
+| C5 | **Package development** | RStudio's Build pane has Install and Restart, Check, Test and Document. Code → Insert Roxygen Skeleton. | Everything can be typed in the console today. A Build pane appears when the project is a package. |
+| C6 | **Addins menu** | RStudio lists installed addins (from each package's `rstudio/addins.dcf`) and runs them. | Addins that call `rstudioapi` should work, but nothing launches them. |
+| C7 | **Connections pane** | Browses databases opened with DBI or odbc: schemas, tables and previews. | Ark has a connections comm. |
+| C8 | **Background jobs** | Runs a script in a separate R session, with its output in a Jobs tab. | |
+| C9 | **Visual editor for R Markdown and Quarto** | RStudio's Visual mode edits documents as formatted text. | A big piece of work. Render and inline chunks already cover the main workflow. |
+| C10 | **Publishing** | Publishes to Posit Connect, shinyapps.io and RPubs. | Through `rsconnect`, which can be run from the console today. |
+| C11 | **RStudio shortcuts and editor habits** | RStudio's keymap: reformat code, extract a function, comment lines, `%>%` from Cmd+Shift+M when set. | Cmd+Enter, Cmd+Shift+S, Cmd+Shift+K and Cmd+Shift+M (inserting `\|>`) work. List the most-used remaining shortcuts and map them. |
+| C12 | **Distribution** | Signed and notarized installers that update themselves. | See Open questions: notarization needs an Apple Developer account, and there's no update feed yet. Also remove the startup check for a zed.dev sign-in, which can prompt for the keychain. |
+
+Two gaps go against agreed decisions, so they'd mean revisiting those decisions rather than
+planning a milestone:
+- **Other platforms and a server version.** Windows, Linux, Intel Macs, and a browser-based
+  version like RStudio Server or Posit Workbench, which many universities and companies use.
+  The Platform decision is macOS only.
+- **AI help.** Positron has its Assistant and RStudio has Copilot. The AI decision removed AI
+  entirely.
+
 ## Risks
 
 - **Ark's comm protocol is Positron-driven and may change.** Mitigation: bundle a pinned Ark
