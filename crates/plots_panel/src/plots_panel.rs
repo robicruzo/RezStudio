@@ -80,18 +80,8 @@ pub fn is_dark_mode_on(cx: &App) -> bool {
         .is_on(!cx.theme().appearance.is_light())
 }
 
-/// The setting that flips dark mode from `is_on`. An explicit value replaces
-/// `follow_theme`, as the toggle is the user's choice for now.
-fn toggled_dark_mode(is_on: bool) -> settings::DarkModeContent {
-    if is_on {
-        settings::DarkModeContent::Off
-    } else {
-        settings::DarkModeContent::On
-    }
-}
-
 fn toggle_dark_mode(cx: &mut App) {
-    let dark_mode = toggled_dark_mode(is_dark_mode_on(cx));
+    let dark_mode = settings::DarkModeContent::toggled(is_dark_mode_on(cx));
     settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
         settings.plots.get_or_insert_default().dark_mode = Some(dark_mode);
     });
@@ -1315,12 +1305,6 @@ mod tests {
         harness.resize(150., cx);
         harness.settle(cx);
         assert!(harness.requests().is_empty());
-    }
-
-    #[test]
-    fn test_toggling_dark_mode_sets_it_explicitly() {
-        assert_eq!(toggled_dark_mode(true), settings::DarkModeContent::Off);
-        assert_eq!(toggled_dark_mode(false), settings::DarkModeContent::On);
     }
 
     #[gpui::test]

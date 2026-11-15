@@ -71,18 +71,8 @@ fn page_darkening(cx: &App) -> Option<PageDarkening> {
     ))
 }
 
-/// The setting that flips dark mode from `is_on`. An explicit value replaces
-/// `follow_theme`, as the toggle is the user's choice for now.
-fn toggled_dark_mode(is_on: bool) -> settings::DarkModeContent {
-    if is_on {
-        settings::DarkModeContent::Off
-    } else {
-        settings::DarkModeContent::On
-    }
-}
-
 fn toggle_dark_mode(cx: &mut App) {
-    let dark_mode = toggled_dark_mode(is_dark_mode_on(cx));
+    let dark_mode = settings::DarkModeContent::toggled(is_dark_mode_on(cx));
     settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
         settings.viewer.get_or_insert_default().dark_mode = Some(dark_mode);
     });
@@ -1002,12 +992,6 @@ mod tests {
         reset(cx);
         harness.show_widget_with_height("/tmp/RtmpX/viewhtml3/index.html", -1, cx);
         assert!((divider(cx) - 0.1).abs() < 0.001, "{}", divider(cx));
-    }
-
-    #[test]
-    fn test_toggling_dark_mode_sets_it_explicitly() {
-        assert_eq!(toggled_dark_mode(true), settings::DarkModeContent::Off);
-        assert_eq!(toggled_dark_mode(false), settings::DarkModeContent::On);
     }
 
     #[gpui::test]

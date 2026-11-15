@@ -38,6 +38,17 @@ impl DarkModeContent {
             DarkModeContent::FollowTheme => theme_is_dark,
         }
     }
+
+    /// The setting a pane's toggle writes to flip dark mode from `is_on`. An
+    /// explicit value replaces `follow_theme`, as the toggle is the user's
+    /// choice for now.
+    pub fn toggled(is_on: bool) -> Self {
+        if is_on {
+            DarkModeContent::Off
+        } else {
+            DarkModeContent::On
+        }
+    }
 }
 
 #[with_fallible_options]
@@ -73,5 +84,11 @@ mod tests {
         assert!(!DarkModeContent::FollowTheme.is_on(false));
         assert!(DarkModeContent::On.is_on(false));
         assert!(!DarkModeContent::Off.is_on(true));
+    }
+
+    #[test]
+    fn test_toggling_dark_mode_sets_it_explicitly() {
+        assert_eq!(DarkModeContent::toggled(true), DarkModeContent::Off);
+        assert_eq!(DarkModeContent::toggled(false), DarkModeContent::On);
     }
 }
