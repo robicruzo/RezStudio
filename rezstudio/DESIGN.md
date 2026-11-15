@@ -90,7 +90,7 @@ merges stay tractable.
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Panes never talk to a kernel directly. They subscribe to a `RuntimeSession` entity and its
+Panes never talk to a kernel directly. They subscribe to a `KernelSession` entity and its
 typed comm channels. Because Python implements the same comms as Ark, every pane works for both
 languages without language-specific code paths beyond formatting.
 
@@ -1569,6 +1569,45 @@ right end of each pane's tab row.
   both panes with the buttons; the lower pane minimized with the page's web view hidden;
   restored; the lower pane maximized with the widget redrawn to fill the column; and
   revealing the Viewer restoring both. The dock's edge stayed put throughout.
+
+### Refactoring before M10 (done)
+
+A behavior-preserving refactor that readies the runtime for a second language and removes
+duplication. Nothing users see changed. The milestone plans above keep the old name,
+`RSession`, where they describe what was built then.
+
+- **A language-neutral session:** `RSession` is now `KernelSession`, and it carries its
+  language, a `SessionLanguage` (only `R` so far). `SessionRegistry` keys sessions by
+  workspace and language, `SessionAdded` carries the language, and `session_for_workspace`
+  takes it. The session's messages name its language, which reads the same for R.
+- **The M10 seam:** `runtime/src/kernel.rs`. A `KernelLauncher` finds a language's
+  interpreter and starts its kernel, returning a `KernelProcess` and its `KernelConnections`
+  (the Jupyter sockets). The session asks its launcher only two things: whether a kernel can
+  be started (`unavailable_reason`) and to `launch` it. `ArkLauncher`, in `ark.rs`, is the
+  only launcher: it holds the R installation and the bundled Ark, finds Ark and starts it.
+  M10 adds a launcher for ipykernel, a `SessionLanguage::Python`, and a second
+  `start_session` call in `runtime::init`. The comm handling in `session.rs` stays as it is,
+  as Python's add-on speaks Ark's comms.
+- **What's still R-only:** `start_session` restarts Ark's language server when R restarts,
+  the LSP bridge finds the R session by its project root, and `r_installation` is on the
+  session for the console's version line and the Render tab. The panes ask for
+  `SessionLanguage::R`.
+- **Following a session:** `runtime::follow_session(this, workspace_id, language, …)` calls
+  back with the workspace's session now, if it exists, and with each one created later.
+  It replaces the same subscription written out in the console, Environment, data viewer,
+  Plots, Packages, Help, Viewer and the chunk runner. Panes that kept their workspace's id
+  only for that no longer do.
+- **A shared test harness:** `runtime::test_support::FakeKernel` is a session connected to a
+  kernel the test plays by hand. `take_startup_requests` returns the UI, LSP, variables and
+  help comms, `answer_kernel_info` makes the session idle, and `receive`,
+  `send_comm_message` and `reply_to_comm_request` deliver Ark's side. Nine crates' tests had
+  their own copy of this setup; their assertions are unchanged. `test_support` also still
+  has `Kernel`, the client for a real Ark.
+- **Dark mode's toggle:** `DarkModeContent::toggled` holds the rule both moon buttons use
+  (an explicit `on` or `off` replaces `follow_theme`). Each pane keeps reading and writing
+  its own setting.
+- **Checked:** the tests of the ten crates and `./script/clippy` after each step, and the
+  real-R tests of `runtime`, `variables_panel` and `render_panel`.
 
 ## Gaps for people switching from RStudio or Positron (candidates, after 0.0.1)
 
