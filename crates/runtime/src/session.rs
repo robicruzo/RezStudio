@@ -1,4 +1,3 @@
-use crate::ark::{self, ArkLaunch, ArkProcess};
 use crate::comms::{
     self, CallMethodParams, DATA_EXPLORER_COMM_TARGET, DataExplorerEvent, DataExplorerOpenData,
     EvalResult, EvaluateCodeParams, HELP_COMM_TARGET, HelpEvent, InstalledPackage, LSP_COMM_TARGET,
@@ -8,6 +7,7 @@ use crate::comms::{
     UI_COMM_TARGET, UiBackendEvent, UiCommOpenData, UiFrontendEvent, UiFrontendRequest,
     VARIABLES_COMM_TARGET, VariablesEvent,
 };
+use crate::kernel::{KernelConnections, KernelLauncher, KernelProcess, SessionLanguage};
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
 use futures::channel::{mpsc, oneshot};
@@ -38,10 +38,11 @@ const OUTDATED_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionState {
-    /// No usable R or Ark; the message says what is missing.
+    /// No usable interpreter or kernel; the message says what is missing.
     Unavailable(String),
-    /// The project folder isn't trusted yet. R runs the project's `.Rprofile`
-    /// on startup, so it waits for trust like language servers do.
+    /// The project folder isn't trusted yet. A kernel runs the project's
+    /// startup code, as R does its `.Rprofile`, so it waits for trust like
+    /// language servers do.
     Restricted,
     Starting,
     Idle,
@@ -100,12 +101,12 @@ pub enum SessionEvent {
         comm_id: String,
     },
     /// R drew a new plot. `pre_render` is drawn at the last size given to
-    /// [`RSession::set_plot_render_settings`].
+    /// [`KernelSession::set_plot_render_settings`].
     PlotOpened {
         comm_id: String,
         pre_render: Option<PlotResult>,
         /// The execution that drew it, when one was running. See
-        /// [`RSession::is_inline`] for plots that belong to a chunk.
+        /// [`KernelSession::is_inline`] for plots that belong to a chunk.
         request_id: Option<String>,
     },
     PlotEvent {
@@ -156,14 +157,14 @@ struct PendingExecution {
     idle: bool,
 }
 
-/// One R process, run by Ark, serving one project window.
-pub struct RSession {
-    r: Option<RToolchainData>,
+/// One kernel process serving one project window: R, run by Ark. The comms
+/// are the ones Ark defines, which a kernel for another language implements.
+pub struct KernelSession {
+    launcher: KernelLauncher,
     project_root: PathBuf,
     env: HashMap<String, String>,
-    bundled_ark: Option<PathBuf>,
     state: SessionState,
-    process: Option<ArkProcess>,
+    process: Option<KernelProcess>,
     channels: Option<KernelChannels>,
     /// Incremented on every start, so stale exit notifications are ignored.
     generation: usize,
@@ -202,29 +203,23 @@ pub struct RSession {
     _trust_subscription: Option<Subscription>,
 }
 
-impl EventEmitter<SessionEvent> for RSession {}
+impl EventEmitter<SessionEvent> for KernelSession {}
 
-impl RSession {
+impl KernelSession {
     pub fn new(
-        r: Option<RToolchainData>,
+        launcher: KernelLauncher,
         project_root: PathBuf,
         env: HashMap<String, String>,
-        bundled_ark: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let state = if r.is_some() {
-            SessionState::Starting
-        } else {
-            SessionState::Unavailable(
-                "R was not found. Install R from https://cran.r-project.org and reopen the project."
-                    .to_string(),
-            )
+        let state = match launcher.unavailable_reason() {
+            Some(reason) => SessionState::Unavailable(reason),
+            None => SessionState::Starting,
         };
         Self {
-            r,
+            launcher,
             project_root,
             env,
-            bundled_ark,
             state,
             process: None,
             channels: None,
@@ -265,8 +260,16 @@ impl RSession {
         &self.project_root
     }
 
+    pub fn language(&self) -> SessionLanguage {
+        self.launcher.language()
+    }
+
     pub fn r_installation(&self) -> Option<&RToolchainData> {
-        self.r.as_ref()
+        self.launcher.r_installation()
+    }
+
+    fn is_available(&self) -> bool {
+        self.launcher.unavailable_reason().is_none()
     }
 
     pub fn prompt(&self) -> &PromptStateParams {
@@ -383,6 +386,7 @@ impl RSession {
 
         let executor = cx.background_executor().clone();
         let method = method.to_string();
+        let language = self.language().name();
         cx.spawn(async move |this, cx| {
             let reply = futures::select_biased! {
                 reply = reply_rx.fuse() => Some(reply),
@@ -390,12 +394,12 @@ impl RSession {
             };
             match reply {
                 Some(Ok(result)) => result,
-                Some(Err(_)) => anyhow::bail!("R stopped before answering `{method}`"),
+                Some(Err(_)) => anyhow::bail!("{language} stopped before answering `{method}`"),
                 None => {
                     this.update(cx, |this, _| this.pending_comm_requests.remove(&request_id))
                         .ok();
                     anyhow::bail!(
-                        "R didn't answer `{method}` within {} seconds",
+                        "{language} didn't answer `{method}` within {} seconds",
                         timeout.as_secs()
                     )
                 }
@@ -460,7 +464,7 @@ impl RSession {
         cx: &mut Context<Self>,
     ) -> Task<Result<serde_json::Value>> {
         let Some(ui_comm_id) = self.ui_comm_id.clone() else {
-            return Task::ready(Err(anyhow::anyhow!("R isn't running")));
+            return Task::ready(Err(self.not_running()));
         };
         let params = match serde_json::to_value(CallMethodParams {
             method: method.to_string(),
@@ -479,7 +483,7 @@ impl RSession {
         cx: &mut Context<Self>,
     ) -> Task<Result<EvalResult>> {
         let Some(ui_comm_id) = self.ui_comm_id.clone() else {
-            return Task::ready(Err(anyhow::anyhow!("R isn't running")));
+            return Task::ready(Err(self.not_running()));
         };
         let params = match serde_json::to_value(EvaluateCodeParams {
             code: code.to_string(),
@@ -530,7 +534,7 @@ impl RSession {
     /// Resolves to whether R found the topic.
     pub fn show_help_topic(&mut self, topic: &str, cx: &mut Context<Self>) -> Task<Result<bool>> {
         let Some(help_comm_id) = self.help_comm_id.clone() else {
-            return Task::ready(Err(anyhow::anyhow!("R isn't running")));
+            return Task::ready(Err(self.not_running()));
         };
         let params = match serde_json::to_value(ShowHelpTopicParams {
             topic: topic.to_string(),
@@ -571,6 +575,10 @@ impl RSession {
         ))
     }
 
+    fn not_running(&self) -> anyhow::Error {
+        anyhow::anyhow!("{} isn't running", self.language().name())
+    }
+
     pub fn is_waiting_for_input(&self) -> bool {
         self.pending_input_request.is_some()
     }
@@ -578,24 +586,25 @@ impl RSession {
     /// Holds off starting R until the project is trusted; `subscription`
     /// watches for that and calls [`Self::start`].
     pub fn wait_for_trust(&mut self, subscription: Subscription, cx: &mut Context<Self>) {
-        if self.r.is_none() {
+        if !self.is_available() {
             return;
         }
         self._trust_subscription = Some(subscription);
         self.set_state(SessionState::Restricted, cx);
     }
 
-    /// Launches Ark. Does nothing when no R installation is available.
+    /// Launches the kernel. Does nothing when it can't be, as without R.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(r) = self.r.clone() else {
+        if !self.is_available() {
             return;
-        };
+        }
         self._trust_subscription = None;
         self.generation += 1;
         let generation = self.generation;
-        let bundled_ark = self.bundled_ark.clone();
+        let launcher = self.launcher.clone();
+        let language = self.language().name();
         let env = self.env.clone();
-        let working_directory = match launch_directory(&self.project_root) {
+        let working_directory = match launch_directory(&self.project_root, language) {
             Ok(directory) => directory,
             Err(error) => {
                 self.set_state(SessionState::Unavailable(format!("{error}")), cx);
@@ -605,36 +614,15 @@ impl RSession {
         self.set_state(SessionState::Starting, cx);
 
         self._launch_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let launched = async {
-                let ark = ark::locate_ark(bundled_ark, &env)?;
-                log::info!(
-                    "starting Ark {} for R {} at {}",
-                    ark.display(),
-                    r.version.as_deref().unwrap_or("(unknown version)"),
-                    r.r_home.display()
-                );
-                let log_file = ark::next_log_file(&paths::logs_dir().join("ark")).log_err();
-                if let Some(log_file) = &log_file {
-                    log::info!("Ark logs to {}", log_file.display());
-                }
-                ark::launch_ark(ArkLaunch {
-                    ark: &ark,
-                    r_home: &r.r_home,
-                    working_directory: &working_directory,
-                    env,
-                    log_file,
-                })
-                .await
-            }
-            .await;
+            let launched = launcher.launch(working_directory, env).await;
 
             let (mut process, connections) = match launched {
                 Ok(launched) => launched,
                 Err(error) => {
-                    log::error!("failed to start R: {error:?}");
+                    log::error!("failed to start {language}: {error:?}");
                     this.update(cx, |this, cx| {
                         this.set_state(
-                            SessionState::Exited(format!("R failed to start: {error:#}")),
+                            SessionState::Exited(format!("{language} failed to start: {error:#}")),
                             cx,
                         );
                     })
@@ -654,9 +642,9 @@ impl RSession {
                 this._io_tasks = io_tasks;
                 this._exit_task = Some(cx.spawn(async move |this, cx| {
                     let message = match exit_status.await {
-                        Ok(status) if status.success() => "R exited.".to_string(),
-                        Ok(status) => format!("R exited unexpectedly ({status})."),
-                        Err(error) => format!("R exited unexpectedly: {error}"),
+                        Ok(status) if status.success() => format!("{language} exited."),
+                        Ok(status) => format!("{language} exited unexpectedly ({status})."),
+                        Err(error) => format!("{language} exited unexpectedly: {error}"),
                     };
                     this.update(cx, |this, cx| {
                         if this.generation == generation {
@@ -671,9 +659,9 @@ impl RSession {
         }));
     }
 
-    /// Stops the current R process, if any, and starts a new one.
+    /// Stops the current kernel process, if any, and starts a new one.
     pub fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.r.is_none() {
+        if !self.is_available() {
             return;
         }
         self.generation += 1;
@@ -741,8 +729,12 @@ impl RSession {
             Ok(reply) => reply,
             Err(error) => return Task::ready(Err(error)),
         };
+        let language = self.language().name();
         cx.background_spawn(async move {
-            match reply.await.context("R stopped before checking the code")? {
+            match reply
+                .await
+                .with_context(|| format!("{language} stopped before checking the code"))?
+            {
                 JupyterMessageContent::IsCompleteReply(reply) => Ok(reply.status),
                 other => anyhow::bail!("unexpected reply to is_complete: {}", other.message_type()),
             }
@@ -750,10 +742,11 @@ impl RSession {
     }
 
     pub fn send_input(&mut self, value: String) -> Result<()> {
+        let language = self.language().name();
         let request = self
             .pending_input_request
             .take()
-            .context("R is not waiting for input")?;
+            .with_context(|| format!("{language} is not waiting for input"))?;
         let reply = JupyterMessage::new(
             InputReply {
                 value,
@@ -1152,7 +1145,7 @@ impl RSession {
             |method: &str| comms::rpc_error(format!("RezStudio does not support `{method}` yet."));
         let reply = match request {
             UiFrontendRequest::WorkspaceFolder => comms::rpc_result(serde_json::Value::String(
-                launch_directory(&self.project_root)
+                launch_directory(&self.project_root, self.language().name())
                     .unwrap_or_else(|_| self.project_root.clone())
                     .to_string_lossy()
                     .into_owned(),
@@ -1291,8 +1284,9 @@ impl RSession {
     pub fn stop(&mut self, cx: &mut Context<Self>) -> Task<()> {
         self.generation += 1;
         let shutdown = self.shut_down(cx);
-        if self.r.is_some() {
-            self.set_state(SessionState::Exited("R was stopped.".to_string()), cx);
+        if self.is_available() {
+            let language = self.language().name();
+            self.set_state(SessionState::Exited(format!("{language} was stopped.")), cx);
         }
         shutdown
     }
@@ -1331,19 +1325,27 @@ impl RSession {
     }
 
     fn send_request(&mut self, message: JupyterMessage) -> Result<()> {
-        let channels = self.channels.as_mut().context("R is not running")?;
+        let language = self.language().name();
+        let channels = self
+            .channels
+            .as_mut()
+            .with_context(|| format!("{language} is not running"))?;
         channels
             .requests
             .try_send(message)
-            .context("sending a request to R")
+            .with_context(|| format!("sending a request to {language}"))
     }
 
     fn send_stdin(&mut self, message: JupyterMessage) -> Result<()> {
-        let channels = self.channels.as_mut().context("R is not running")?;
+        let language = self.language().name();
+        let channels = self
+            .channels
+            .as_mut()
+            .with_context(|| format!("{language} is not running"))?;
         channels
             .stdin
             .try_send(message)
-            .context("sending input to R")
+            .with_context(|| format!("sending input to {language}"))
     }
 
     fn send_request_expecting_reply(
@@ -1378,9 +1380,9 @@ impl RSession {
     }
 }
 
-/// The folder R runs in: the project folder, or the folder containing the
-/// file when a single file was opened as the project.
-fn launch_directory(project_root: &std::path::Path) -> Result<PathBuf> {
+/// The folder the kernel runs in: the project folder, or the folder containing
+/// the file when a single file was opened as the project.
+fn launch_directory(project_root: &std::path::Path, language: &str) -> Result<PathBuf> {
     if project_root.is_dir() {
         return Ok(project_root.to_path_buf());
     }
@@ -1390,7 +1392,7 @@ fn launch_directory(project_root: &std::path::Path) -> Result<PathBuf> {
         return Ok(parent.to_path_buf());
     }
     anyhow::bail!(
-        "R can't start because the project folder {} doesn't exist.",
+        "{language} can't start because the project folder {} doesn't exist.",
         project_root.display()
     )
 }
@@ -1413,14 +1415,14 @@ fn json_object(
     }
 }
 
-/// Reads Ark's sockets into the session and writes queued requests out. The
-/// session is held weakly, so dropping it ends these tasks and disconnects.
+/// Reads the kernel's sockets into the session and writes queued requests out.
+/// The session is held weakly, so dropping it ends these tasks and disconnects.
 fn spawn_kernel_io(
-    connections: crate::ark::ArkConnections,
-    session: WeakEntity<RSession>,
+    connections: KernelConnections,
+    session: WeakEntity<KernelSession>,
     cx: &mut AsyncWindowContext,
 ) -> (KernelChannels, Vec<Task<()>>) {
-    let crate::ark::ArkConnections {
+    let KernelConnections {
         mut iopub,
         shell,
         control,
@@ -1497,39 +1499,41 @@ fn spawn_kernel_io(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Entity, TestAppContext, VisualTestContext};
-    use jupyter_protocol::{
-        ExecuteReply, InputRequest, IsCompleteReply, KernelInfoReply, Status, Stdio, StreamContent,
+    use crate::test_support::{
+        FakeKernel, comm_message, fake_session, kernel_info_reply, rpc_reply_content, rpc_request,
     };
-    use languages::r::RInstallationSource;
+    use gpui::{TestAppContext, VisualTestContext};
+    use jupyter_protocol::{
+        ExecuteReply, InputRequest, IsCompleteReply, Status, Stdio, StreamContent,
+    };
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    /// A fake kernel, plus the events its session has emitted.
     struct Harness {
-        session: Entity<RSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
-        stdin: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
         events: Rc<RefCell<Vec<SessionEvent>>>,
+    }
+
+    impl std::ops::Deref for Harness {
+        type Target = FakeKernel;
+
+        fn deref(&self) -> &FakeKernel {
+            &self.kernel
+        }
+    }
+
+    impl std::ops::DerefMut for Harness {
+        fn deref_mut(&mut self) -> &mut FakeKernel {
+            &mut self.kernel
+        }
     }
 
     impl Harness {
         fn new(cx: &mut VisualTestContext) -> Self {
-            let r = RToolchainData {
-                r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                version: Some("4.5.3".to_string()),
-                source: RInstallationSource::Rig,
-            };
-            let session = cx.new(|cx| {
-                RSession::new(
-                    Some(r),
-                    PathBuf::from("/projects/analysis"),
-                    HashMap::default(),
-                    None,
-                    cx,
-                )
-            });
+            let session = fake_session("/projects/analysis", cx);
             let events = Rc::new(RefCell::new(Vec::new()));
             cx.update(|_, cx| {
                 let events = events.clone();
@@ -1538,31 +1542,16 @@ mod tests {
                 })
                 .detach();
             });
-            let (requests_tx, requests) = mpsc::channel(100);
-            let (stdin_tx, stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
             Self {
-                session,
-                requests,
-                stdin,
+                kernel: FakeKernel::connect(session, cx),
                 events,
             }
         }
 
-        fn next_request(&mut self) -> JupyterMessage {
-            self.requests.try_recv().expect("expected a request to Ark")
-        }
-
-        fn next_stdin(&mut self) -> JupyterMessage {
-            self.stdin.try_recv().expect("expected a message on stdin")
-        }
-
+        /// Delivers a message without running what it sets off, so tests
+        /// can look at the state in between.
         fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
+            self.kernel.deliver(message, cx);
         }
 
         fn take_events(&self) -> Vec<SessionEvent> {
@@ -1571,71 +1560,8 @@ mod tests {
 
         /// Consumes the startup requests and returns the UI and LSP comm ids.
         fn finish_startup(&mut self, cx: &mut VisualTestContext) -> (CommId, CommId) {
-            let kernel_info = self.next_request();
-            let ui_open = self.next_request();
-            let _frontend_ready = self.next_request();
-            let lsp_open = self.next_request();
-            let _variables_open = self.next_request();
-            let _help_open = self.next_request();
-            self.receive(
-                JupyterMessage::new(kernel_info_reply(), Some(&kernel_info)),
-                cx,
-            );
-            cx.run_until_parked();
-            let comm_id = |message: &JupyterMessage| match &message.content {
-                JupyterMessageContent::CommOpen(open) => open.comm_id.clone(),
-                other => panic!("expected comm_open, got {}", other.message_type()),
-            };
-            (comm_id(&ui_open), comm_id(&lsp_open))
-        }
-    }
-
-    fn kernel_info_reply() -> KernelInfoReply {
-        serde_json::from_value(json!({
-            "status": "ok",
-            "protocol_version": "5.3",
-            "implementation": "ark",
-            "implementation_version": "0.1.252",
-            "language_info": { "name": "R", "version": "4.5.3" },
-            "banner": "",
-            "help_links": [],
-            "debugger": false
-        }))
-        .unwrap()
-    }
-
-    fn comm_message(comm_id: &CommId, data: serde_json::Value) -> JupyterMessage {
-        let serde_json::Value::Object(data) = data else {
-            panic!("comm data must be an object");
-        };
-        JupyterMessage::new(
-            CommMsg {
-                comm_id: comm_id.clone(),
-                data,
-            },
-            None,
-        )
-    }
-
-    fn rpc_request(content: serde_json::Value) -> JupyterMessage {
-        JupyterMessage::new(
-            UnknownMessage {
-                msg_type: RPC_REQUEST_MSG_TYPE.to_string(),
-                content,
-            },
-            None,
-        )
-    }
-
-    fn rpc_reply_content(message: &JupyterMessage, request: &JupyterMessage) -> serde_json::Value {
-        assert_eq!(message.header.msg_type, RPC_REPLY_MSG_TYPE);
-        assert_eq!(
-            message.parent_header.as_ref().map(|header| &header.msg_id),
-            Some(&request.header.msg_id)
-        );
-        match &message.content {
-            JupyterMessageContent::UnknownMessage(unknown) => unknown.content.clone(),
-            other => panic!("expected rpc_reply, got {}", other.message_type()),
+            let comms = self.kernel.finish_startup(cx);
+            (comms.ui, comms.lsp)
         }
     }
 
@@ -2720,10 +2646,10 @@ mod tests {
         let script = temp.path().join("analysis.R");
         std::fs::write(&script, "1 + 1\n").unwrap();
 
-        assert_eq!(launch_directory(temp.path()).unwrap(), temp.path());
-        assert_eq!(launch_directory(&script).unwrap(), temp.path());
+        assert_eq!(launch_directory(temp.path(), "R").unwrap(), temp.path());
+        assert_eq!(launch_directory(&script, "R").unwrap(), temp.path());
         let missing = temp.path().join("missing").join("project");
-        let error = launch_directory(&missing).unwrap_err().to_string();
+        let error = launch_directory(&missing, "R").unwrap_err().to_string();
         assert!(error.contains("doesn't exist"), "{error}");
     }
 
@@ -2736,11 +2662,10 @@ mod tests {
             source: languages::r::RInstallationSource::Rig,
         };
         let session = cx.new(|cx| {
-            RSession::new(
-                Some(r),
+            KernelSession::new(
+                KernelLauncher::ark(Some(r), None),
                 PathBuf::from("/definitely/not/a/real/project"),
                 HashMap::default(),
-                None,
                 cx,
             )
         });
@@ -2760,11 +2685,10 @@ mod tests {
     fn test_unavailable_without_r(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
         let session = cx.new(|cx| {
-            RSession::new(
-                None,
+            KernelSession::new(
+                KernelLauncher::ark(None, None),
                 PathBuf::from("/projects/analysis"),
                 HashMap::default(),
-                None,
                 cx,
             )
         });

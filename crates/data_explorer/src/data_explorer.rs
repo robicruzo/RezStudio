@@ -16,7 +16,7 @@ use runtime::comms::{
     GetColumnProfilesParams, GetDataValuesParams, GetRowLabelsParams, GetSchemaParams, TableData,
     TableRowLabels, TableSchema,
 };
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry};
+use runtime::{KernelSession, SessionEvent, SessionLanguage};
 use std::ops::Range;
 use std::time::Duration;
 use ui::{
@@ -42,20 +42,16 @@ pub fn init(cx: &mut App) {
             return;
         };
         let workspace_id = cx.entity_id();
-        if let Some(registry) = SessionRegistry::global(cx) {
-            if let Some(session) = registry.read(cx).session(workspace_id).cloned() {
-                watch_session(workspace, &session, window, cx);
-            }
-            cx.subscribe_in(
-                &registry,
-                window,
-                move |workspace, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == workspace_id {
-                        watch_session(workspace, &event.session, window, cx);
-                    }
-                },
-            )
-            .detach();
+        let followed = runtime::follow_session(
+            workspace,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            |workspace, session, window, cx| watch_session(workspace, &session, window, cx),
+        );
+        if let Some(subscription) = followed {
+            subscription.detach();
         }
     })
     .detach();
@@ -63,7 +59,7 @@ pub fn init(cx: &mut App) {
 
 fn watch_session(
     _workspace: &mut Workspace,
-    session: &Entity<RSession>,
+    session: &Entity<KernelSession>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -86,7 +82,7 @@ fn watch_session(
 /// open, since `View()` is often run again on the same object.
 pub fn open_explorer(
     workspace: &mut Workspace,
-    session: Entity<RSession>,
+    session: Entity<KernelSession>,
     comm_id: String,
     title: String,
     window: &mut Window,
@@ -113,7 +109,7 @@ enum Status {
 }
 
 pub struct DataExplorerView {
-    session: Entity<RSession>,
+    session: Entity<KernelSession>,
     comm_id: String,
     title: SharedString,
     data: ExplorerData,
@@ -132,7 +128,7 @@ pub struct DataExplorerView {
 
 impl DataExplorerView {
     pub fn new(
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         comm_id: String,
         title: SharedString,
         window: &mut Window,
@@ -710,23 +706,21 @@ impl Item for DataExplorerView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::channel::mpsc;
+
     use gpui::{TestAppContext, VisualTestContext};
-    use jupyter_protocol::{
-        CommId, CommMsg, CommOpen, JupyterMessage, JupyterMessageContent, KernelInfoReply,
-    };
-    use languages::r::{RInstallationSource, RToolchainData};
+    use jupyter_protocol::{CommId, CommOpen, JupyterMessage, JupyterMessageContent};
+
     use project::{FakeFs, Project};
     use runtime::comms::{ColumnValue, DATA_EXPLORER_COMM_TARGET};
     use serde_json::{Value, json};
     use settings::SettingsStore;
-    use std::path::PathBuf;
+
+    use runtime::test_support::FakeKernel;
     use workspace::{MultiWorkspace, SaveIntent};
 
     struct Harness {
         workspace: Entity<Workspace>,
-        session: Entity<RSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
     }
 
     struct Request {
@@ -751,51 +745,17 @@ mod tests {
                 .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
-            let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
-                    PathBuf::from("/projects/analysis"),
-                    Default::default(),
-                    None,
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, _stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
-            let kernel_info = requests.try_recv().unwrap();
+            let mut kernel = FakeKernel::start("/projects/analysis", cx);
+            kernel.take_startup_requests();
+            let session = kernel.session.clone();
             workspace.update_in(cx, |workspace, window, cx| {
                 watch_session(workspace, &session, window, cx)
             });
-            let mut harness = Self {
-                workspace,
-                session,
-                requests,
-            };
-            let reply: KernelInfoReply = serde_json::from_value(json!({
-                "status": "ok", "protocol_version": "5.3", "implementation": "ark",
-                "implementation_version": "0.1.252",
-                "language_info": { "name": "R", "version": "4.5.3" },
-                "banner": "", "help_links": [], "debugger": false
-            }))
-            .unwrap();
-            harness.receive(JupyterMessage::new(reply, Some(&kernel_info)), cx);
+            let mut harness = Self { workspace, kernel };
+            harness.kernel.answer_kernel_info(cx);
             // The UI, LSP and variables comms the session opens at startup.
-            while harness.requests.try_recv().is_ok() {}
+            harness.kernel.take_requests();
             (harness, cx)
-        }
-
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
         }
 
         /// Ark opening an explorer, as `View(df)` does.
@@ -808,7 +768,7 @@ mod tests {
             let Value::Object(data) = json!({ "title": title, "inline_only": false }) else {
                 unreachable!()
             };
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(
                     CommOpen {
                         comm_id: CommId(comm_id.to_string()),
@@ -836,7 +796,7 @@ mod tests {
         }
 
         fn next(&mut self) -> Request {
-            let message = self.requests.try_recv().expect("a request to Ark");
+            let message = self.kernel.requests.try_recv().expect("a request to Ark");
             let (comm_id, method, params) = match &message.content {
                 JupyterMessageContent::CommMsg(comm_message) => (
                     comm_message.comm_id.0.clone(),
@@ -865,36 +825,17 @@ mod tests {
         fn answer(&mut self, method: &str, result: Value, cx: &mut VisualTestContext) -> Value {
             let request = self.next();
             assert_eq!(request.method, method);
-            let Value::Object(data) = json!({ "method": method, "result": result }) else {
-                unreachable!()
-            };
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: CommId(request.comm_id),
-                        data,
-                    },
-                    Some(&request.message),
-                ),
+            self.kernel.reply_to_comm_request(
+                &request.message,
+                json!({ "method": method, "result": result }),
                 cx,
             );
             request.params
         }
 
         fn event(&self, comm_id: &str, data: Value, cx: &mut VisualTestContext) {
-            let Value::Object(data) = data else {
-                panic!("event data must be an object");
-            };
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: CommId(comm_id.to_string()),
-                        data,
-                    },
-                    None,
-                ),
-                cx,
-            );
+            self.kernel
+                .send_comm_message(&CommId(comm_id.to_string()), data, cx);
         }
 
         /// Answers what a viewer asks when it (re)loads: the shape, the
@@ -932,7 +873,7 @@ mod tests {
         }
 
         fn assert_no_requests(&mut self) {
-            if let Ok(request) = self.requests.try_recv() {
+            if let Ok(request) = self.kernel.requests.try_recv() {
                 panic!("unexpected request {:?}", request.content);
             }
         }
@@ -1009,7 +950,7 @@ mod tests {
         // A long jump asks for at most four blocks at once; the rest wait.
         view.update(cx, |view, cx| view.ensure_rows(6_000_000..6_000_600, cx));
         let mut fetched = Vec::new();
-        while let Ok(request) = harness.requests.try_recv() {
+        while let Ok(request) = harness.kernel.requests.try_recv() {
             if let JupyterMessageContent::CommMsg(message) = &request.content
                 && message.data["method"] == "get_data_values"
             {
@@ -1108,11 +1049,12 @@ mod tests {
         let other = harness.open("explorer-3", "iris", cx);
         harness.load(10, false, cx);
         harness
+            .kernel
             .session
             .update(cx, |session, cx| session.stop(cx))
             .detach();
         cx.run_until_parked();
-        while harness.requests.try_recv().is_ok() {}
+        harness.kernel.take_requests();
         assert_eq!(
             other.read_with(cx, |view, _| view.status.clone()),
             Status::Closed

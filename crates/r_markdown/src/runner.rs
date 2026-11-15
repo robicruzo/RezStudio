@@ -12,7 +12,7 @@ use editor::{Anchor, Editor, MultiBufferSnapshot, ToPoint as _};
 use gpui::{AnyElement, App, Entity, MouseButton, Subscription, Task, WeakEntity, Window, px};
 use language::Point;
 use runtime::comms::PlotEvent;
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionEvent, SessionLanguage, SessionState};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +45,7 @@ struct LensBlock {
 pub struct ChunkRunner {
     editor: WeakEntity<Editor>,
     workspace: WeakEntity<Workspace>,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     outputs: Vec<OutputBlock>,
     lenses: Vec<LensBlock>,
     /// Chunks waiting to run, oldest first.
@@ -66,7 +66,7 @@ impl ChunkRunner {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut subscriptions = vec![cx.subscribe_in(
+        let subscriptions = vec![cx.subscribe_in(
             &editor.read(cx).buffer().clone(),
             window,
             |this, _, event, _, cx| {
@@ -76,17 +76,6 @@ impl ChunkRunner {
             },
         )];
         let workspace_id = workspace.entity_id();
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                move |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == workspace_id {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
         let mut this = Self {
             editor: editor.downgrade(),
             workspace: workspace.downgrade(),
@@ -104,18 +93,22 @@ impl ChunkRunner {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this.rescan(cx);
         this
     }
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -347,7 +340,7 @@ impl ChunkRunner {
         &mut self,
         header: Anchor,
         chunk: &Chunk,
-        session: &Entity<RSession>,
+        session: &Entity<KernelSession>,
         aspect: Option<f32>,
         _window: &mut Window,
         cx: &mut Context<Self>,

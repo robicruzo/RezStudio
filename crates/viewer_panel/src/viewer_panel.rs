@@ -3,10 +3,10 @@
 
 use anyhow::Result;
 use gpui::{
-    Action, App, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Pixels, Subscription, WeakEntity, Window, actions, px,
+    Action, App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    Subscription, WeakEntity, Window, actions, px,
 };
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionEvent, SessionLanguage, SessionState};
 use std::path::PathBuf;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -71,18 +71,8 @@ fn page_darkening(cx: &App) -> Option<PageDarkening> {
     ))
 }
 
-/// The setting that flips dark mode from `is_on`. An explicit value replaces
-/// `follow_theme`, as the toggle is the user's choice for now.
-fn toggled_dark_mode(is_on: bool) -> settings::DarkModeContent {
-    if is_on {
-        settings::DarkModeContent::Off
-    } else {
-        settings::DarkModeContent::On
-    }
-}
-
 fn toggle_dark_mode(cx: &mut App) {
-    let dark_mode = toggled_dark_mode(is_dark_mode_on(cx));
+    let dark_mode = settings::DarkModeContent::toggled(is_dark_mode_on(cx));
     settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
         settings.viewer.get_or_insert_default().dark_mode = Some(dark_mode);
     });
@@ -193,8 +183,7 @@ impl History {
 
 pub struct ViewerPanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     web_view: Entity<WebView>,
     history: History,
     /// Whether the pane is the one shown in its dock.
@@ -231,7 +220,7 @@ impl ViewerPanel {
         let workspace_handle = workspace.weak_handle();
         let workspace_id = workspace_handle.entity_id();
         let page_focus = cx.focus_handle();
-        let mut subscriptions = vec![
+        let subscriptions = vec![
             cx.subscribe_in(
                 &web_view,
                 window,
@@ -244,17 +233,6 @@ impl ViewerPanel {
                 this.web_view.read(cx).release_keyboard();
             }),
         ];
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
         // The workspace is being updated now, and watching it reads it.
         cx.defer_in(window, |this, window, cx| {
             let Some(workspace) = this.workspace.upgrade() else {
@@ -273,7 +251,6 @@ impl ViewerPanel {
         });
         let mut this = Self {
             workspace: workspace_handle,
-            workspace_id,
             session: None,
             web_view,
             history: History::default(),
@@ -285,17 +262,21 @@ impl ViewerPanel {
             _cover_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -738,13 +719,12 @@ impl Panel for ViewerPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::channel::mpsc;
+
     use gpui::{TestAppContext, VisualTestContext};
-    use jupyter_protocol::{
-        CommId, CommMsg, JupyterMessage, JupyterMessageContent, KernelInfoReply,
-    };
-    use languages::r::{RInstallationSource, RToolchainData};
+    use jupyter_protocol::CommId;
+
     use project::{FakeFs, Project};
+    use runtime::test_support::FakeKernel;
     use serde_json::{Value, json};
     use settings::SettingsStore;
     use std::cell::RefCell;
@@ -789,17 +769,9 @@ mod tests {
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<ViewerPanel>,
-        session: Entity<RSession>,
+        kernel: FakeKernel,
         calls: Rc<RefCell<Vec<String>>>,
-        requests: mpsc::Receiver<JupyterMessage>,
         ui_comm: CommId,
-    }
-
-    fn object(value: Value) -> serde_json::Map<String, Value> {
-        match value {
-            Value::Object(object) => object,
-            other => panic!("expected an object, got {other}"),
-        }
     }
 
     impl Harness {
@@ -818,30 +790,9 @@ mod tests {
                 .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
-            let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
-                    PathBuf::from("/projects/analysis"),
-                    Default::default(),
-                    None,
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, _stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
-            let kernel_info = requests.try_recv().unwrap();
-            let ui_comm = match requests.try_recv().unwrap().content {
-                JupyterMessageContent::CommOpen(open) => open.comm_id,
-                other => panic!("expected the UI comm, got {}", other.message_type()),
-            };
-            while requests.try_recv().is_ok() {}
+            let mut kernel = FakeKernel::start("/projects/analysis", cx);
+            let comms = kernel.take_startup_requests();
+            let session = kernel.session.clone();
 
             let calls: Rc<RefCell<Vec<String>>> = Rc::default();
             let web_view =
@@ -855,43 +806,19 @@ mod tests {
                 workspace.add_panel(panel.clone(), window, cx);
                 panel
             });
-            let harness = Self {
+            let mut harness = Self {
                 workspace,
                 panel,
-                session,
+                kernel,
                 calls,
-                requests,
-                ui_comm,
+                ui_comm: comms.ui,
             };
-            let reply: KernelInfoReply = serde_json::from_value(json!({
-                "status": "ok", "protocol_version": "5.3", "implementation": "ark",
-                "implementation_version": "0.1.252",
-                "language_info": { "name": "R", "version": "4.5.3" },
-                "banner": "", "help_links": [], "debugger": false
-            }))
-            .unwrap();
-            harness.receive(JupyterMessage::new(reply, Some(&kernel_info)), cx);
+            harness.kernel.answer_kernel_info(cx);
             (harness, cx)
         }
 
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
-        }
-
         fn ui_event(&self, data: Value, cx: &mut VisualTestContext) {
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: self.ui_comm.clone(),
-                        data: object(data),
-                    },
-                    None,
-                ),
-                cx,
-            );
+            self.kernel.send_comm_message(&self.ui_comm, data, cx);
         }
 
         fn show_widget(&self, path: &str, cx: &mut VisualTestContext) {
@@ -1067,12 +994,6 @@ mod tests {
         assert!((divider(cx) - 0.1).abs() < 0.001, "{}", divider(cx));
     }
 
-    #[test]
-    fn test_toggling_dark_mode_sets_it_explicitly() {
-        assert_eq!(toggled_dark_mode(true), settings::DarkModeContent::Off);
-        assert_eq!(toggled_dark_mode(false), settings::DarkModeContent::On);
-    }
-
     #[gpui::test]
     async fn test_dark_mode_reaches_the_page(cx: &mut TestAppContext) {
         let (harness, cx) = Harness::new(cx).await;
@@ -1153,17 +1074,18 @@ mod tests {
         let (mut harness, cx) = Harness::new(cx).await;
         // `shiny::runApp()` keeps R busy while the app runs.
         harness
+            .kernel
             .session
             .update(cx, |session, cx| {
                 session.execute("shiny::runApp()".into(), cx)
             })
             .unwrap();
         harness.show_app(APP, cx);
-        while harness.requests.try_recv().is_ok() {}
+        harness.kernel.take_requests();
         assert!(harness.panel.read_with(cx, |panel, cx| panel.is_busy(cx)));
 
         harness.panel.update(cx, |panel, cx| panel.stop(cx));
-        let interrupt = std::iter::from_fn(|| harness.requests.try_recv().ok())
+        let interrupt = std::iter::from_fn(|| harness.kernel.requests.try_recv().ok())
             .find(|request| request.content.message_type() == "interrupt_request");
         assert!(interrupt.is_some());
     }

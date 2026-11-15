@@ -8,15 +8,15 @@ mod tree;
 use anyhow::{Context as _, Result};
 use editor::{Editor, MultiBuffer};
 use gpui::{
-    Action, Anchor, App, AsyncWindowContext, Empty, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, PathPromptOptions, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window,
-    actions, px, uniform_list,
+    Action, Anchor, App, AsyncWindowContext, Empty, Entity, EventEmitter, FocusHandle, Focusable,
+    PathPromptOptions, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window, actions, px,
+    uniform_list,
 };
 use import_dataset::{ImportDataset, Source};
 use memory::{MemorySampler, MemoryUsage, format_memory};
 use r_console::ConsolePanel;
 use runtime::comms::{InspectedVariable, VariableKind, VariablesEvent};
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionEvent, SessionLanguage, SessionState};
 use std::ops::Range;
 use std::path::Path;
 use std::time::Duration;
@@ -59,8 +59,7 @@ pub fn init(cx: &mut App) {
 
 pub struct EnvironmentPanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     /// The global environment, kept live by Ark's variables comm.
     tree: VariableTree,
     /// The `package:` entries on R's search path, for the environment menu.
@@ -97,25 +96,13 @@ impl EnvironmentPanel {
             editor.set_placeholder_text("Filter by name", window, cx);
             editor
         });
-        let mut subscriptions = vec![cx.subscribe(&filter, |this, _, event, cx| {
+        let subscriptions = vec![cx.subscribe(&filter, |this, _, event, cx| {
             if let editor::EditorEvent::BufferEdited = event {
                 this.rebuild_rows(cx);
             }
         })];
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
         let mut this = Self {
             workspace: workspace.weak_handle(),
-            workspace_id,
             session: None,
             tree: VariableTree::default(),
             attached_packages: Vec::new(),
@@ -131,17 +118,21 @@ impl EnvironmentPanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1169,13 +1160,12 @@ impl Panel for EnvironmentPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::channel::mpsc;
+
     use gpui::{Modifiers, TestAppContext, VisualTestContext};
-    use jupyter_protocol::{
-        CommId, CommMsg, JupyterMessage, JupyterMessageContent, KernelInfoReply,
-    };
-    use languages::r::{RInstallationSource, RToolchainData};
+    use jupyter_protocol::{CommId, CommMsg, JupyterMessage, JupyterMessageContent};
+
     use project::{FakeFs, Project};
+    use runtime::test_support::FakeKernel;
     use serde_json::json;
     use settings::SettingsStore;
     use std::path::PathBuf;
@@ -1183,8 +1173,7 @@ mod tests {
 
     struct Harness {
         panel: Entity<EnvironmentPanel>,
-        session: Entity<RSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
         variables_comm: CommId,
     }
 
@@ -1210,69 +1199,25 @@ mod tests {
                 workspace.open_panel::<EnvironmentPanel>(window, cx);
                 panel
             });
-            let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
-                    PathBuf::from("/projects/analysis"),
-                    Default::default(),
-                    None,
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, _stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
+            let mut kernel = FakeKernel::start("/projects/analysis", cx);
+            let comms = kernel.take_startup_requests();
             panel.update_in(cx, |panel, window, cx| {
-                panel.set_session(session.clone(), window, cx)
+                panel.set_session(kernel.session.clone(), window, cx)
             });
-            let kernel_info = requests.try_recv().unwrap();
-            while requests.try_recv().is_ok() {}
-            let variables_comm = CommId(session.read_with(cx, |session, _| {
-                session.variables_comm_id().unwrap().to_string()
-            }));
-            let harness = Self {
+            kernel.take_requests();
+            let variables_comm = comms.variables;
+            let mut harness = Self {
                 panel,
-                session,
-                requests,
+                kernel,
                 variables_comm,
             };
-            let reply: KernelInfoReply = serde_json::from_value(json!({
-                "status": "ok", "protocol_version": "5.3", "implementation": "ark",
-                "implementation_version": "0.1.252", "language_info": { "name": "R", "version": "4.5.3" },
-                "banner": "", "help_links": [], "debugger": false
-            }))
-            .unwrap();
-            harness.receive(JupyterMessage::new(reply, Some(&kernel_info)), cx);
+            harness.kernel.answer_kernel_info(cx);
             (harness, cx)
         }
 
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
-        }
-
         fn send_variables_event(&self, data: serde_json::Value, cx: &mut VisualTestContext) {
-            let serde_json::Value::Object(data) = data else {
-                panic!("event data must be an object");
-            };
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: self.variables_comm.clone(),
-                        data,
-                    },
-                    None,
-                ),
-                cx,
-            );
+            self.kernel
+                .send_comm_message(&self.variables_comm, data, cx);
         }
 
         /// Answers the next comm request with `result`, returning its method and params.
@@ -1281,7 +1226,7 @@ mod tests {
             result: serde_json::Value,
             cx: &mut VisualTestContext,
         ) -> (String, serde_json::Value) {
-            let request = self.requests.try_recv().expect("a comm request");
+            let request = self.kernel.requests.try_recv().expect("a comm request");
             let JupyterMessageContent::CommMsg(comm_message) = &request.content else {
                 panic!("expected comm_msg, got {}", request.header.msg_type);
             };
@@ -1290,18 +1235,9 @@ mod tests {
                 .unwrap_or_default()
                 .to_string();
             let params = comm_message.data.get("params").cloned().unwrap_or_default();
-            let serde_json::Value::Object(reply) = json!({ "method": method, "result": result })
-            else {
-                unreachable!()
-            };
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: comm_message.comm_id.clone(),
-                        data: reply,
-                    },
-                    Some(&request),
-                ),
+            self.kernel.reply_to_comm_request(
+                &request,
+                json!({ "method": method, "result": result }),
                 cx,
             );
             (method, params)
@@ -1418,7 +1354,11 @@ mod tests {
         let (mut harness, cx) = Harness::new(cx).await;
         let mut next_code = |cx: &mut VisualTestContext| {
             cx.run_until_parked();
-            let request = harness.requests.try_recv().expect("an execute request");
+            let request = harness
+                .kernel
+                .requests
+                .try_recv()
+                .expect("an execute request");
             match &request.content {
                 JupyterMessageContent::ExecuteRequest(execute) => execute.code.clone(),
                 other => panic!("expected execute_request, got {other:?}"),
@@ -1448,7 +1388,7 @@ mod tests {
         });
         cx.simulate_path_prompt_response(|_| None);
         cx.run_until_parked();
-        assert!(harness.requests.try_recv().is_err());
+        assert!(harness.kernel.requests.try_recv().is_err());
     }
 
     #[gpui::test]
@@ -1513,7 +1453,11 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(modal(cx).is_none(), "importing closes the dialog");
-        let request = harness.requests.try_recv().expect("an execute request");
+        let request = harness
+            .kernel
+            .requests
+            .try_recv()
+            .expect("an execute request");
         let JupyterMessageContent::ExecuteRequest(execute) = &request.content else {
             panic!("expected execute_request, got {}", request.header.msg_type);
         };
@@ -1594,7 +1538,7 @@ mod tests {
         });
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
-        assert!(harness.requests.try_recv().is_err());
+        assert!(harness.kernel.requests.try_recv().is_err());
         harness.panel.update_in(cx, |panel, window, cx| {
             panel.clear_environment(&ClearEnvironment, window, cx)
         });
@@ -1620,7 +1564,7 @@ mod tests {
         harness
             .panel
             .update(cx, |panel, cx| panel.delete("cars".to_string(), cx));
-        let request = harness.requests.try_recv().unwrap();
+        let request = harness.kernel.requests.try_recv().unwrap();
         let JupyterMessageContent::CommMsg(comm_message) = &request.content else {
             panic!("expected comm_msg");
         };
@@ -1628,7 +1572,7 @@ mod tests {
         else {
             unreachable!()
         };
-        harness.receive(
+        harness.kernel.receive(
             JupyterMessage::new(
                 CommMsg {
                     comm_id: comm_message.comm_id.clone(),
@@ -1646,6 +1590,7 @@ mod tests {
         }));
 
         harness
+            .kernel
             .session
             .update(cx, |session, cx| session.stop(cx))
             .detach();
@@ -1742,7 +1687,7 @@ mod tests {
         assert_eq!(harness.row_names(cx), ["[Functions]", "acf", "lm"]);
 
         // Detaching the package shown goes back to the global environment.
-        harness.session.update(cx, |_, cx| {
+        harness.kernel.session.update(cx, |_, cx| {
             cx.emit(SessionEvent::ExecutionFinished {
                 request_id: "detach".to_string(),
                 succeeded: true,

@@ -179,17 +179,18 @@ fn with_runner(
 mod tests {
     use super::*;
     use crate::output::RunState;
-    use futures::channel::mpsc;
+
     use gpui::{Focusable as _, TestAppContext, VisualContext as _, VisualTestContext};
     use jupyter_protocol::{
         CommId, CommMsg, CommOpen, ExecuteReply, JupyterMessage, JupyterMessageContent,
-        KernelInfoReply, ReplyStatus, Status, Stdio, StreamContent,
+        ReplyStatus, Status, Stdio, StreamContent,
     };
     use language::{Language, LanguageConfig, LanguageMatcher};
-    use languages::r::{RInstallationSource, RToolchainData};
+
     use project::{FakeFs, Project};
-    use runtime::RSession;
+
     use runtime::comms::PLOT_COMM_TARGET;
+    use runtime::test_support::FakeKernel;
     use serde_json::json;
     use settings::SettingsStore;
     use std::path::{Path, PathBuf};
@@ -227,8 +228,7 @@ c <- 3
     struct Harness {
         editor: Entity<Editor>,
         runner: Entity<ChunkRunner>,
-        session: Entity<RSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
     }
 
     impl Harness {
@@ -294,58 +294,26 @@ c <- 3
                 })
                 .expect("an R Markdown editor gets a runner");
 
-            let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
-                    PathBuf::from("/project"),
-                    Default::default(),
-                    None,
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, _stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
-            let kernel_info = requests.try_recv().unwrap();
+            let mut kernel = FakeKernel::start("/project", cx);
+            kernel.take_startup_requests();
+            let session = kernel.session.clone();
             runner.update_in(cx, |runner, window, cx| {
                 runner.set_session(session.clone(), window, cx)
             });
-            let harness = Self {
+            let mut harness = Self {
                 editor,
                 runner,
-                session,
-                requests,
+                kernel,
             };
-            let reply: KernelInfoReply = serde_json::from_value(json!({
-                "status": "ok", "protocol_version": "5.3", "implementation": "ark",
-                "implementation_version": "0.1.252",
-                "language_info": { "name": "R", "version": "4.5.3" },
-                "banner": "", "help_links": [], "debugger": false
-            }))
-            .unwrap();
-            let mut harness = harness;
-            harness.receive(JupyterMessage::new(reply, Some(&kernel_info)), cx);
-            while harness.requests.try_recv().is_ok() {}
+            harness.kernel.answer_kernel_info(cx);
+            harness.kernel.take_requests();
             (harness, cx)
-        }
-
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
         }
 
         /// The code of the next execute request.
         fn next_execution(&mut self) -> (String, JupyterMessage) {
             loop {
-                let request = self.requests.try_recv().expect("an execute request");
+                let request = self.kernel.requests.try_recv().expect("an execute request");
                 if let JupyterMessageContent::ExecuteRequest(execute) = &request.content {
                     return (execute.code.clone(), request);
                 }
@@ -353,7 +321,7 @@ c <- 3
         }
 
         fn no_execution(&mut self) {
-            while let Ok(request) = self.requests.try_recv() {
+            while let Ok(request) = self.kernel.requests.try_recv() {
                 assert!(
                     !matches!(request.content, JupyterMessageContent::ExecuteRequest(_)),
                     "unexpected execution"
@@ -370,8 +338,10 @@ c <- 3
                 },
                 ..ExecuteReply::default()
             };
-            self.receive(JupyterMessage::new(reply, Some(request)), cx);
-            self.receive(JupyterMessage::new(Status::idle(), Some(request)), cx);
+            self.kernel
+                .receive(JupyterMessage::new(reply, Some(request)), cx);
+            self.kernel
+                .receive(JupyterMessage::new(Status::idle(), Some(request)), cx);
         }
 
         fn outputs(&self, cx: &mut VisualTestContext) -> Vec<(RunState, usize)> {
@@ -415,11 +385,12 @@ c <- 3
         assert_eq!(code, "x <- 1");
         assert!(
             harness
+                .kernel
                 .session
                 .read_with(cx, |session, _| session.is_inline(&request.header.msg_id))
         );
         assert_eq!(harness.outputs(cx), [(RunState::Running, 0)]);
-        harness.receive(
+        harness.kernel.receive(
             JupyterMessage::new(
                 StreamContent {
                     name: Stdio::Stdout,
@@ -507,7 +478,7 @@ c <- 3
         harness.run(|runner, window, cx| runner.run_chunk_at(14, window, cx), cx);
         let (code, request) = harness.next_execution();
         assert_eq!(code, "plot(x)");
-        harness.receive(
+        harness.kernel.receive(
             JupyterMessage::new(
                 CommOpen {
                     comm_id: CommId("plot-1".into()),
@@ -521,7 +492,11 @@ c <- 3
         );
         // R draws it at the output's width, in the chunk's shape (7 by 5 by default).
         let render = loop {
-            let message = harness.requests.try_recv().expect("a render request");
+            let message = harness
+                .kernel
+                .requests
+                .try_recv()
+                .expect("a render request");
             if let JupyterMessageContent::CommMsg(comm) = &message.content
                 && comm.data["method"] == "render"
             {
@@ -543,7 +518,7 @@ c <- 3
         }}) else {
             unreachable!()
         };
-        harness.receive(
+        harness.kernel.receive(
             JupyterMessage::new(
                 CommMsg {
                     comm_id: CommId("plot-1".into()),
@@ -561,7 +536,7 @@ c <- 3
 
         // Clearing the output lets R free the plot.
         harness.run(|runner, _, cx| runner.clear_outputs(cx), cx);
-        let closed = std::iter::from_fn(|| harness.requests.try_recv().ok())
+        let closed = std::iter::from_fn(|| harness.kernel.requests.try_recv().ok())
             .any(|message| matches!(&message.content, JupyterMessageContent::CommClose(close) if close.comm_id.0 == "plot-1"));
         assert!(closed);
     }

@@ -90,7 +90,7 @@ merges stay tractable.
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Panes never talk to a kernel directly. They subscribe to a `RuntimeSession` entity and its
+Panes never talk to a kernel directly. They subscribe to a `KernelSession` entity and its
 typed comm channels. Because Python implements the same comms as Ark, every pane works for both
 languages without language-specific code paths beyond formatting.
 
@@ -1569,6 +1569,74 @@ right end of each pane's tab row.
   both panes with the buttons; the lower pane minimized with the page's web view hidden;
   restored; the lower pane maximized with the widget redrawn to fill the column; and
   revealing the Viewer restoring both. The dock's edge stayed put throughout.
+
+### Refactoring before M10 (done)
+
+A behavior-preserving refactor that readies the runtime for a second language and removes
+duplication. Nothing users see changed. The milestone plans above keep the old name,
+`RSession`, where they describe what was built then.
+
+- **A language-neutral session:** `RSession` is now `KernelSession`, and it carries its
+  language, a `SessionLanguage` (only `R` so far). `SessionRegistry` keys sessions by
+  workspace and language, `SessionAdded` carries the language, and `session_for_workspace`
+  takes it. The session's messages name its language, which reads the same for R.
+- **The M10 seam:** `runtime/src/kernel.rs`. A `KernelLauncher` finds a language's
+  interpreter and starts its kernel, returning a `KernelProcess` and its `KernelConnections`
+  (the Jupyter sockets). The session asks its launcher only two things: whether a kernel can
+  be started (`unavailable_reason`) and to `launch` it. `ArkLauncher`, in `ark.rs`, is the
+  only launcher: it holds the R installation and the bundled Ark, finds Ark and starts it.
+  M10 adds a launcher for ipykernel, a `SessionLanguage::Python`, and a second
+  `start_session` call in `runtime::init`. The comm handling in `session.rs` stays as it is,
+  as Python's add-on speaks Ark's comms.
+- **What's still R-only:** `start_session` restarts Ark's language server when R restarts,
+  the LSP bridge finds the R session by its project root, and `r_installation` is on the
+  session for the console's version line and the Render tab. The panes ask for
+  `SessionLanguage::R`.
+- **Following a session:** `runtime::follow_session(this, workspace_id, language, …)` calls
+  back with the workspace's session now, if it exists, and with each one created later.
+  It replaces the same subscription written out in the console, Environment, data viewer,
+  Plots, Packages, Help, Viewer and the chunk runner. Panes that kept their workspace's id
+  only for that no longer do.
+- **A shared test harness:** `runtime::test_support::FakeKernel` is a session connected to a
+  kernel the test plays by hand. `take_startup_requests` returns the UI, LSP, variables and
+  help comms, `answer_kernel_info` makes the session idle, and `receive`,
+  `send_comm_message` and `reply_to_comm_request` deliver Ark's side. Nine crates' tests had
+  their own copy of this setup; their assertions are unchanged. `test_support` also still
+  has `Kernel`, the client for a real Ark.
+- **Dark mode's toggle:** `DarkModeContent::toggled` holds the rule both moon buttons use
+  (an explicit `on` or `off` replaces `follow_theme`). Each pane keeps reading and writing
+  its own setting.
+- **Checked:** the tests of the ten crates and `./script/clippy` after each step, and the
+  real-R tests of `runtime`, `variables_panel` and `render_panel`.
+
+## Gaps for people switching from RStudio or Positron (candidates, after 0.0.1)
+
+These are what a statistician who uses RStudio or Positron daily would miss in 0.0.1, in roughly
+the order they'd hit them. None of them is scheduled yet. Each would become a milestone or join
+one when it's planned.
+
+| # | Gap | What RStudio and Positron do | Notes |
+|---|---|---|---|
+| C1 | **Data viewer filters and summaries** | Positron's Data Explorer filters rows, searches, and shows a summary panel with column statistics and histograms. RStudio filters and searches. | `View()` here pages and sorts only. M2 left row filters and column summaries for later. Ark's data explorer comm already has filter and summary requests. |
+| C2 | **Debugger** | Breakpoints, stepping, and the call stack and frame variables while stopped. | Planned as M12. |
+| C3 | **Python** | Positron runs Python sessions with every pane. `reticulate` users switch between R and Python. | Planned as M10. |
+| C4 | **History pane** | RStudio's History tab lists past commands, searches them, and sends them to the console or a script. | Console up-arrow history works. The planned layout's Environment · History has no History yet. |
+| C5 | **Package development** | RStudio's Build pane has Install and Restart, Check, Test and Document. Code → Insert Roxygen Skeleton. | Everything can be typed in the console today. A Build pane appears when the project is a package. |
+| C6 | **Addins menu** | RStudio lists installed addins (from each package's `rstudio/addins.dcf`) and runs them. | Addins that call `rstudioapi` should work, but nothing launches them. |
+| C7 | **Connections pane** | Browses databases opened with DBI or odbc: schemas, tables and previews. | Ark has a connections comm. |
+| C8 | **Background jobs** | Runs a script in a separate R session, with its output in a Jobs tab. | |
+| C9 | **Visual editor for R Markdown and Quarto** | RStudio's Visual mode edits documents as formatted text. | A big piece of work. Render and inline chunks already cover the main workflow. |
+| C10 | **Publishing** | Publishes to Posit Connect, shinyapps.io and RPubs. | Through `rsconnect`, which can be run from the console today. |
+| C11 | **RStudio shortcuts and editor habits** | RStudio's keymap: reformat code, extract a function, comment lines, `%>%` from Cmd+Shift+M when set. | Cmd+Enter, Cmd+Shift+S, Cmd+Shift+K and Cmd+Shift+M (inserting `\|>`) work. List the most-used remaining shortcuts and map them. |
+| C12 | **Distribution** | Signed and notarized installers that update themselves. | See Open questions: notarization needs an Apple Developer account, and there's no update feed yet. Also remove the startup check for a zed.dev sign-in, which can prompt for the keychain. |
+
+Two gaps go against agreed decisions, so they'd mean revisiting those decisions rather than
+planning a milestone:
+- **Other platforms and a server version.** Windows, Linux, Intel Macs, and a browser-based
+  version like RStudio Server or Posit Workbench, which many universities and companies use.
+  The Platform decision is macOS only.
+- **AI help.** Positron has its Assistant and RStudio has Copilot. The AI decision removed AI
+  entirely.
 
 ## Risks
 

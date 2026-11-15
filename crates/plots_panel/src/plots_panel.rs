@@ -11,14 +11,14 @@ use fitting::{
     Darkening, PlotImage, Viewport, ViewportChange, decode_plot, describe_render_error, redraw_plot,
 };
 use gpui::{
-    Action, App, AsyncWindowContext, ClipboardItem, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, Pixels, PromptLevel, Size, Subscription, Task, WeakEntity, Window, actions, px,
+    Action, App, AsyncWindowContext, ClipboardItem, Entity, EventEmitter, FocusHandle, Focusable,
+    Pixels, PromptLevel, Size, Subscription, Task, WeakEntity, Window, actions, px,
 };
 use history::PlotHistory;
 use runtime::comms::{
     PlotEvent, PlotRenderFormat, PlotRenderSettings, PlotResult, PlotSize, RenderParams,
 };
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry};
+use runtime::{KernelSession, SessionEvent, SessionLanguage};
 use std::path::PathBuf;
 use std::sync::Arc;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
@@ -80,18 +80,8 @@ pub fn is_dark_mode_on(cx: &App) -> bool {
         .is_on(!cx.theme().appearance.is_light())
 }
 
-/// The setting that flips dark mode from `is_on`. An explicit value replaces
-/// `follow_theme`, as the toggle is the user's choice for now.
-fn toggled_dark_mode(is_on: bool) -> settings::DarkModeContent {
-    if is_on {
-        settings::DarkModeContent::Off
-    } else {
-        settings::DarkModeContent::On
-    }
-}
-
 fn toggle_dark_mode(cx: &mut App) {
-    let dark_mode = toggled_dark_mode(is_dark_mode_on(cx));
+    let dark_mode = settings::DarkModeContent::toggled(is_dark_mode_on(cx));
     settings::update_settings_file(<dyn fs::Fs>::global(cx), cx, move |settings, _| {
         settings.plots.get_or_insert_default().dark_mode = Some(dark_mode);
     });
@@ -116,8 +106,7 @@ pub(crate) struct PlotExport {
 
 pub struct PlotsPanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     history: PlotHistory<PlotImage>,
     viewport: Viewport,
     /// The last format and size a plot was saved with.
@@ -153,21 +142,9 @@ impl PlotsPanel {
     pub fn new(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace_handle = workspace.weak_handle();
         let workspace_id = workspace_handle.entity_id();
-        let mut subscriptions = Vec::new();
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
+        let subscriptions = Vec::new();
         let mut this = Self {
             workspace: workspace_handle,
-            workspace_id,
             session: None,
             history: PlotHistory::default(),
             viewport: Viewport::default(),
@@ -183,17 +160,21 @@ impl PlotsPanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -872,17 +853,16 @@ impl Panel for PlotsPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::channel::mpsc;
+
     use gpui::{TestAppContext, VisualTestContext, size};
-    use jupyter_protocol::{
-        CommId, CommMsg, CommOpen, JupyterMessage, JupyterMessageContent, KernelInfoReply,
-    };
-    use languages::r::{RInstallationSource, RToolchainData};
+    use jupyter_protocol::{CommId, CommMsg, CommOpen, JupyterMessage, JupyterMessageContent};
+
     use project::{FakeFs, Project};
     use runtime::comms::PLOT_COMM_TARGET;
     use serde_json::{Value, json};
     use settings::SettingsStore;
-    use std::path::PathBuf;
+
+    use runtime::test_support::FakeKernel;
     use workspace::MultiWorkspace;
 
     #[gpui::test]
@@ -920,8 +900,7 @@ mod tests {
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<PlotsPanel>,
-        session: Entity<RSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
         ui_comm: String,
     }
 
@@ -948,29 +927,9 @@ mod tests {
                 .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
-            let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
-                    PathBuf::from("/projects/analysis"),
-                    Default::default(),
-                    None,
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, _stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
-            let kernel_info = requests.try_recv().unwrap();
-            let ui_comm = match requests.try_recv().unwrap().content {
-                JupyterMessageContent::CommOpen(open) => open.comm_id.0,
-                other => panic!("expected the UI comm, got {}", other.message_type()),
-            };
+            let mut kernel = FakeKernel::start("/projects/analysis", cx);
+            let comms = kernel.take_startup_requests();
+            let session = kernel.session.clone();
             let panel = workspace.update_in(cx, |workspace, window, cx| {
                 let panel = cx.new(|cx| {
                     let mut panel = PlotsPanel::new(workspace, window, cx);
@@ -983,28 +942,13 @@ mod tests {
             let mut harness = Self {
                 workspace,
                 panel,
-                session,
-                requests,
-                ui_comm,
+                kernel,
+                ui_comm: comms.ui.0,
             };
-            let reply: KernelInfoReply = serde_json::from_value(json!({
-                "status": "ok", "protocol_version": "5.3", "implementation": "ark",
-                "implementation_version": "0.1.252",
-                "language_info": { "name": "R", "version": "4.5.3" },
-                "banner": "", "help_links": [], "debugger": false
-            }))
-            .unwrap();
-            harness.receive(JupyterMessage::new(reply, Some(&kernel_info)), cx);
+            harness.kernel.answer_kernel_info(cx);
             // The rest of startup: `frontend_ready` and the LSP and variables comms.
-            while harness.requests.try_recv().is_ok() {}
+            harness.kernel.take_requests();
             (harness, cx)
-        }
-
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
         }
 
         /// Ark sending a new plot, drawn at `drawn_at`.
@@ -1012,7 +956,7 @@ mod tests {
             let Value::Object(data) = json!({ "pre_render": pre_render(drawn_at) }) else {
                 unreachable!()
             };
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(
                     CommOpen {
                         comm_id: CommId(comm_id.to_string()),
@@ -1027,23 +971,12 @@ mod tests {
         }
 
         fn event(&self, comm_id: &str, data: Value, cx: &mut VisualTestContext) {
-            let Value::Object(data) = data else {
-                panic!("event data must be an object");
-            };
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: CommId(comm_id.to_string()),
-                        data,
-                    },
-                    None,
-                ),
-                cx,
-            );
+            self.kernel
+                .send_comm_message(&CommId(comm_id.to_string()), data, cx);
         }
 
         fn drain(&mut self) -> Vec<(Request, JupyterMessage)> {
-            std::iter::from_fn(|| self.requests.try_recv().ok())
+            std::iter::from_fn(|| self.kernel.requests.try_recv().ok())
                 .map(|message| {
                     let request = match &message.content {
                         JupyterMessageContent::CommMsg(comm) => Request {
@@ -1096,7 +1029,7 @@ mod tests {
             else {
                 unreachable!()
             };
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(
                     CommMsg {
                         comm_id: CommId(comm_id.to_string()),
@@ -1109,22 +1042,7 @@ mod tests {
         }
 
         fn reply(&self, request: &JupyterMessage, data: Value, cx: &mut VisualTestContext) {
-            let Value::Object(data) = data else {
-                panic!("reply data must be an object");
-            };
-            let JupyterMessageContent::CommMsg(comm) = &request.content else {
-                panic!("expected a comm request");
-            };
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: comm.comm_id.clone(),
-                        data,
-                    },
-                    Some(request),
-                ),
-                cx,
-            );
+            self.kernel.reply_to_comm_request(request, data, cx);
         }
 
         /// The settings that fill the pane as it's laid out now.
@@ -1389,12 +1307,6 @@ mod tests {
         assert!(harness.requests().is_empty());
     }
 
-    #[test]
-    fn test_toggling_dark_mode_sets_it_explicitly() {
-        assert_eq!(toggled_dark_mode(true), settings::DarkModeContent::Off);
-        assert_eq!(toggled_dark_mode(false), settings::DarkModeContent::On);
-    }
-
     #[gpui::test]
     async fn test_dark_mode_darkens_only_whats_shown(cx: &mut TestAppContext) {
         let (mut harness, cx) = Harness::new(cx).await;
@@ -1646,12 +1558,13 @@ mod tests {
             .workspace
             .read_with(cx, |workspace, _| workspace.right_dock().clone());
         harness
+            .kernel
             .session
             .update(cx, |session, cx| {
                 session.execute_inline("plot(1)".into(), cx)
             })
             .unwrap();
-        harness.requests.try_recv().unwrap();
+        harness.kernel.requests.try_recv().unwrap();
 
         harness.open_plot("chunk-plot", ark_default(), cx);
         harness.event(
@@ -1674,12 +1587,13 @@ mod tests {
         harness.answer_render("plot-1", cx);
 
         harness
+            .kernel
             .session
             .update(cx, |session, cx| session.stop(cx))
             .detach();
         cx.run_until_parked();
         // Ark's shutdown request.
-        while harness.requests.try_recv().is_ok() {}
+        harness.kernel.take_requests();
         harness.panel.read_with(cx, |panel, _| {
             let plot = panel.history.current().unwrap();
             assert!(!plot.live);

@@ -288,8 +288,12 @@ impl RenderPanel {
         self.start(document.clone(), window, cx);
 
         // R's environment: the project's shell environment and its R.
-        let session = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(self.workspace_id).cloned());
+        let session = SessionRegistry::global(cx).and_then(|registry| {
+            registry
+                .read(cx)
+                .session(self.workspace_id, runtime::SessionLanguage::R)
+                .cloned()
+        });
         let (env, r_home) = match &session {
             Some(session) => {
                 let session = session.read(cx);
