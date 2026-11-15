@@ -16,7 +16,7 @@ use package_index::{IndexStatus, IndexedPackage, PackageIndex, PackageSource};
 use r_console::ConsolePanel;
 use rows::{DetailState, Row, RowInputs, build_rows};
 use runtime::comms::InstalledPackage;
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use std::ops::Range;
 use ui::{Button, ButtonStyle, Checkbox, IconButton, IconName, ToggleState, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -52,7 +52,7 @@ pub fn init(cx: &mut App) {
 pub struct PackagesPanel {
     workspace: WeakEntity<Workspace>,
     workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     installed: Vec<InstalledPackage>,
     /// Latest versions of installed packages that have a newer one.
     outdated: HashMap<String, String>,
@@ -114,7 +114,9 @@ impl PackagesPanel {
                 &registry,
                 window,
                 |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
+                    if event.workspace_id == this.workspace_id
+                        && event.language == runtime::SessionLanguage::R
+                    {
                         this.set_session(event.session.clone(), window, cx);
                     }
                 },
@@ -146,8 +148,12 @@ impl PackagesPanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
+        let existing = SessionRegistry::global(cx).and_then(|registry| {
+            registry
+                .read(cx)
+                .session(workspace_id, runtime::SessionLanguage::R)
+                .cloned()
+        });
         if let Some(session) = existing {
             this.set_session(session, window, cx);
         }
@@ -156,7 +162,7 @@ impl PackagesPanel {
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -854,7 +860,7 @@ mod tests {
 
     struct Harness {
         panel: Entity<PackagesPanel>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         requests: mpsc::Receiver<JupyterMessage>,
         ui_comm: CommId,
     }
@@ -903,15 +909,17 @@ mod tests {
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
             let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
+                KernelSession::new(
+                    runtime::KernelLauncher::ark(
+                        Some(RToolchainData {
+                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                            version: Some("4.5.3".to_string()),
+                            source: RInstallationSource::Rig,
+                        }),
+                        None,
+                    ),
                     PathBuf::from("/projects/analysis"),
                     Default::default(),
-                    None,
                     cx,
                 )
             });

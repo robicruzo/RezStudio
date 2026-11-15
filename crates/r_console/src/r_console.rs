@@ -13,7 +13,7 @@ use gpui::{
 use jupyter_protocol::{IsCompleteReplyStatus, JupyterMessageContent, MediaType, Stdio};
 use language::Point;
 use project::Project;
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use settings::Settings as _;
 use std::path::PathBuf;
 use terminal::Terminal;
@@ -368,7 +368,7 @@ fn operator_text(operator: &str, previous: Option<char>) -> String {
 pub struct ConsolePanel {
     workspace: WeakEntity<Workspace>,
     workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     terminal: Entity<Terminal>,
     terminal_view: Entity<TerminalView>,
     input: Entity<Editor>,
@@ -458,7 +458,9 @@ impl ConsolePanel {
                 &registry,
                 window,
                 |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
+                    if event.workspace_id == this.workspace_id
+                        && event.language == runtime::SessionLanguage::R
+                    {
                         this.set_session(event.session.clone(), window, cx);
                     }
                 },
@@ -489,8 +491,12 @@ impl ConsolePanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing_session = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
+        let existing_session = SessionRegistry::global(cx).and_then(|registry| {
+            registry
+                .read(cx)
+                .session(workspace_id, runtime::SessionLanguage::R)
+                .cloned()
+        });
         if let Some(session) = existing_session {
             this.set_session(session, window, cx);
         }
@@ -514,7 +520,7 @@ impl ConsolePanel {
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -526,7 +532,7 @@ impl ConsolePanel {
         cx.notify();
     }
 
-    pub fn session(&self) -> Option<&Entity<RSession>> {
+    pub fn session(&self) -> Option<&Entity<KernelSession>> {
         self.session.as_ref()
     }
 
@@ -604,7 +610,7 @@ impl ConsolePanel {
 
     fn handle_session_event(
         &mut self,
-        session: &Entity<RSession>,
+        session: &Entity<KernelSession>,
         event: &SessionEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1256,7 +1262,7 @@ mod tests {
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<ConsolePanel>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         requests: mpsc::Receiver<JupyterMessage>,
         stdin: mpsc::Receiver<JupyterMessage>,
     }
@@ -1285,15 +1291,17 @@ mod tests {
                 workspace.add_panel(panel.clone(), window, cx)
             });
             let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
+                KernelSession::new(
+                    runtime::KernelLauncher::ark(
+                        Some(RToolchainData {
+                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                            version: Some("4.5.3".to_string()),
+                            source: RInstallationSource::Rig,
+                        }),
+                        None,
+                    ),
                     PathBuf::from("/projects/analysis"),
                     Default::default(),
-                    None,
                     cx,
                 )
             });
@@ -1884,15 +1892,17 @@ mod tests {
             panel
         });
         let session = cx.new(|cx| {
-            RSession::new(
-                Some(RToolchainData {
-                    r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                    version: Some("4.5.3".to_string()),
-                    source: RInstallationSource::Rig,
-                }),
+            KernelSession::new(
+                runtime::KernelLauncher::ark(
+                    Some(RToolchainData {
+                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                        version: Some("4.5.3".to_string()),
+                        source: RInstallationSource::Rig,
+                    }),
+                    None,
+                ),
                 PathBuf::from("/project"),
                 Default::default(),
-                None,
                 cx,
             )
         });

@@ -22,7 +22,7 @@ use std::time::Duration;
 use text::{Anchor, Bias, PointUtf16, Unclipped};
 
 use crate::ConsolePanel;
-use runtime::{RSession, SessionState};
+use runtime::{KernelSession, SessionState};
 use workspace::Workspace;
 
 /// Ark computes completions on R's thread, so they wait for R; never hold
@@ -95,7 +95,7 @@ impl VirtualDocument {
 /// leave the request waiting.
 pub fn ark_language_server(
     workspace: &Entity<Workspace>,
-    session: &Entity<RSession>,
+    session: &Entity<KernelSession>,
     cx: &gpui::App,
 ) -> Option<Arc<LanguageServer>> {
     let session = session.read(cx);
@@ -120,7 +120,7 @@ pub fn ark_language_server(
 /// lookup waits for R, and so does showing the page it finds.
 pub fn help_server(
     workspace: &Entity<Workspace>,
-    session: &Entity<RSession>,
+    session: &Entity<KernelSession>,
     cx: &gpui::App,
 ) -> Result<Arc<LanguageServer>> {
     match session.read(cx).state() {

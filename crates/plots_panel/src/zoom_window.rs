@@ -12,13 +12,13 @@ use gpui::{
     Window, WindowBounds, WindowOptions, px, size,
 };
 use runtime::comms::{PlotEvent, PlotRenderSettings, RenderParams};
-use runtime::{RSession, SessionEvent};
+use runtime::{KernelSession, SessionEvent};
 use std::sync::Arc;
 use ui::prelude::*;
 use util::ResultExt as _;
 
 pub(crate) fn open(
-    session: Entity<RSession>,
+    session: Entity<KernelSession>,
     comm_id: String,
     image: Option<PlotImage>,
     live: bool,
@@ -40,7 +40,7 @@ pub(crate) fn open(
 }
 
 pub struct PlotZoomWindow {
-    session: Entity<RSession>,
+    session: Entity<KernelSession>,
     comm_id: String,
     /// Starts as the Plots pane's image, shown scaled until R redraws it here.
     image: Option<PlotImage>,
@@ -64,7 +64,7 @@ pub struct PlotZoomWindow {
 
 impl PlotZoomWindow {
     fn new(
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         comm_id: String,
         image: Option<PlotImage>,
         live: bool,

@@ -12,7 +12,7 @@ use gpui::{
 };
 use r_console::ConsolePanel;
 use r_console::completions::{cursor_position, help_server, request_help_topic};
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
 use web_view::{WebView, WebViewEvent, watch_cover};
@@ -64,7 +64,7 @@ fn show_help_at_cursor(workspace: &Entity<Workspace>, window: &mut Window, cx: &
 
 fn topic_at_cursor(
     workspace: &Entity<Workspace>,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Task<Result<Option<String>>>> {
@@ -87,7 +87,7 @@ fn topic_at_cursor(
 /// For an R file, Ark already has the file open, as Zed keeps it in sync.
 fn r_file_topic_at_cursor(
     workspace: &Entity<Workspace>,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     editor: &Entity<Editor>,
     cx: &mut App,
 ) -> Option<Task<Result<Option<String>>>> {
@@ -176,7 +176,7 @@ impl History {
 pub struct HelpPanel {
     workspace: WeakEntity<Workspace>,
     workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     web_view: Entity<WebView>,
     history: History,
     /// Whether the page loading now is one the pane asked for, rather than a
@@ -244,7 +244,9 @@ impl HelpPanel {
                 &registry,
                 window,
                 |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
+                    if event.workspace_id == this.workspace_id
+                        && event.language == runtime::SessionLanguage::R
+                    {
                         this.set_session(event.session.clone(), window, cx);
                     }
                 },
@@ -283,8 +285,12 @@ impl HelpPanel {
             _cover_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
+        let existing = SessionRegistry::global(cx).and_then(|registry| {
+            registry
+                .read(cx)
+                .session(workspace_id, runtime::SessionLanguage::R)
+                .cloned()
+        });
         if let Some(session) = existing {
             this.set_session(session, window, cx);
         }
@@ -302,7 +308,7 @@ impl HelpPanel {
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -662,7 +668,7 @@ mod tests {
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<HelpPanel>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         web_view: Entity<WebView>,
         calls: Rc<RefCell<Vec<String>>>,
         requests: mpsc::Receiver<JupyterMessage>,
@@ -701,15 +707,17 @@ mod tests {
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
             let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
+                KernelSession::new(
+                    runtime::KernelLauncher::ark(
+                        Some(RToolchainData {
+                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                            version: Some("4.5.3".to_string()),
+                            source: RInstallationSource::Rig,
+                        }),
+                        None,
+                    ),
                     project_root.to_path_buf(),
                     Default::default(),
-                    None,
                     cx,
                 )
             });

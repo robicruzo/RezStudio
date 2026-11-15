@@ -16,7 +16,7 @@ use runtime::comms::{
     GetColumnProfilesParams, GetDataValuesParams, GetRowLabelsParams, GetSchemaParams, TableData,
     TableRowLabels, TableSchema,
 };
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry};
+use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry};
 use std::ops::Range;
 use std::time::Duration;
 use ui::{
@@ -43,14 +43,20 @@ pub fn init(cx: &mut App) {
         };
         let workspace_id = cx.entity_id();
         if let Some(registry) = SessionRegistry::global(cx) {
-            if let Some(session) = registry.read(cx).session(workspace_id).cloned() {
+            if let Some(session) = registry
+                .read(cx)
+                .session(workspace_id, runtime::SessionLanguage::R)
+                .cloned()
+            {
                 watch_session(workspace, &session, window, cx);
             }
             cx.subscribe_in(
                 &registry,
                 window,
                 move |workspace, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == workspace_id {
+                    if event.workspace_id == workspace_id
+                        && event.language == runtime::SessionLanguage::R
+                    {
                         watch_session(workspace, &event.session, window, cx);
                     }
                 },
@@ -63,7 +69,7 @@ pub fn init(cx: &mut App) {
 
 fn watch_session(
     _workspace: &mut Workspace,
-    session: &Entity<RSession>,
+    session: &Entity<KernelSession>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -86,7 +92,7 @@ fn watch_session(
 /// open, since `View()` is often run again on the same object.
 pub fn open_explorer(
     workspace: &mut Workspace,
-    session: Entity<RSession>,
+    session: Entity<KernelSession>,
     comm_id: String,
     title: String,
     window: &mut Window,
@@ -113,7 +119,7 @@ enum Status {
 }
 
 pub struct DataExplorerView {
-    session: Entity<RSession>,
+    session: Entity<KernelSession>,
     comm_id: String,
     title: SharedString,
     data: ExplorerData,
@@ -132,7 +138,7 @@ pub struct DataExplorerView {
 
 impl DataExplorerView {
     pub fn new(
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         comm_id: String,
         title: SharedString,
         window: &mut Window,
@@ -725,7 +731,7 @@ mod tests {
 
     struct Harness {
         workspace: Entity<Workspace>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         requests: mpsc::Receiver<JupyterMessage>,
     }
 
@@ -752,15 +758,17 @@ mod tests {
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
             let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
+                KernelSession::new(
+                    runtime::KernelLauncher::ark(
+                        Some(RToolchainData {
+                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                            version: Some("4.5.3".to_string()),
+                            source: RInstallationSource::Rig,
+                        }),
+                        None,
+                    ),
                     PathBuf::from("/projects/analysis"),
                     Default::default(),
-                    None,
                     cx,
                 )
             });

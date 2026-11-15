@@ -8,7 +8,7 @@ use gpui::{
     Anchor, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     PathPromptOptions, Subscription, Task, WeakEntity, Window,
 };
-use runtime::{RSession, r_string};
+use runtime::{KernelSession, r_string};
 use serde_json::Value;
 use std::time::Duration;
 use ui::{Checkbox, ContextMenu, IconButton, PopoverMenu, ToggleState, Tooltip, prelude::*};
@@ -341,7 +341,7 @@ enum PreviewState {
 
 pub struct ImportDataset {
     panel: WeakEntity<EnvironmentPanel>,
-    session: Entity<RSession>,
+    session: Entity<KernelSession>,
     source: Source,
     path: Entity<Editor>,
     name: Entity<Editor>,
@@ -369,7 +369,7 @@ impl ImportDataset {
     pub fn new(
         source: Source,
         panel: WeakEntity<EnvironmentPanel>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {

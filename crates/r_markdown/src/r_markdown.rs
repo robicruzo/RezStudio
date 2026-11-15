@@ -188,7 +188,7 @@ mod tests {
     use language::{Language, LanguageConfig, LanguageMatcher};
     use languages::r::{RInstallationSource, RToolchainData};
     use project::{FakeFs, Project};
-    use runtime::RSession;
+    use runtime::KernelSession;
     use runtime::comms::PLOT_COMM_TARGET;
     use serde_json::json;
     use settings::SettingsStore;
@@ -227,7 +227,7 @@ c <- 3
     struct Harness {
         editor: Entity<Editor>,
         runner: Entity<ChunkRunner>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         requests: mpsc::Receiver<JupyterMessage>,
     }
 
@@ -295,15 +295,17 @@ c <- 3
                 .expect("an R Markdown editor gets a runner");
 
             let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
+                KernelSession::new(
+                    runtime::KernelLauncher::ark(
+                        Some(RToolchainData {
+                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                            version: Some("4.5.3".to_string()),
+                            source: RInstallationSource::Rig,
+                        }),
+                        None,
+                    ),
                     PathBuf::from("/project"),
                     Default::default(),
-                    None,
                     cx,
                 )
             });

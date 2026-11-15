@@ -6,7 +6,7 @@ use gpui::{
     Action, App, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     Pixels, Subscription, WeakEntity, Window, actions, px,
 };
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use std::path::PathBuf;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -194,7 +194,7 @@ impl History {
 pub struct ViewerPanel {
     workspace: WeakEntity<Workspace>,
     workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     web_view: Entity<WebView>,
     history: History,
     /// Whether the pane is the one shown in its dock.
@@ -249,7 +249,9 @@ impl ViewerPanel {
                 &registry,
                 window,
                 |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
+                    if event.workspace_id == this.workspace_id
+                        && event.language == runtime::SessionLanguage::R
+                    {
                         this.set_session(event.session.clone(), window, cx);
                     }
                 },
@@ -285,8 +287,12 @@ impl ViewerPanel {
             _cover_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
+        let existing = SessionRegistry::global(cx).and_then(|registry| {
+            registry
+                .read(cx)
+                .session(workspace_id, runtime::SessionLanguage::R)
+                .cloned()
+        });
         if let Some(session) = existing {
             this.set_session(session, window, cx);
         }
@@ -295,7 +301,7 @@ impl ViewerPanel {
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -789,7 +795,7 @@ mod tests {
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<ViewerPanel>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         calls: Rc<RefCell<Vec<String>>>,
         requests: mpsc::Receiver<JupyterMessage>,
         ui_comm: CommId,
@@ -819,15 +825,17 @@ mod tests {
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
             let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
+                KernelSession::new(
+                    runtime::KernelLauncher::ark(
+                        Some(RToolchainData {
+                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                            version: Some("4.5.3".to_string()),
+                            source: RInstallationSource::Rig,
+                        }),
+                        None,
+                    ),
                     PathBuf::from("/projects/analysis"),
                     Default::default(),
-                    None,
                     cx,
                 )
             });

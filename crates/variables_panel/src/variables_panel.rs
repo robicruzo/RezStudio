@@ -16,7 +16,7 @@ use import_dataset::{ImportDataset, Source};
 use memory::{MemorySampler, MemoryUsage, format_memory};
 use r_console::ConsolePanel;
 use runtime::comms::{InspectedVariable, VariableKind, VariablesEvent};
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
 use std::ops::Range;
 use std::path::Path;
 use std::time::Duration;
@@ -60,7 +60,7 @@ pub fn init(cx: &mut App) {
 pub struct EnvironmentPanel {
     workspace: WeakEntity<Workspace>,
     workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     /// The global environment, kept live by Ark's variables comm.
     tree: VariableTree,
     /// The `package:` entries on R's search path, for the environment menu.
@@ -107,7 +107,9 @@ impl EnvironmentPanel {
                 &registry,
                 window,
                 |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
+                    if event.workspace_id == this.workspace_id
+                        && event.language == runtime::SessionLanguage::R
+                    {
                         this.set_session(event.session.clone(), window, cx);
                     }
                 },
@@ -131,8 +133,12 @@ impl EnvironmentPanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
+        let existing = SessionRegistry::global(cx).and_then(|registry| {
+            registry
+                .read(cx)
+                .session(workspace_id, runtime::SessionLanguage::R)
+                .cloned()
+        });
         if let Some(session) = existing {
             this.set_session(session, window, cx);
         }
@@ -141,7 +147,7 @@ impl EnvironmentPanel {
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1183,7 +1189,7 @@ mod tests {
 
     struct Harness {
         panel: Entity<EnvironmentPanel>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         requests: mpsc::Receiver<JupyterMessage>,
         variables_comm: CommId,
     }
@@ -1211,15 +1217,17 @@ mod tests {
                 panel
             });
             let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
+                KernelSession::new(
+                    runtime::KernelLauncher::ark(
+                        Some(RToolchainData {
+                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                            version: Some("4.5.3".to_string()),
+                            source: RInstallationSource::Rig,
+                        }),
+                        None,
+                    ),
                     PathBuf::from("/projects/analysis"),
                     Default::default(),
-                    None,
                     cx,
                 )
             });

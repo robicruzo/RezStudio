@@ -1,10 +1,9 @@
+use crate::kernel::{KernelConnections, KernelProcess};
 use anyhow::{Context as _, Result};
 use collections::HashMap;
 use futures::{AsyncBufReadExt as _, StreamExt as _, io::BufReader};
 use jupyter_protocol::connection_info::{ConnectionInfo, Transport};
-use runtimelib::{
-    ClientControlConnection, ClientIoPubConnection, ClientShellConnection, ClientStdinConnection,
-};
+use languages::r::RToolchainData;
 use smol::net::TcpListener;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -60,45 +59,55 @@ pub struct ArkLaunch<'a> {
     pub log_file: Option<PathBuf>,
 }
 
-/// A running Ark process. Dropping it kills the process.
-pub struct ArkProcess {
-    process: util::process::Child,
-    connection_path: PathBuf,
+/// Runs R through Ark: the R installation to run, if one was found, and the
+/// copy of Ark bundled in RezStudio.app.
+#[derive(Clone, Debug)]
+pub struct ArkLauncher {
+    pub r: Option<RToolchainData>,
+    pub bundled_ark: Option<PathBuf>,
 }
 
-impl ArkProcess {
-    pub fn kill(&mut self) {
-        self.process.kill().log_err();
+impl ArkLauncher {
+    pub fn unavailable_reason(&self) -> Option<String> {
+        if self.r.is_some() {
+            return None;
+        }
+        Some(
+            "R was not found. Install R from https://cran.r-project.org and reopen the project."
+                .to_string(),
+        )
     }
 
-    /// The id of the shell supervising Ark, whose child Ark is.
-    pub fn id(&self) -> u32 {
-        self.process.id()
+    pub async fn launch(
+        self,
+        working_directory: &Path,
+        env: HashMap<String, String>,
+    ) -> Result<(KernelProcess, KernelConnections)> {
+        let r = self.r.context("R was not found")?;
+        let ark = locate_ark(self.bundled_ark, &env)?;
+        log::info!(
+            "starting Ark {} for R {} at {}",
+            ark.display(),
+            r.version.as_deref().unwrap_or("(unknown version)"),
+            r.r_home.display()
+        );
+        let log_file = next_log_file(&paths::logs_dir().join("ark")).log_err();
+        if let Some(log_file) = &log_file {
+            log::info!("Ark logs to {}", log_file.display());
+        }
+        launch_ark(ArkLaunch {
+            ark: &ark,
+            r_home: &r.r_home,
+            working_directory,
+            env,
+            log_file,
+        })
+        .await
     }
-
-    pub fn status(
-        &mut self,
-    ) -> impl Future<Output = std::io::Result<std::process::ExitStatus>> + use<> {
-        self.process.status()
-    }
-}
-
-impl Drop for ArkProcess {
-    fn drop(&mut self) {
-        self.kill();
-        std::fs::remove_file(&self.connection_path).ok();
-    }
-}
-
-pub struct ArkConnections {
-    pub iopub: ClientIoPubConnection,
-    pub shell: ClientShellConnection,
-    pub control: ClientControlConnection,
-    pub stdin: ClientStdinConnection,
 }
 
 /// Starts Ark in console mode and connects to its Jupyter sockets.
-pub async fn launch_ark(launch: ArkLaunch<'_>) -> Result<(ArkProcess, ArkConnections)> {
+pub async fn launch_ark(launch: ArkLaunch<'_>) -> Result<(KernelProcess, KernelConnections)> {
     let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let ports = free_ports(ip).await?;
     let connection_info = ConnectionInfo {
@@ -153,14 +162,11 @@ pub async fn launch_ark(launch: ArkLaunch<'_>) -> Result<(ArkProcess, ArkConnect
                 )
             })?;
     forward_output_to_log(&mut process);
-    let process = ArkProcess {
-        process,
-        connection_path,
-    };
+    let process = KernelProcess::new(process, connection_path);
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let peer_identity = runtimelib::peer_identity_for_session(&session_id)?;
-    let connections = ArkConnections {
+    let connections = KernelConnections {
         iopub: runtimelib::create_client_iopub_connection(&connection_info, "", &session_id)
             .await?,
         shell: runtimelib::create_client_shell_connection_with_identity(
@@ -465,8 +471,8 @@ pub mod test_support {
     }
 
     pub struct Kernel {
-        pub process: ArkProcess,
-        pub connections: ArkConnections,
+        pub process: KernelProcess,
+        pub connections: KernelConnections,
     }
 
     impl Kernel {
@@ -732,7 +738,7 @@ pub mod test_support {
             comm_id
         }
 
-        /// Runs `code` silently, as `RSession::evaluate_code` does, and
+        /// Runs `code` silently, as `KernelSession::evaluate_code` does, and
         /// returns its value as JSON.
         pub async fn evaluate(&mut self, ui_comm: &CommId, code: &str) -> serde_json::Value {
             let reply = self

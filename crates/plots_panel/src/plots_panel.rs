@@ -18,7 +18,7 @@ use history::PlotHistory;
 use runtime::comms::{
     PlotEvent, PlotRenderFormat, PlotRenderSettings, PlotResult, PlotSize, RenderParams,
 };
-use runtime::{RSession, SessionAdded, SessionEvent, SessionRegistry};
+use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry};
 use std::path::PathBuf;
 use std::sync::Arc;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
@@ -117,7 +117,7 @@ pub(crate) struct PlotExport {
 pub struct PlotsPanel {
     workspace: WeakEntity<Workspace>,
     workspace_id: EntityId,
-    session: Option<Entity<RSession>>,
+    session: Option<Entity<KernelSession>>,
     history: PlotHistory<PlotImage>,
     viewport: Viewport,
     /// The last format and size a plot was saved with.
@@ -159,7 +159,9 @@ impl PlotsPanel {
                 &registry,
                 window,
                 |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id {
+                    if event.workspace_id == this.workspace_id
+                        && event.language == runtime::SessionLanguage::R
+                    {
                         this.set_session(event.session.clone(), window, cx);
                     }
                 },
@@ -183,8 +185,12 @@ impl PlotsPanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx)
-            .and_then(|registry| registry.read(cx).session(workspace_id).cloned());
+        let existing = SessionRegistry::global(cx).and_then(|registry| {
+            registry
+                .read(cx)
+                .session(workspace_id, runtime::SessionLanguage::R)
+                .cloned()
+        });
         if let Some(session) = existing {
             this.set_session(session, window, cx);
         }
@@ -193,7 +199,7 @@ impl PlotsPanel {
 
     pub fn set_session(
         &mut self,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -920,7 +926,7 @@ mod tests {
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<PlotsPanel>,
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         requests: mpsc::Receiver<JupyterMessage>,
         ui_comm: String,
     }
@@ -949,15 +955,17 @@ mod tests {
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
             let session = cx.new(|cx| {
-                RSession::new(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
+                KernelSession::new(
+                    runtime::KernelLauncher::ark(
+                        Some(RToolchainData {
+                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
+                            version: Some("4.5.3".to_string()),
+                            source: RInstallationSource::Rig,
+                        }),
+                        None,
+                    ),
                     PathBuf::from("/projects/analysis"),
                     Default::default(),
-                    None,
                     cx,
                 )
             });

@@ -9,7 +9,7 @@ use gpui::{
 };
 use jupyter_protocol::JupyterMessageContent;
 use repl::{ExecutionStatus, ExecutionView};
-use runtime::RSession;
+use runtime::KernelSession;
 use runtime::comms::{PlotRenderFormat, PlotSize, RenderParams};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,7 +47,7 @@ struct InlinePlot {
 }
 
 pub struct ChunkOutput {
-    session: Entity<RSession>,
+    session: Entity<KernelSession>,
     workspace: WeakEntity<Workspace>,
     execution: Entity<ExecutionView>,
     state: RunState,
@@ -62,7 +62,7 @@ pub struct ChunkOutput {
 
 impl ChunkOutput {
     pub fn new(
-        session: Entity<RSession>,
+        session: Entity<KernelSession>,
         workspace: WeakEntity<Workspace>,
         aspect: Option<f32>,
         cx: &mut Context<Self>,
