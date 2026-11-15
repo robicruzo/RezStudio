@@ -9,14 +9,14 @@ use anyhow::Result;
 use collections::HashMap;
 use editor::Editor;
 use gpui::{
-    Action, App, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Pixels, PromptLevel, Subscription, Task, WeakEntity, Window, actions, px, uniform_list,
+    Action, App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    PromptLevel, Subscription, Task, WeakEntity, Window, actions, px, uniform_list,
 };
 use package_index::{IndexStatus, IndexedPackage, PackageIndex, PackageSource};
 use r_console::ConsolePanel;
 use rows::{DetailState, Row, RowInputs, build_rows};
 use runtime::comms::InstalledPackage;
-use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionEvent, SessionLanguage, SessionState};
 use std::ops::Range;
 use ui::{Button, ButtonStyle, Checkbox, IconButton, IconName, ToggleState, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -51,7 +51,6 @@ pub fn init(cx: &mut App) {
 
 pub struct PackagesPanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
     session: Option<Entity<KernelSession>>,
     installed: Vec<InstalledPackage>,
     /// Latest versions of installed packages that have a newer one.
@@ -109,22 +108,8 @@ impl PackagesPanel {
             // Search again once the index loads or downloads.
             subscriptions.push(cx.observe(&index, |this, _, cx| this.search(cx)));
         }
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id
-                        && event.language == runtime::SessionLanguage::R
-                    {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
         let mut this = Self {
             workspace: workspace_handle,
-            workspace_id,
             session: None,
             installed: Vec::new(),
             outdated: HashMap::default(),
@@ -148,15 +133,15 @@ impl PackagesPanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx).and_then(|registry| {
-            registry
-                .read(cx)
-                .session(workspace_id, runtime::SessionLanguage::R)
-                .cloned()
-        });
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 

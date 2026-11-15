@@ -11,14 +11,14 @@ use fitting::{
     Darkening, PlotImage, Viewport, ViewportChange, decode_plot, describe_render_error, redraw_plot,
 };
 use gpui::{
-    Action, App, AsyncWindowContext, ClipboardItem, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, Pixels, PromptLevel, Size, Subscription, Task, WeakEntity, Window, actions, px,
+    Action, App, AsyncWindowContext, ClipboardItem, Entity, EventEmitter, FocusHandle, Focusable,
+    Pixels, PromptLevel, Size, Subscription, Task, WeakEntity, Window, actions, px,
 };
 use history::PlotHistory;
 use runtime::comms::{
     PlotEvent, PlotRenderFormat, PlotRenderSettings, PlotResult, PlotSize, RenderParams,
 };
-use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry};
+use runtime::{KernelSession, SessionEvent, SessionLanguage};
 use std::path::PathBuf;
 use std::sync::Arc;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
@@ -116,7 +116,6 @@ pub(crate) struct PlotExport {
 
 pub struct PlotsPanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
     session: Option<Entity<KernelSession>>,
     history: PlotHistory<PlotImage>,
     viewport: Viewport,
@@ -153,23 +152,9 @@ impl PlotsPanel {
     pub fn new(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace_handle = workspace.weak_handle();
         let workspace_id = workspace_handle.entity_id();
-        let mut subscriptions = Vec::new();
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id
-                        && event.language == runtime::SessionLanguage::R
-                    {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
+        let subscriptions = Vec::new();
         let mut this = Self {
             workspace: workspace_handle,
-            workspace_id,
             session: None,
             history: PlotHistory::default(),
             viewport: Viewport::default(),
@@ -185,15 +170,15 @@ impl PlotsPanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx).and_then(|registry| {
-            registry
-                .read(cx)
-                .session(workspace_id, runtime::SessionLanguage::R)
-                .cloned()
-        });
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 

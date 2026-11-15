@@ -8,15 +8,15 @@ mod tree;
 use anyhow::{Context as _, Result};
 use editor::{Editor, MultiBuffer};
 use gpui::{
-    Action, Anchor, App, AsyncWindowContext, Empty, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, PathPromptOptions, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window,
-    actions, px, uniform_list,
+    Action, Anchor, App, AsyncWindowContext, Empty, Entity, EventEmitter, FocusHandle, Focusable,
+    PathPromptOptions, Pixels, PromptLevel, Subscription, Task, WeakEntity, Window, actions, px,
+    uniform_list,
 };
 use import_dataset::{ImportDataset, Source};
 use memory::{MemorySampler, MemoryUsage, format_memory};
 use r_console::ConsolePanel;
 use runtime::comms::{InspectedVariable, VariableKind, VariablesEvent};
-use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionEvent, SessionLanguage, SessionState};
 use std::ops::Range;
 use std::path::Path;
 use std::time::Duration;
@@ -59,7 +59,6 @@ pub fn init(cx: &mut App) {
 
 pub struct EnvironmentPanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
     session: Option<Entity<KernelSession>>,
     /// The global environment, kept live by Ark's variables comm.
     tree: VariableTree,
@@ -97,27 +96,13 @@ impl EnvironmentPanel {
             editor.set_placeholder_text("Filter by name", window, cx);
             editor
         });
-        let mut subscriptions = vec![cx.subscribe(&filter, |this, _, event, cx| {
+        let subscriptions = vec![cx.subscribe(&filter, |this, _, event, cx| {
             if let editor::EditorEvent::BufferEdited = event {
                 this.rebuild_rows(cx);
             }
         })];
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id
-                        && event.language == runtime::SessionLanguage::R
-                    {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
         let mut this = Self {
             workspace: workspace.weak_handle(),
-            workspace_id,
             session: None,
             tree: VariableTree::default(),
             attached_packages: Vec::new(),
@@ -133,15 +118,15 @@ impl EnvironmentPanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx).and_then(|registry| {
-            registry
-                .read(cx)
-                .session(workspace_id, runtime::SessionLanguage::R)
-                .cloned()
-        });
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 

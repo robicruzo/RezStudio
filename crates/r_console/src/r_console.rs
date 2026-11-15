@@ -7,13 +7,13 @@ use anyhow::{Context as _, Result};
 use editor::actions::{MoveToEnd, Newline};
 use editor::{Editor, EditorElement, EditorStyle};
 use gpui::{
-    Action, App, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Pixels, Subscription, Task, TextStyle, WeakEntity, Window, actions, px, relative,
+    Action, App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    Subscription, Task, TextStyle, WeakEntity, Window, actions, px, relative,
 };
 use jupyter_protocol::{IsCompleteReplyStatus, JupyterMessageContent, MediaType, Stdio};
 use language::Point;
 use project::Project;
-use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionEvent, SessionLanguage, SessionState};
 use settings::Settings as _;
 use std::path::PathBuf;
 use terminal::Terminal;
@@ -367,7 +367,6 @@ fn operator_text(operator: &str, previous: Option<char>) -> String {
 
 pub struct ConsolePanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
     session: Option<Entity<KernelSession>>,
     terminal: Entity<Terminal>,
     terminal_view: Entity<TerminalView>,
@@ -450,26 +449,12 @@ impl ConsolePanel {
         });
 
         let focus_handle = cx.focus_handle();
-        let mut subscriptions = vec![cx.on_focus(&focus_handle, window, |this, window, cx| {
+        let subscriptions = vec![cx.on_focus(&focus_handle, window, |this, window, cx| {
             this.input.focus_handle(cx).focus(window, cx);
         })];
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id
-                        && event.language == runtime::SessionLanguage::R
-                    {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
 
         let mut this = Self {
             workspace: workspace_handle,
-            workspace_id,
             session: None,
             terminal,
             terminal_view,
@@ -491,15 +476,15 @@ impl ConsolePanel {
             _session_subscription: None,
             _subscriptions: subscriptions,
         };
-        let existing_session = SessionRegistry::global(cx).and_then(|registry| {
-            registry
-                .read(cx)
-                .session(workspace_id, runtime::SessionLanguage::R)
-                .cloned()
-        });
-        if let Some(session) = existing_session {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 

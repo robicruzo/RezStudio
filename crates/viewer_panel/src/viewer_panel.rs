@@ -3,10 +3,10 @@
 
 use anyhow::Result;
 use gpui::{
-    Action, App, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Pixels, Subscription, WeakEntity, Window, actions, px,
+    Action, App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    Subscription, WeakEntity, Window, actions, px,
 };
-use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionEvent, SessionLanguage, SessionState};
 use std::path::PathBuf;
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
@@ -193,7 +193,6 @@ impl History {
 
 pub struct ViewerPanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
     session: Option<Entity<KernelSession>>,
     web_view: Entity<WebView>,
     history: History,
@@ -231,7 +230,7 @@ impl ViewerPanel {
         let workspace_handle = workspace.weak_handle();
         let workspace_id = workspace_handle.entity_id();
         let page_focus = cx.focus_handle();
-        let mut subscriptions = vec![
+        let subscriptions = vec![
             cx.subscribe_in(
                 &web_view,
                 window,
@@ -244,19 +243,6 @@ impl ViewerPanel {
                 this.web_view.read(cx).release_keyboard();
             }),
         ];
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id
-                        && event.language == runtime::SessionLanguage::R
-                    {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
         // The workspace is being updated now, and watching it reads it.
         cx.defer_in(window, |this, window, cx| {
             let Some(workspace) = this.workspace.upgrade() else {
@@ -275,7 +261,6 @@ impl ViewerPanel {
         });
         let mut this = Self {
             workspace: workspace_handle,
-            workspace_id,
             session: None,
             web_view,
             history: History::default(),
@@ -287,15 +272,15 @@ impl ViewerPanel {
             _cover_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx).and_then(|registry| {
-            registry
-                .read(cx)
-                .session(workspace_id, runtime::SessionLanguage::R)
-                .cloned()
-        });
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 

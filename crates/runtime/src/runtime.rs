@@ -19,7 +19,10 @@ pub use session::{KernelSession, SessionEvent, SessionState};
 
 use ::lsp::LanguageServerSelector;
 use collections::{HashMap, HashSet};
-use gpui::{App, AppContext as _, Entity, EntityId, EventEmitter, Global, WeakEntity, Window};
+use gpui::{
+    App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, Subscription,
+    WeakEntity, Window,
+};
 use language::{LanguageName, LanguageRegistry};
 use languages::r::RToolchainData;
 use project::trusted_worktrees::{PathTrust, TrustedWorktrees, TrustedWorktreesEvent};
@@ -155,6 +158,35 @@ pub fn session_for_workspace(
         .read(cx)
         .session(workspace.entity_id(), language)
         .cloned()
+}
+
+/// Follows a workspace's `language` session on behalf of `this`, the entity
+/// `cx` belongs to: calls `on_session` with the session now if there is one,
+/// and with each one created later. Sessions are created after the workspace
+/// and its panels, so a pane usually gets its session through the second.
+/// The subscription must be kept for as long as the session is followed.
+pub fn follow_session<T: 'static>(
+    this: &mut T,
+    workspace_id: EntityId,
+    language: SessionLanguage,
+    window: &mut Window,
+    cx: &mut Context<T>,
+    on_session: impl Fn(&mut T, Entity<KernelSession>, &mut Window, &mut Context<T>) + 'static,
+) -> Option<Subscription> {
+    let registry = SessionRegistry::global(cx)?;
+    let existing = registry.read(cx).session(workspace_id, language).cloned();
+    if let Some(session) = existing {
+        on_session(this, session, window, cx);
+    }
+    Some(cx.subscribe_in(
+        &registry,
+        window,
+        move |this, _, event: &SessionAdded, window, cx| {
+            if event.workspace_id == workspace_id && event.language == language {
+                on_session(this, event.session.clone(), window, cx);
+            }
+        },
+    ))
 }
 
 /// `text` as an R string literal, for building code to run in R.
@@ -356,4 +388,83 @@ fn start_when_trusted(
             .log_err();
     });
     session.update(cx, |session, cx| session.wait_for_trust(subscription, cx));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::path::PathBuf;
+
+    struct Follower {
+        followed: Vec<EntityId>,
+        _subscription: Option<Subscription>,
+    }
+
+    fn new_session(cx: &mut VisualTestContext) -> Entity<KernelSession> {
+        cx.new(|cx| {
+            KernelSession::new(
+                KernelLauncher::ark(None, None),
+                PathBuf::from("/projects/analysis"),
+                HashMap::default(),
+                cx,
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn test_follow_session_gets_the_existing_session_and_later_ones(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let registry = cx.new(|_| SessionRegistry::default());
+        cx.update(|_, cx| cx.set_global(GlobalSessionRegistry(registry.clone())));
+        // Any entity's id serves as a workspace's here.
+        let workspace_id = cx.new(|_| ()).entity_id();
+        let other_workspace_id = cx.new(|_| ()).entity_id();
+
+        let existing = new_session(cx);
+        registry.update(cx, |registry, _| {
+            registry
+                .sessions
+                .insert((workspace_id, SessionLanguage::R), existing.clone());
+        });
+        let follower = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut follower = Follower {
+                    followed: Vec::new(),
+                    _subscription: None,
+                };
+                follower._subscription = follow_session(
+                    &mut follower,
+                    workspace_id,
+                    SessionLanguage::R,
+                    window,
+                    cx,
+                    |follower, session, _, _| follower.followed.push(session.entity_id()),
+                );
+                follower
+            })
+        });
+        follower.read_with(cx, |follower, _| {
+            assert_eq!(follower.followed, [existing.entity_id()]);
+        });
+
+        let elsewhere = new_session(cx);
+        let later = new_session(cx);
+        registry.update(cx, |_, cx| {
+            cx.emit(SessionAdded {
+                workspace_id: other_workspace_id,
+                language: SessionLanguage::R,
+                session: elsewhere,
+            });
+            cx.emit(SessionAdded {
+                workspace_id,
+                language: SessionLanguage::R,
+                session: later.clone(),
+            });
+        });
+        cx.run_until_parked();
+        follower.read_with(cx, |follower, _| {
+            assert_eq!(follower.followed, [existing.entity_id(), later.entity_id()]);
+        });
+    }
 }

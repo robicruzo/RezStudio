@@ -16,7 +16,7 @@ use runtime::comms::{
     GetColumnProfilesParams, GetDataValuesParams, GetRowLabelsParams, GetSchemaParams, TableData,
     TableRowLabels, TableSchema,
 };
-use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry};
+use runtime::{KernelSession, SessionEvent, SessionLanguage};
 use std::ops::Range;
 use std::time::Duration;
 use ui::{
@@ -42,26 +42,16 @@ pub fn init(cx: &mut App) {
             return;
         };
         let workspace_id = cx.entity_id();
-        if let Some(registry) = SessionRegistry::global(cx) {
-            if let Some(session) = registry
-                .read(cx)
-                .session(workspace_id, runtime::SessionLanguage::R)
-                .cloned()
-            {
-                watch_session(workspace, &session, window, cx);
-            }
-            cx.subscribe_in(
-                &registry,
-                window,
-                move |workspace, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == workspace_id
-                        && event.language == runtime::SessionLanguage::R
-                    {
-                        watch_session(workspace, &event.session, window, cx);
-                    }
-                },
-            )
-            .detach();
+        let followed = runtime::follow_session(
+            workspace,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            |workspace, session, window, cx| watch_session(workspace, &session, window, cx),
+        );
+        if let Some(subscription) = followed {
+            subscription.detach();
         }
     })
     .detach();

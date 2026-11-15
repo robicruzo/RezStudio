@@ -7,12 +7,12 @@ mod page_style;
 use anyhow::Result;
 use editor::Editor;
 use gpui::{
-    Action, App, AsyncWindowContext, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    Pixels, Subscription, Task, WeakEntity, Window, actions, px,
+    Action, App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels,
+    Subscription, Task, WeakEntity, Window, actions, px,
 };
 use r_console::ConsolePanel;
 use r_console::completions::{cursor_position, help_server, request_help_topic};
-use runtime::{KernelSession, SessionAdded, SessionEvent, SessionRegistry, SessionState};
+use runtime::{KernelSession, SessionEvent, SessionLanguage, SessionState};
 use ui::{IconButton, IconName, Tooltip, prelude::*};
 use util::ResultExt as _;
 use web_view::{WebView, WebViewEvent, watch_cover};
@@ -175,7 +175,6 @@ impl History {
 
 pub struct HelpPanel {
     workspace: WeakEntity<Workspace>,
-    workspace_id: EntityId,
     session: Option<Entity<KernelSession>>,
     web_view: Entity<WebView>,
     history: History,
@@ -225,7 +224,7 @@ impl HelpPanel {
             editor
         });
         let page_focus = cx.focus_handle();
-        let mut subscriptions = vec![
+        let subscriptions = vec![
             cx.subscribe_in(
                 &web_view,
                 window,
@@ -239,19 +238,6 @@ impl HelpPanel {
                 this.web_view.read(cx).release_keyboard();
             }),
         ];
-        if let Some(registry) = SessionRegistry::global(cx) {
-            subscriptions.push(cx.subscribe_in(
-                &registry,
-                window,
-                |this, _, event: &SessionAdded, window, cx| {
-                    if event.workspace_id == this.workspace_id
-                        && event.language == runtime::SessionLanguage::R
-                    {
-                        this.set_session(event.session.clone(), window, cx);
-                    }
-                },
-            ));
-        }
         // The workspace is being updated now, and watching it reads it.
         cx.defer_in(window, |this, window, cx| {
             let Some(workspace) = this.workspace.upgrade() else {
@@ -270,7 +256,6 @@ impl HelpPanel {
         });
         let mut this = Self {
             workspace: workspace_handle,
-            workspace_id,
             session: None,
             web_view,
             history: History::default(),
@@ -285,15 +270,15 @@ impl HelpPanel {
             _cover_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
-        let existing = SessionRegistry::global(cx).and_then(|registry| {
-            registry
-                .read(cx)
-                .session(workspace_id, runtime::SessionLanguage::R)
-                .cloned()
-        });
-        if let Some(session) = existing {
-            this.set_session(session, window, cx);
-        }
+        let followed = runtime::follow_session(
+            &mut this,
+            workspace_id,
+            SessionLanguage::R,
+            window,
+            cx,
+            Self::set_session,
+        );
+        this._subscriptions.extend(followed);
         this
     }
 
