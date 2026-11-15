@@ -3,9 +3,9 @@
 //! for Positron.
 
 mod ark;
-#[cfg(any(test, feature = "test-support"))]
-pub use ark::test_support;
 pub mod comms;
+#[cfg(any(test, feature = "test-support"))]
+mod fake_kernel;
 mod kernel;
 mod lsp;
 mod session;
@@ -16,6 +16,14 @@ pub use kernel::{KernelConnections, KernelLauncher, KernelProcess, SessionLangua
 pub use languages::r::R_LANGUAGE_NAME;
 pub use lsp::{ARK_LANGUAGE_SERVER_NAME, LSP_BRIDGE_FLAG, run_lsp_bridge};
 pub use session::{KernelSession, SessionEvent, SessionState};
+
+/// For tests: a real Ark driven as a plain Jupyter client, and a session
+/// connected to a kernel the test plays by hand.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use crate::ark::test_support::*;
+    pub use crate::fake_kernel::*;
+}
 
 use ::lsp::LanguageServerSelector;
 use collections::{HashMap, HashSet};

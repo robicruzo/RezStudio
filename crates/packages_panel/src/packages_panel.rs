@@ -829,24 +829,23 @@ impl Panel for PackagesPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::channel::mpsc;
+
     use gpui::{TestAppContext, VisualTestContext};
     use http_client::FakeHttpClient;
     use jupyter_protocol::{
-        CommId, CommMsg, ExecuteReply, JupyterMessage, JupyterMessageContent, KernelInfoReply,
-        Status,
+        CommId, CommMsg, ExecuteReply, JupyterMessage, JupyterMessageContent, Status,
     };
-    use languages::r::{RInstallationSource, RToolchainData};
+
     use project::{FakeFs, Project};
     use serde_json::{Value, json};
     use settings::SettingsStore;
-    use std::path::PathBuf;
+
+    use runtime::test_support::FakeKernel;
     use workspace::MultiWorkspace;
 
     struct Harness {
         panel: Entity<PackagesPanel>,
-        session: Entity<KernelSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
         ui_comm: CommId,
     }
 
@@ -893,32 +892,9 @@ mod tests {
                 .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
-            let session = cx.new(|cx| {
-                KernelSession::new(
-                    runtime::KernelLauncher::ark(
-                        Some(RToolchainData {
-                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                            version: Some("4.5.3".to_string()),
-                            source: RInstallationSource::Rig,
-                        }),
-                        None,
-                    ),
-                    PathBuf::from("/projects/analysis"),
-                    Default::default(),
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, _stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
-            let kernel_info = requests.try_recv().unwrap();
-            let ui_comm = match requests.try_recv().unwrap().content {
-                JupyterMessageContent::CommOpen(open) => open.comm_id,
-                other => panic!("expected the UI comm, got {}", other.message_type()),
-            };
-            while requests.try_recv().is_ok() {}
+            let mut kernel = FakeKernel::start("/projects/analysis", cx);
+            let comms = kernel.take_startup_requests();
+            let session = kernel.session.clone();
             let panel = workspace.update_in(cx, |workspace, window, cx| {
                 let panel = cx.new(|cx| {
                     let mut panel = PackagesPanel::new(workspace, window, cx);
@@ -929,33 +905,18 @@ mod tests {
                 workspace.open_panel::<PackagesPanel>(window, cx);
                 panel
             });
-            let harness = Self {
+            let mut harness = Self {
                 panel,
-                session,
-                requests,
-                ui_comm,
+                kernel,
+                ui_comm: comms.ui,
             };
-            let reply: KernelInfoReply = serde_json::from_value(json!({
-                "status": "ok", "protocol_version": "5.3", "implementation": "ark",
-                "implementation_version": "0.1.252",
-                "language_info": { "name": "R", "version": "4.5.3" },
-                "banner": "", "help_links": [], "debugger": false
-            }))
-            .unwrap();
-            harness.receive(JupyterMessage::new(reply, Some(&kernel_info)), cx);
+            harness.kernel.answer_kernel_info(cx);
             (harness, cx)
-        }
-
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
         }
 
         /// The R functions called and code run since the last call, in order.
         fn requests(&mut self) -> Vec<(String, JupyterMessage)> {
-            std::iter::from_fn(|| self.requests.try_recv().ok())
+            std::iter::from_fn(|| self.kernel.requests.try_recv().ok())
                 .map(|message| {
                     let label = match &message.content {
                         JupyterMessageContent::CommMsg(comm)
@@ -1046,7 +1007,7 @@ mod tests {
             let Value::Object(data) = data else {
                 panic!("reply data must be an object");
             };
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(
                     CommMsg {
                         comm_id: self.ui_comm.clone(),
@@ -1060,19 +1021,21 @@ mod tests {
 
         /// R running `code` and finishing.
         fn run(&mut self, code: &str, cx: &mut VisualTestContext) {
-            self.session
+            self.kernel
+                .session
                 .update(cx, |session, cx| session.execute(code.to_string(), cx))
                 .unwrap();
-            let request = self.requests.try_recv().unwrap();
+            let request = self.kernel.requests.try_recv().unwrap();
             self.finish(&request, cx);
         }
 
         fn finish(&self, request: &JupyterMessage, cx: &mut VisualTestContext) {
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(ExecuteReply::default(), Some(request)),
                 cx,
             );
-            self.receive(JupyterMessage::new(Status::idle(), Some(request)), cx);
+            self.kernel
+                .receive(JupyterMessage::new(Status::idle(), Some(request)), cx);
         }
 
         fn rows(&self, cx: &mut VisualTestContext) -> Vec<String> {
@@ -1169,6 +1132,7 @@ mod tests {
 
         // When R stops, its packages are gone from the pane.
         harness
+            .kernel
             .session
             .update(cx, |session, cx| session.stop(cx))
             .detach();

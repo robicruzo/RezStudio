@@ -13,7 +13,7 @@ path = "src/runtime.rs"
 doctest = false
 
 [features]
-test-support = ["dep:async-dispatcher"]
+test-support = ["dep:async-dispatcher", "gpui/test-support"]
 
 [dependencies]
 anyhow.workspace = true

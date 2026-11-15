@@ -1499,38 +1499,41 @@ fn spawn_kernel_io(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Entity, TestAppContext, VisualTestContext};
-    use jupyter_protocol::{
-        ExecuteReply, InputRequest, IsCompleteReply, KernelInfoReply, Status, Stdio, StreamContent,
+    use crate::test_support::{
+        FakeKernel, comm_message, fake_session, kernel_info_reply, rpc_reply_content, rpc_request,
     };
-    use languages::r::RInstallationSource;
+    use gpui::{TestAppContext, VisualTestContext};
+    use jupyter_protocol::{
+        ExecuteReply, InputRequest, IsCompleteReply, Status, Stdio, StreamContent,
+    };
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    /// A fake kernel, plus the events its session has emitted.
     struct Harness {
-        session: Entity<KernelSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
-        stdin: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
         events: Rc<RefCell<Vec<SessionEvent>>>,
+    }
+
+    impl std::ops::Deref for Harness {
+        type Target = FakeKernel;
+
+        fn deref(&self) -> &FakeKernel {
+            &self.kernel
+        }
+    }
+
+    impl std::ops::DerefMut for Harness {
+        fn deref_mut(&mut self) -> &mut FakeKernel {
+            &mut self.kernel
+        }
     }
 
     impl Harness {
         fn new(cx: &mut VisualTestContext) -> Self {
-            let r = RToolchainData {
-                r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                version: Some("4.5.3".to_string()),
-                source: RInstallationSource::Rig,
-            };
-            let session = cx.new(|cx| {
-                KernelSession::new(
-                    KernelLauncher::ark(Some(r), None),
-                    PathBuf::from("/projects/analysis"),
-                    HashMap::default(),
-                    cx,
-                )
-            });
+            let session = fake_session("/projects/analysis", cx);
             let events = Rc::new(RefCell::new(Vec::new()));
             cx.update(|_, cx| {
                 let events = events.clone();
@@ -1539,31 +1542,16 @@ mod tests {
                 })
                 .detach();
             });
-            let (requests_tx, requests) = mpsc::channel(100);
-            let (stdin_tx, stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
             Self {
-                session,
-                requests,
-                stdin,
+                kernel: FakeKernel::connect(session, cx),
                 events,
             }
         }
 
-        fn next_request(&mut self) -> JupyterMessage {
-            self.requests.try_recv().expect("expected a request to Ark")
-        }
-
-        fn next_stdin(&mut self) -> JupyterMessage {
-            self.stdin.try_recv().expect("expected a message on stdin")
-        }
-
+        /// Delivers a message without running what it sets off, so tests
+        /// can look at the state in between.
         fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
+            self.kernel.deliver(message, cx);
         }
 
         fn take_events(&self) -> Vec<SessionEvent> {
@@ -1572,71 +1560,8 @@ mod tests {
 
         /// Consumes the startup requests and returns the UI and LSP comm ids.
         fn finish_startup(&mut self, cx: &mut VisualTestContext) -> (CommId, CommId) {
-            let kernel_info = self.next_request();
-            let ui_open = self.next_request();
-            let _frontend_ready = self.next_request();
-            let lsp_open = self.next_request();
-            let _variables_open = self.next_request();
-            let _help_open = self.next_request();
-            self.receive(
-                JupyterMessage::new(kernel_info_reply(), Some(&kernel_info)),
-                cx,
-            );
-            cx.run_until_parked();
-            let comm_id = |message: &JupyterMessage| match &message.content {
-                JupyterMessageContent::CommOpen(open) => open.comm_id.clone(),
-                other => panic!("expected comm_open, got {}", other.message_type()),
-            };
-            (comm_id(&ui_open), comm_id(&lsp_open))
-        }
-    }
-
-    fn kernel_info_reply() -> KernelInfoReply {
-        serde_json::from_value(json!({
-            "status": "ok",
-            "protocol_version": "5.3",
-            "implementation": "ark",
-            "implementation_version": "0.1.252",
-            "language_info": { "name": "R", "version": "4.5.3" },
-            "banner": "",
-            "help_links": [],
-            "debugger": false
-        }))
-        .unwrap()
-    }
-
-    fn comm_message(comm_id: &CommId, data: serde_json::Value) -> JupyterMessage {
-        let serde_json::Value::Object(data) = data else {
-            panic!("comm data must be an object");
-        };
-        JupyterMessage::new(
-            CommMsg {
-                comm_id: comm_id.clone(),
-                data,
-            },
-            None,
-        )
-    }
-
-    fn rpc_request(content: serde_json::Value) -> JupyterMessage {
-        JupyterMessage::new(
-            UnknownMessage {
-                msg_type: RPC_REQUEST_MSG_TYPE.to_string(),
-                content,
-            },
-            None,
-        )
-    }
-
-    fn rpc_reply_content(message: &JupyterMessage, request: &JupyterMessage) -> serde_json::Value {
-        assert_eq!(message.header.msg_type, RPC_REPLY_MSG_TYPE);
-        assert_eq!(
-            message.parent_header.as_ref().map(|header| &header.msg_id),
-            Some(&request.header.msg_id)
-        );
-        match &message.content {
-            JupyterMessageContent::UnknownMessage(unknown) => unknown.content.clone(),
-            other => panic!("expected rpc_reply, got {}", other.message_type()),
+            let comms = self.kernel.finish_startup(cx);
+            (comms.ui, comms.lsp)
         }
     }
 

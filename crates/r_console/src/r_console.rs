@@ -1233,23 +1233,22 @@ impl Panel for ConsolePanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::channel::mpsc;
+
     use gpui::{TestAppContext, VisualTestContext};
     use jupyter_protocol::{
         ErrorOutput, ExecuteResult, ExecutionCount, InputRequest as JupyterInputRequest,
-        IsCompleteReply, JupyterMessage, KernelInfoReply, Media, StreamContent,
+        IsCompleteReply, JupyterMessage, Media, StreamContent,
     };
-    use languages::r::{RInstallationSource, RToolchainData};
+
     use project::{FakeFs, Project};
+    use runtime::test_support::FakeKernel;
     use settings::SettingsStore;
     use workspace::MultiWorkspace;
 
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<ConsolePanel>,
-        session: Entity<KernelSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
-        stdin: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
     }
 
     impl Harness {
@@ -1275,56 +1274,19 @@ mod tests {
             workspace.update_in(cx, |workspace, window, cx| {
                 workspace.add_panel(panel.clone(), window, cx)
             });
-            let session = cx.new(|cx| {
-                KernelSession::new(
-                    runtime::KernelLauncher::ark(
-                        Some(RToolchainData {
-                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                            version: Some("4.5.3".to_string()),
-                            source: RInstallationSource::Rig,
-                        }),
-                        None,
-                    ),
-                    PathBuf::from("/projects/analysis"),
-                    Default::default(),
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
+            let mut kernel = FakeKernel::start("/projects/analysis", cx);
+            kernel.take_startup_requests();
             panel.update_in(cx, |panel, window, cx| {
-                panel.set_session(session.clone(), window, cx)
+                panel.set_session(kernel.session.clone(), window, cx)
             });
-
-            // Startup: answer kernel_info so R is idle, and drop the rest: the UI
-            // comm, `frontend_ready`, and the LSP, variables and help comms.
-            let kernel_info = requests.try_recv().unwrap();
-            for _ in 0..5 {
-                requests.try_recv().unwrap();
-            }
-            let harness = Self {
+            let mut harness = Self {
                 workspace,
                 panel,
-                session,
-                requests,
-                stdin,
+                kernel,
             };
-            harness.receive(
-                JupyterMessage::new(kernel_info_reply(), Some(&kernel_info)),
-                cx,
-            );
-            cx.run_until_parked();
+            // Answering kernel_info makes R idle.
+            harness.kernel.answer_kernel_info(cx);
             (harness, cx)
-        }
-
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
         }
 
         fn type_input(&self, text: &str, cx: &mut VisualTestContext) {
@@ -1352,20 +1314,6 @@ mod tests {
         }
     }
 
-    fn kernel_info_reply() -> KernelInfoReply {
-        serde_json::from_value(serde_json::json!({
-            "status": "ok",
-            "protocol_version": "5.3",
-            "implementation": "ark",
-            "implementation_version": "0.1.252",
-            "language_info": { "name": "R", "version": "4.5.3" },
-            "banner": "",
-            "help_links": [],
-            "debugger": false
-        }))
-        .unwrap()
-    }
-
     fn idle(request: &JupyterMessage) -> JupyterMessage {
         JupyterMessage::new(jupyter_protocol::Status::idle(), Some(request))
     }
@@ -1377,7 +1325,7 @@ mod tests {
 
         harness.type_input("1 + 1", cx);
         harness.press_enter(cx);
-        let check = harness.requests.try_recv().unwrap();
+        let check = harness.kernel.requests.try_recv().unwrap();
         let JupyterMessageContent::IsCompleteRequest(request) = &check.content else {
             panic!(
                 "expected is_complete_request, got {}",
@@ -1385,7 +1333,7 @@ mod tests {
             );
         };
         assert_eq!(request.code, "1 + 1");
-        harness.receive(
+        harness.kernel.receive(
             JupyterMessage::new(
                 IsCompleteReply::new(IsCompleteReplyStatus::Complete, String::new()),
                 Some(&check),
@@ -1393,7 +1341,7 @@ mod tests {
             cx,
         );
 
-        let execute = harness.requests.try_recv().unwrap();
+        let execute = harness.kernel.requests.try_recv().unwrap();
         let JupyterMessageContent::ExecuteRequest(request) = &execute.content else {
             panic!("expected execute_request, got {}", execute.header.msg_type);
         };
@@ -1401,7 +1349,7 @@ mod tests {
         assert_eq!(harness.input_text(cx), "");
         assert!(harness.output(cx).contains("> 1 + 1"));
 
-        harness.receive(
+        harness.kernel.receive(
             JupyterMessage::new(
                 ExecuteResult::new(
                     ExecutionCount::new(1),
@@ -1413,7 +1361,7 @@ mod tests {
             ),
             cx,
         );
-        harness.receive(idle(&execute), cx);
+        harness.kernel.receive(idle(&execute), cx);
         assert!(harness.output(cx).contains("[1] 2"));
     }
 
@@ -1422,8 +1370,8 @@ mod tests {
         let (mut harness, cx) = Harness::new(cx).await;
         harness.type_input("mean(", cx);
         harness.press_enter(cx);
-        let check = harness.requests.try_recv().unwrap();
-        harness.receive(
+        let check = harness.kernel.requests.try_recv().unwrap();
+        harness.kernel.receive(
             JupyterMessage::new(
                 IsCompleteReply::new(IsCompleteReplyStatus::Incomplete, String::new()),
                 Some(&check),
@@ -1432,7 +1380,7 @@ mod tests {
         );
         assert!(harness.input_text(cx).starts_with("mean(\n"));
         assert!(
-            harness.requests.try_recv().is_err(),
+            harness.kernel.requests.try_recv().is_err(),
             "nothing should run yet"
         );
     }
@@ -1445,7 +1393,7 @@ mod tests {
                 .execute("f <- function(x) {\n  x + 1\n}\n", cx)
                 .unwrap()
         });
-        let execute = harness.requests.try_recv().unwrap();
+        let execute = harness.kernel.requests.try_recv().unwrap();
         let JupyterMessageContent::ExecuteRequest(request) = &execute.content else {
             panic!("expected execute_request");
         };
@@ -1491,7 +1439,7 @@ mod tests {
     #[gpui::test]
     async fn test_readline_prompt_is_answered_from_the_input(cx: &mut TestAppContext) {
         let (mut harness, cx) = Harness::new(cx).await;
-        harness.receive(
+        harness.kernel.receive(
             JupyterMessage::new(
                 JupyterInputRequest {
                     prompt: "Name: ".into(),
@@ -1513,13 +1461,13 @@ mod tests {
 
         harness.type_input("Ada", cx);
         harness.press_enter(cx);
-        let reply = harness.stdin.try_recv().unwrap();
+        let reply = harness.kernel.stdin.try_recv().unwrap();
         let JupyterMessageContent::InputReply(reply) = &reply.content else {
             panic!("expected input_reply");
         };
         assert_eq!(reply.value, "Ada");
         assert!(
-            harness.requests.try_recv().is_err(),
+            harness.kernel.requests.try_recv().is_err(),
             "readline input must not run as code"
         );
         assert!(harness.output(cx).contains("Name: Ada"));
@@ -1536,8 +1484,8 @@ mod tests {
         harness.panel.update(cx, |panel, cx| {
             panel.execute("log(-1); stop('boom')", cx).unwrap()
         });
-        let execute = harness.requests.try_recv().unwrap();
-        harness.receive(
+        let execute = harness.kernel.requests.try_recv().unwrap();
+        harness.kernel.receive(
             JupyterMessage::new(
                 StreamContent {
                     name: Stdio::Stderr,
@@ -1547,7 +1495,7 @@ mod tests {
             ),
             cx,
         );
-        harness.receive(
+        harness.kernel.receive(
             JupyterMessage::new(
                 ErrorOutput {
                     ename: String::new(),
@@ -1574,8 +1522,8 @@ mod tests {
                 session.execute_inline("print(\"from a chunk\")".into(), cx)
             })
             .unwrap();
-        let chunk = harness.requests.try_recv().unwrap();
-        harness.receive(
+        let chunk = harness.kernel.requests.try_recv().unwrap();
+        harness.kernel.receive(
             JupyterMessage::new(
                 StreamContent {
                     name: Stdio::Stdout,
@@ -1725,7 +1673,7 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let execute = harness.requests.try_recv().unwrap();
+        let execute = harness.kernel.requests.try_recv().unwrap();
         let JupyterMessageContent::ExecuteRequest(request) = &execute.content else {
             panic!("expected execute_request, got {}", execute.header.msg_type);
         };
@@ -1876,38 +1824,12 @@ mod tests {
             workspace.open_panel::<ConsolePanel>(window, cx);
             panel
         });
-        let session = cx.new(|cx| {
-            KernelSession::new(
-                runtime::KernelLauncher::ark(
-                    Some(RToolchainData {
-                        r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                        version: Some("4.5.3".to_string()),
-                        source: RInstallationSource::Rig,
-                    }),
-                    None,
-                ),
-                PathBuf::from("/project"),
-                Default::default(),
-                cx,
-            )
-        });
-        let (requests_tx, mut requests) = mpsc::channel(100);
-        let (stdin_tx, _stdin) = mpsc::channel(100);
-        session.update(cx, |session, cx| {
-            session.connect_for_test(requests_tx, stdin_tx, cx)
-        });
+        let mut kernel = FakeKernel::start("/project", cx);
+        kernel.take_startup_requests();
         panel.update_in(cx, |panel, window, cx| {
-            panel.set_session(session.clone(), window, cx)
+            panel.set_session(kernel.session.clone(), window, cx)
         });
-        let kernel_info = requests.try_recv().unwrap();
-        session.update_in(cx, |session, window, cx| {
-            session.receive_for_test(
-                &JupyterMessage::new(kernel_info_reply(), Some(&kernel_info)),
-                window,
-                cx,
-            )
-        });
-        cx.run_until_parked();
+        kernel.answer_kernel_info(cx);
 
         let input = panel.read_with(cx, |panel, _| panel.input.clone());
         // The completion menu only opens in a focused editor.

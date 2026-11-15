@@ -631,13 +631,12 @@ impl Panel for HelpPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::channel::mpsc;
+
     use gpui::{TestAppContext, VisualTestContext};
-    use jupyter_protocol::{
-        CommId, CommMsg, JupyterMessage, JupyterMessageContent, KernelInfoReply,
-    };
-    use languages::r::{RInstallationSource, RToolchainData};
+    use jupyter_protocol::{CommId, CommMsg, JupyterMessage, JupyterMessageContent};
+
     use project::{FakeFs, Project};
+    use runtime::test_support::FakeKernel;
     use serde_json::{Value, json};
     use settings::SettingsStore;
     use std::cell::RefCell;
@@ -653,10 +652,9 @@ mod tests {
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<HelpPanel>,
-        session: Entity<KernelSession>,
+        kernel: FakeKernel,
         web_view: Entity<WebView>,
         calls: Rc<RefCell<Vec<String>>>,
-        requests: mpsc::Receiver<JupyterMessage>,
         help_comm: CommId,
     }
 
@@ -691,31 +689,10 @@ mod tests {
                 .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
-            let session = cx.new(|cx| {
-                KernelSession::new(
-                    runtime::KernelLauncher::ark(
-                        Some(RToolchainData {
-                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                            version: Some("4.5.3".to_string()),
-                            source: RInstallationSource::Rig,
-                        }),
-                        None,
-                    ),
-                    project_root.to_path_buf(),
-                    Default::default(),
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, _stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
-            let kernel_info = requests.try_recv().unwrap();
-            while requests.try_recv().is_ok() {}
-            let help_comm = CommId(
-                session.read_with(cx, |session, _| session.help_comm_id().unwrap().to_string()),
-            );
+            let mut kernel = FakeKernel::start(project_root, cx);
+            let comms = kernel.take_startup_requests();
+            let session = kernel.session.clone();
+            let help_comm = comms.help;
 
             let calls: Rc<RefCell<Vec<String>>> = Rc::default();
             let web_view =
@@ -735,36 +712,21 @@ mod tests {
                 workspace.add_panel(panel.clone(), window, cx);
                 panel
             });
-            let harness = Self {
+            let mut harness = Self {
                 workspace,
                 panel,
-                session,
+                kernel,
                 web_view,
                 calls,
-                requests,
                 help_comm,
             };
-            let reply: KernelInfoReply = serde_json::from_value(json!({
-                "status": "ok", "protocol_version": "5.3", "implementation": "ark",
-                "implementation_version": "0.1.252",
-                "language_info": { "name": "R", "version": "4.5.3" },
-                "banner": "", "help_links": [], "debugger": false
-            }))
-            .unwrap();
-            harness.receive(JupyterMessage::new(reply, Some(&kernel_info)), cx);
+            harness.kernel.answer_kernel_info(cx);
             (harness, cx)
-        }
-
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
         }
 
         /// Ark sending a page, as after `?mean`.
         fn show_help(&self, url: &str, cx: &mut VisualTestContext) {
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(
                     CommMsg {
                         comm_id: self.help_comm.clone(),
@@ -815,7 +777,7 @@ mod tests {
 
         /// Answers the pending `show_help_topic` request, returning its topic.
         fn answer_topic(&mut self, found: bool, cx: &mut VisualTestContext) -> String {
-            let request = std::iter::from_fn(|| self.requests.try_recv().ok())
+            let request = std::iter::from_fn(|| self.kernel.requests.try_recv().ok())
                 .find(|request| {
                     matches!(&request.content, JupyterMessageContent::CommMsg(message)
                         if message.data["method"] == "show_help_topic")
@@ -829,7 +791,7 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(
                     CommMsg {
                         comm_id: self.help_comm.clone(),
@@ -1123,7 +1085,7 @@ mod tests {
         cx.dispatch_action(ShowHelpAtCursor);
         cx.run_until_parked();
         assert!(
-            std::iter::from_fn(|| harness.requests.try_recv().ok())
+            std::iter::from_fn(|| harness.kernel.requests.try_recv().ok())
                 .next()
                 .is_none()
         );

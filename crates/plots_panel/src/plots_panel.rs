@@ -863,17 +863,16 @@ impl Panel for PlotsPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::channel::mpsc;
+
     use gpui::{TestAppContext, VisualTestContext, size};
-    use jupyter_protocol::{
-        CommId, CommMsg, CommOpen, JupyterMessage, JupyterMessageContent, KernelInfoReply,
-    };
-    use languages::r::{RInstallationSource, RToolchainData};
+    use jupyter_protocol::{CommId, CommMsg, CommOpen, JupyterMessage, JupyterMessageContent};
+
     use project::{FakeFs, Project};
     use runtime::comms::PLOT_COMM_TARGET;
     use serde_json::{Value, json};
     use settings::SettingsStore;
-    use std::path::PathBuf;
+
+    use runtime::test_support::FakeKernel;
     use workspace::MultiWorkspace;
 
     #[gpui::test]
@@ -911,8 +910,7 @@ mod tests {
     struct Harness {
         workspace: Entity<Workspace>,
         panel: Entity<PlotsPanel>,
-        session: Entity<KernelSession>,
-        requests: mpsc::Receiver<JupyterMessage>,
+        kernel: FakeKernel,
         ui_comm: String,
     }
 
@@ -939,31 +937,9 @@ mod tests {
                 .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
                 .unwrap();
             let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
-            let session = cx.new(|cx| {
-                KernelSession::new(
-                    runtime::KernelLauncher::ark(
-                        Some(RToolchainData {
-                            r_home: PathBuf::from("/opt/R/4.5.3/lib/R"),
-                            version: Some("4.5.3".to_string()),
-                            source: RInstallationSource::Rig,
-                        }),
-                        None,
-                    ),
-                    PathBuf::from("/projects/analysis"),
-                    Default::default(),
-                    cx,
-                )
-            });
-            let (requests_tx, mut requests) = mpsc::channel(100);
-            let (stdin_tx, _stdin) = mpsc::channel(100);
-            session.update(cx, |session, cx| {
-                session.connect_for_test(requests_tx, stdin_tx, cx)
-            });
-            let kernel_info = requests.try_recv().unwrap();
-            let ui_comm = match requests.try_recv().unwrap().content {
-                JupyterMessageContent::CommOpen(open) => open.comm_id.0,
-                other => panic!("expected the UI comm, got {}", other.message_type()),
-            };
+            let mut kernel = FakeKernel::start("/projects/analysis", cx);
+            let comms = kernel.take_startup_requests();
+            let session = kernel.session.clone();
             let panel = workspace.update_in(cx, |workspace, window, cx| {
                 let panel = cx.new(|cx| {
                     let mut panel = PlotsPanel::new(workspace, window, cx);
@@ -976,28 +952,13 @@ mod tests {
             let mut harness = Self {
                 workspace,
                 panel,
-                session,
-                requests,
-                ui_comm,
+                kernel,
+                ui_comm: comms.ui.0,
             };
-            let reply: KernelInfoReply = serde_json::from_value(json!({
-                "status": "ok", "protocol_version": "5.3", "implementation": "ark",
-                "implementation_version": "0.1.252",
-                "language_info": { "name": "R", "version": "4.5.3" },
-                "banner": "", "help_links": [], "debugger": false
-            }))
-            .unwrap();
-            harness.receive(JupyterMessage::new(reply, Some(&kernel_info)), cx);
+            harness.kernel.answer_kernel_info(cx);
             // The rest of startup: `frontend_ready` and the LSP and variables comms.
-            while harness.requests.try_recv().is_ok() {}
+            harness.kernel.take_requests();
             (harness, cx)
-        }
-
-        fn receive(&self, message: JupyterMessage, cx: &mut VisualTestContext) {
-            self.session.update_in(cx, |session, window, cx| {
-                session.receive_for_test(&message, window, cx)
-            });
-            cx.run_until_parked();
         }
 
         /// Ark sending a new plot, drawn at `drawn_at`.
@@ -1005,7 +966,7 @@ mod tests {
             let Value::Object(data) = json!({ "pre_render": pre_render(drawn_at) }) else {
                 unreachable!()
             };
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(
                     CommOpen {
                         comm_id: CommId(comm_id.to_string()),
@@ -1020,23 +981,12 @@ mod tests {
         }
 
         fn event(&self, comm_id: &str, data: Value, cx: &mut VisualTestContext) {
-            let Value::Object(data) = data else {
-                panic!("event data must be an object");
-            };
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: CommId(comm_id.to_string()),
-                        data,
-                    },
-                    None,
-                ),
-                cx,
-            );
+            self.kernel
+                .send_comm_message(&CommId(comm_id.to_string()), data, cx);
         }
 
         fn drain(&mut self) -> Vec<(Request, JupyterMessage)> {
-            std::iter::from_fn(|| self.requests.try_recv().ok())
+            std::iter::from_fn(|| self.kernel.requests.try_recv().ok())
                 .map(|message| {
                     let request = match &message.content {
                         JupyterMessageContent::CommMsg(comm) => Request {
@@ -1089,7 +1039,7 @@ mod tests {
             else {
                 unreachable!()
             };
-            self.receive(
+            self.kernel.receive(
                 JupyterMessage::new(
                     CommMsg {
                         comm_id: CommId(comm_id.to_string()),
@@ -1102,22 +1052,7 @@ mod tests {
         }
 
         fn reply(&self, request: &JupyterMessage, data: Value, cx: &mut VisualTestContext) {
-            let Value::Object(data) = data else {
-                panic!("reply data must be an object");
-            };
-            let JupyterMessageContent::CommMsg(comm) = &request.content else {
-                panic!("expected a comm request");
-            };
-            self.receive(
-                JupyterMessage::new(
-                    CommMsg {
-                        comm_id: comm.comm_id.clone(),
-                        data,
-                    },
-                    Some(request),
-                ),
-                cx,
-            );
+            self.kernel.reply_to_comm_request(request, data, cx);
         }
 
         /// The settings that fill the pane as it's laid out now.
@@ -1639,12 +1574,13 @@ mod tests {
             .workspace
             .read_with(cx, |workspace, _| workspace.right_dock().clone());
         harness
+            .kernel
             .session
             .update(cx, |session, cx| {
                 session.execute_inline("plot(1)".into(), cx)
             })
             .unwrap();
-        harness.requests.try_recv().unwrap();
+        harness.kernel.requests.try_recv().unwrap();
 
         harness.open_plot("chunk-plot", ark_default(), cx);
         harness.event(
@@ -1667,12 +1603,13 @@ mod tests {
         harness.answer_render("plot-1", cx);
 
         harness
+            .kernel
             .session
             .update(cx, |session, cx| session.stop(cx))
             .detach();
         cx.run_until_parked();
         // Ark's shutdown request.
-        while harness.requests.try_recv().is_ok() {}
+        harness.kernel.take_requests();
         harness.panel.read_with(cx, |panel, _| {
             let plot = panel.history.current().unwrap();
             assert!(!plot.live);
